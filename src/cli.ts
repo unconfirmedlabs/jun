@@ -3,10 +3,14 @@
  * Jun CLI — Sui checkpoint stream explorer.
  *
  * Usage:
- *   jun stream                              # stream all checkpoint data
- *   jun stream --include events             # only events
+ *   jun stream                                    # stream all checkpoint data
+ *   jun stream --include events                   # only events
  *   jun stream --include events --filter pressing::Record
- *   jun stream --json                       # JSON lines output
+ *   jun stream --json                             # JSON lines output
+ *   jun stream --json --output events.jsonl       # write to file
+ *   jun stream --until-checkpoint 318200000       # stop at checkpoint
+ *   jun stream --duration 30s                     # stream for 30 seconds
+ *   jun stream --until "2026-03-28T00:00:00Z"     # stop at timestamp
  */
 import { program } from "commander";
 import { createGrpcClient, type GrpcCheckpointResponse, type GrpcEvent } from "./grpc.ts";
@@ -23,7 +27,6 @@ const INCLUDE_MASKS: Record<string, string[]> = {
   transactions: ["transactions.transaction", "transactions.signatures", "transactions.digest", "summary.timestamp"],
 };
 
-/** All paths — the default. */
 const ALL_MASK = [...new Set(Object.values(INCLUDE_MASKS).flat())];
 
 function buildReadMask(includes: string[]): string[] {
@@ -42,13 +45,65 @@ function buildReadMask(includes: string[]): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Stop conditions
+// ---------------------------------------------------------------------------
+
+interface StopConditions {
+  untilCheckpoint?: bigint;
+  untilTimestamp?: number; // epoch ms
+  deadline?: number; // epoch ms
+}
+
+function parseStopConditions(opts: { untilCheckpoint?: string; until?: string; duration?: string }): StopConditions {
+  const conditions: StopConditions = {};
+
+  if (opts.untilCheckpoint) {
+    conditions.untilCheckpoint = BigInt(opts.untilCheckpoint);
+  }
+
+  if (opts.until) {
+    const ts = new Date(opts.until).getTime();
+    if (isNaN(ts)) {
+      console.error(`[jun] invalid --until timestamp: ${opts.until}`);
+      process.exit(1);
+    }
+    conditions.untilTimestamp = ts;
+  }
+
+  if (opts.duration) {
+    const match = opts.duration.match(/^(\d+)(s|m|h)$/);
+    if (!match) {
+      console.error(`[jun] invalid --duration: ${opts.duration} (use e.g. 30s, 5m, 1h)`);
+      process.exit(1);
+    }
+    const value = parseInt(match[1]);
+    const unit = match[2];
+    const ms = unit === "h" ? value * 3600_000 : unit === "m" ? value * 60_000 : value * 1000;
+    conditions.deadline = Date.now() + ms;
+  }
+
+  return conditions;
+}
+
+/** Returns true if the stream should stop. All checks are O(1) comparisons. */
+function shouldStop(stop: StopConditions, seq: string, checkpointTimestamp: number): boolean {
+  if (stop.untilCheckpoint !== undefined && BigInt(seq) >= stop.untilCheckpoint) return true;
+  if (stop.untilTimestamp !== undefined && checkpointTimestamp >= stop.untilTimestamp) return true;
+  if (stop.deadline !== undefined && Date.now() >= stop.deadline) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
-function formatTimestamp(summary: GrpcCheckpointResponse["checkpoint"]["summary"]): string {
-  if (!summary?.timestamp) return "unknown";
-  const ms = BigInt(summary.timestamp.seconds) * 1000n + BigInt(Math.floor(summary.timestamp.nanos / 1_000_000));
-  return new Date(Number(ms)).toISOString();
+function getTimestampMs(summary: GrpcCheckpointResponse["checkpoint"]["summary"]): number {
+  if (!summary?.timestamp) return Date.now();
+  return Number(BigInt(summary.timestamp.seconds) * 1000n + BigInt(Math.floor(summary.timestamp.nanos / 1_000_000)));
+}
+
+function formatTimestamp(ms: number): string {
+  return new Date(ms).toISOString();
 }
 
 function formatEvent(ev: GrpcEvent, txDigest: string): string {
@@ -82,6 +137,22 @@ function formatEffect(effects: any, txDigest: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Output writer
+// ---------------------------------------------------------------------------
+
+function createWriter(outputPath?: string): { write(line: string): void; close(): void } {
+  if (!outputPath) {
+    return { write: (line) => console.log(line), close: () => {} };
+  }
+  const file = Bun.file(outputPath);
+  const writer = file.writer();
+  return {
+    write: (line) => { writer.write(line + "\n"); },
+    close: () => { writer.flush(); writer.end(); },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Stream command
 // ---------------------------------------------------------------------------
 
@@ -97,20 +168,38 @@ program
   .option("--include <types...>", "data to include: events, effects, balance-changes, objects, transactions (default: all)")
   .option("--filter <type>", "only show events matching this type substring")
   .option("--json", "output as JSON lines instead of formatted text", false)
-  .action(async (opts: { url: string; include?: string[]; filter?: string; json: boolean }) => {
+  .option("--output <path>", "write output to file (implies --json)")
+  .option("--until-checkpoint <seq>", "stop after reaching this checkpoint")
+  .option("--until <timestamp>", "stop after this ISO timestamp (e.g. 2026-03-28T00:00:00Z)")
+  .option("--duration <time>", "stream for this duration then stop (e.g. 30s, 5m, 1h)")
+  .action(async (opts: {
+    url: string;
+    include?: string[];
+    filter?: string;
+    json: boolean;
+    output?: string;
+    untilCheckpoint?: string;
+    until?: string;
+    duration?: string;
+  }) => {
     const includes = opts.include ?? [];
     const readMask = buildReadMask(includes);
     const showEvents = includes.length === 0 || includes.includes("events");
     const showEffects = includes.length === 0 || includes.includes("effects");
     const showBalanceChanges = includes.length === 0 || includes.includes("balance-changes");
+    const useJson = opts.json || !!opts.output;
+    const stop = parseStopConditions(opts);
+    const writer = createWriter(opts.output);
 
     const client = createGrpcClient({ url: opts.url, readMask });
 
     let stopped = false;
+    let checkpointCount = 0;
     const shutdown = () => {
       if (stopped) process.exit(1);
       stopped = true;
-      console.error("\n[jun] stopping...");
+      console.error(`\n[jun] stopping... (${checkpointCount} checkpoints streamed)`);
+      writer.close();
       client.close();
     };
     process.on("SIGINT", shutdown);
@@ -120,6 +209,10 @@ program
     if (includes.length > 0) console.error(`[jun] include: ${includes.join(", ")}`);
     else console.error(`[jun] include: all`);
     if (opts.filter) console.error(`[jun] filter: ${opts.filter}`);
+    if (stop.untilCheckpoint) console.error(`[jun] until checkpoint: ${stop.untilCheckpoint}`);
+    if (stop.untilTimestamp) console.error(`[jun] until: ${formatTimestamp(stop.untilTimestamp)}`);
+    if (stop.deadline) console.error(`[jun] duration: ${opts.duration}`);
+    if (opts.output) console.error(`[jun] output: ${opts.output}`);
     console.error("");
 
     try {
@@ -128,8 +221,17 @@ program
 
         const { checkpoint } = response;
         const seq = response.cursor;
-        const ts = formatTimestamp(checkpoint.summary);
+        const tsMs = getTimestampMs(checkpoint.summary);
+        const ts = formatTimestamp(tsMs);
         const txCount = checkpoint.transactions?.length ?? 0;
+
+        // Check stop conditions (O(1) comparisons)
+        if (shouldStop(stop, seq, tsMs)) {
+          console.error(`[jun] stop condition reached at checkpoint ${seq}`);
+          break;
+        }
+
+        checkpointCount++;
 
         // Collect data from transactions
         const events: Array<{ event: GrpcEvent; txDigest: string }> = [];
@@ -171,7 +273,7 @@ program
         if (!hasData && (opts.filter || includes.length > 0)) continue;
         if (txCount === 0) continue;
 
-        if (opts.json) {
+        if (useJson) {
           const record: any = { checkpoint: seq, timestamp: ts, txCount };
           if (filteredEvents.length > 0) {
             record.events = filteredEvents.map((e) => ({
@@ -193,7 +295,7 @@ program
               tx: e.txDigest,
             }));
           }
-          console.log(JSON.stringify(record));
+          writer.write(JSON.stringify(record));
         } else {
           console.log(`── checkpoint ${seq} ── ${ts} ── ${txCount} tx(s) ──`);
 
@@ -230,8 +332,9 @@ program
       }
     }
 
+    writer.close();
     client.close();
-    console.error("[jun] done");
+    console.error(`[jun] done (${checkpointCount} checkpoints streamed)`);
   });
 
 program.parse();
