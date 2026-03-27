@@ -6,8 +6,8 @@
  *   jun stream                                    # stream all checkpoint data
  *   jun stream --include events                   # only events
  *   jun stream --include events --filter pressing::Record
- *   jun stream --json                             # JSON lines output
- *   jun stream --json --output events.jsonl       # write to file
+ *   jun stream --jsonl                             # JSON lines output
+ *   jun stream --jsonl --output events.jsonl       # write to file
  *   jun stream --until-checkpoint 318200000       # stop at checkpoint
  *   jun stream --duration 30s                     # stream for 30 seconds
  *   jun stream --until "2026-03-28T00:00:00Z"     # stop at timestamp
@@ -167,8 +167,8 @@ program
   .option("--url <url>", "gRPC endpoint URL", "slc1.rpc.testnet.sui.mirai.cloud:443")
   .option("--include <types...>", "data to include: events, effects, balance-changes, objects, transactions (default: all)")
   .option("--filter <type>", "only show events matching this type substring")
-  .option("--json", "output as JSON lines instead of formatted text", false)
-  .option("--output <path>", "write output to file (implies --json)")
+  .option("--jsonl", "output as JSON lines instead of formatted text", false)
+  .option("--output <path>", "write output to file (implies --jsonl)")
   .option("--until-checkpoint <seq>", "stop after reaching this checkpoint")
   .option("--until <timestamp>", "stop after this ISO timestamp (e.g. 2026-03-28T00:00:00Z)")
   .option("--duration <time>", "stream for this duration then stop (e.g. 30s, 5m, 1h)")
@@ -176,7 +176,7 @@ program
     url: string;
     include?: string[];
     filter?: string;
-    json: boolean;
+    jsonl: boolean;
     output?: string;
     untilCheckpoint?: string;
     until?: string;
@@ -187,7 +187,7 @@ program
     const showEvents = includes.length === 0 || includes.includes("events");
     const showEffects = includes.length === 0 || includes.includes("effects");
     const showBalanceChanges = includes.length === 0 || includes.includes("balance-changes");
-    const useJson = opts.json || !!opts.output;
+    const useJson = opts.jsonl || !!opts.output;
     const stop = parseStopConditions(opts);
     const writer = createWriter(opts.output);
 

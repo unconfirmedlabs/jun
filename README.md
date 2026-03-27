@@ -45,7 +45,7 @@ bun run src/cli.ts stream
 bun run src/cli.ts stream --filter "pressing::RecordPressedEvent"
 
 # JSON lines output (pipe to jq, files, etc.)
-bun run src/cli.ts stream --json
+bun run src/cli.ts stream --jsonl
 
 # Custom gRPC endpoint
 bun run src/cli.ts stream --url "your-fullnode:443"
