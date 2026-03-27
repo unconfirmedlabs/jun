@@ -1,0 +1,26 @@
+{
+  "name": "jun",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "jun": "./src/cli.ts"
+  },
+  "scripts": {
+    "postinstall": "bun scripts/fetch-protos.ts",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.3",
+    "@grpc/proto-loader": "^0.8.0",
+    "@mysten/bcs": "^2.0.3",
+    "commander": "^14.0.3",
+    "p-map": "^7.0.4"
+  }
+}
