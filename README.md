@@ -120,10 +120,6 @@ commander            CLI framework
 p-map                Concurrent backfill
 ```
 
-## Name
-
-Jun (潤) — moisture, enrich, profit. Data flows from chain to storage.
-
 ## License
 
 MIT
