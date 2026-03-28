@@ -9,7 +9,7 @@
 import { zstdDecompressSync } from "zlib";
 import { bcs as suiBcs } from "@mysten/sui/bcs";
 import { bcs } from "@mysten/bcs";
-import { verifyCheckpoint as keiVerify, PreparedCommittee } from "@unconfirmed/kei/src/index";
+import { verifyCheckpoint as keiVerify, PreparedCommittee } from "@unconfirmed/kei";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import protobuf from "protobufjs";
