@@ -105,24 +105,54 @@ sqlite3 -column -header testnet.sqlite "
   WHERE package_id = '0x10ad578...'
 "
 
-# Transaction success rate
+# Transaction success rate and gas costs
 sqlite3 -column -header testnet.sqlite "
-  SELECT status, COUNT(*) as count
-  FROM effects
+  SELECT status, COUNT(*) as count, SUM(gas_computation) as total_gas
+  FROM transactions
   GROUP BY status
 "
 
-# Checkpoint throughput
+# Checkpoint time range
 sqlite3 -column -header testnet.sqlite "
-  SELECT
-    MIN(sequence_number) as first_checkpoint,
-    MAX(sequence_number) as last_checkpoint,
-    COUNT(*) as total,
-    MIN(timestamp) as start_time,
-    MAX(timestamp) as end_time
-  FROM checkpoints
+  SELECT MIN(timestamp) as start_time, MAX(timestamp) as end_time,
+         COUNT(DISTINCT checkpoint) as checkpoints
+  FROM transactions
 "
 ```
+
+### Replay
+
+Replay historical checkpoints from the [Sui checkpoint archive](https://checkpoints.mainnet.sui.io/) — every checkpoint from genesis, no pruning, no fullnode required.
+
+```bash
+# Replay 1000 checkpoints from mainnet genesis
+jun replay --from 0 --count 1000
+
+# Replay a specific range to SQLite
+jun replay --from 259000000 --to 259001000 --output mainnet.sqlite
+
+# Replay with cryptographic verification
+jun replay --from 259000000 --count 100 --verify
+
+# High concurrency for fast backfill
+jun replay --from 100000000 --count 10000 --concurrency 32 --output backfill.sqlite
+```
+
+#### Light client verification
+
+With `--verify`, each checkpoint is cryptographically verified using [kei](https://github.com/unconfirmedlabs/kei) — a pure TypeScript Sui light client. Every checkpoint's BLS12-381 aggregate signature is checked against the validator committee, proving the data was signed by a quorum (≥66.67%) of validators.
+
+```bash
+jun replay --from 259063382 --count 100 --verify --output verified.sqlite
+```
+
+The validator committee is fetched once per epoch (~24h) and cached. Verification adds ~11ms per checkpoint — negligible vs the network fetch time.
+
+No trust required in the archive CDN — the math proves the data is authentic.
+
+#### Data parity
+
+Stream and replay produce identical output for the same checkpoint range — transactions, digests, senders, status, gas costs, events, and timestamps all match byte-for-byte.
 
 ### Codegen
 
@@ -198,14 +228,18 @@ Jun uses `@grpc/grpc-js` with proto files directly from [MystenLabs/sui-apis](ht
 
 ## Roadmap
 
-- [x] Native gRPC checkpoint streaming
+- [x] Native gRPC checkpoint streaming (live from tip)
+- [x] Archive replay (historical from genesis)
+- [x] Light client verification via [kei](https://github.com/unconfirmedlabs/kei)
 - [x] BCS event decoding via `@mysten/bcs`
-- [x] CLI stream viewer with stop conditions
-- [x] SQLite export
-- [x] JSONL export
+- [x] Full TransactionKind BCS support (all 11 variants)
+- [x] CLI: stream, replay, codegen
+- [x] SQLite + JSONL export
 - [x] Auto-generate BCS schemas from on-chain type layouts
+- [x] Data parity between stream and replay
 - [ ] Typed event indexer (`defineIndexer()` with config file)
 - [ ] Postgres output with batch inserts (`Bun.sql`)
+- [ ] Balance changes (pending Sui accumulator feature on mainnet)
 - [ ] Parquet export (local files + S3)
 - [ ] `bun create jun` project scaffold
 
@@ -213,8 +247,10 @@ Jun uses `@grpc/grpc-js` with proto files directly from [MystenLabs/sui-apis](ht
 
 ```
 src/
-  cli.ts          CLI (jun stream, jun codegen)
+  cli.ts          CLI (jun stream, jun replay, jun codegen)
   grpc.ts         Native gRPC client (subscribe + fetch + type introspection)
+  archive.ts      Checkpoint archive client (fetch + zstd + proto + BCS decode + verify)
+  sui-bcs.ts      Complete TransactionKind BCS (all 11 variants the SDK is missing)
   codegen.ts      On-chain type → field DSL mapping
   schema.ts       Field DSL → BCS schemas + DDL
   processor.ts    Event matching + BCS decode
@@ -229,14 +265,16 @@ proto/            Sui gRPC proto files (fetched on install from sui-apis)
 ## Dependencies
 
 ```
-@grpc/grpc-js       Native gRPC client (HTTP/2)
+@grpc/grpc-js        Native gRPC client (HTTP/2)
 @grpc/proto-loader   Runtime proto file loading
 @mysten/bcs          BCS binary codec
+@unconfirmed/kei     Light client checkpoint verification (BLS12-381)
 commander            CLI framework
 p-map                Concurrent backfill
+protobufjs           Archive checkpoint decoding
 ```
 
-Zero runtime dependencies beyond these + Bun builtins (`bun:sqlite`).
+Zero additional runtime dependencies beyond these + Bun builtins (`bun:sqlite`, `zlib`).
 
 ## License
 
