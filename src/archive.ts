@@ -12,6 +12,7 @@ import { bcs } from "@mysten/bcs";
 import protobuf from "protobufjs";
 import path from "path";
 import type { GrpcCheckpointResponse, GrpcEvent } from "./grpc.ts";
+import { parseSender } from "./sui-bcs.ts";
 
 // ─── BCS types ───────────────────────────────────────────────────────────────
 
@@ -154,6 +155,10 @@ export function createArchiveClient(options?: ArchiveClientOptions): ArchiveClie
         const txMeta = effectsBcs ? decodeTxEffects(new Uint8Array(effectsBcs)) : null;
         const digest = tx.digest || txMeta?.digest || "";
 
+        // Decode sender from TransactionData BCS
+        const txDataBcs = tx.transaction?.bcs?.value as Uint8Array | undefined;
+        const sender = txDataBcs ? parseSender(new Uint8Array(txDataBcs)) : undefined;
+
         // Decode events from BCS
         const eventsBcs = tx.events?.bcs?.value as Uint8Array | undefined;
         let events: GrpcEvent[] = [];
@@ -178,6 +183,7 @@ export function createArchiveClient(options?: ArchiveClientOptions): ArchiveClie
 
         const txResult: any = {
           digest,
+          transaction: sender ? { sender } : undefined,
           events: events.length > 0 ? { events } : null,
         };
 

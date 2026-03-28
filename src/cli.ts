@@ -697,6 +697,7 @@ program
         if (sqliteWriter) {
           const txData = (checkpoint.transactions ?? []).map((tx: any) => ({
             digest: tx.digest,
+            sender: tx.transaction?.sender,
             status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
             gasComputation: tx.effects?.gasUsed?.computationCost ? parseInt(tx.effects.gasUsed.computationCost) : null,
             gasStorage: tx.effects?.gasUsed?.storageCost ? parseInt(tx.effects.gasUsed.storageCost) : null,
