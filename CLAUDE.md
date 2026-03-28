@@ -1,111 +1,79 @@
----
-description: Use Bun instead of Node.js, npm, pnpm, or vite.
-globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
-alwaysApply: false
----
+# Jun
+
+Sui event indexer for Bun. Native gRPC streaming over HTTP/2 with BCS binary decoding.
+
+## Runtime
 
 Default to using Bun instead of Node.js.
 
 - Use `bun <file>` instead of `node <file>` or `ts-node <file>`
 - Use `bun test` instead of `jest` or `vitest`
-- Use `bun build <file.html|file.ts|file.css>` instead of `webpack` or `esbuild`
-- Use `bun install` instead of `npm install` or `yarn install` or `pnpm install`
-- Use `bun run <script>` instead of `npm run <script>` or `yarn run <script>` or `pnpm run <script>`
-- Use `bunx <package> <command>` instead of `npx <package> <command>`
+- Use `bun install` instead of `npm install`
+- Use `bun run <script>` instead of `npm run <script>`
 - Bun automatically loads .env, so don't use dotenv.
-
-## APIs
-
-- `Bun.serve()` supports WebSockets, HTTPS, and routes. Don't use `express`.
-- `bun:sqlite` for SQLite. Don't use `better-sqlite3`.
-- `Bun.redis` for Redis. Don't use `ioredis`.
 - `Bun.sql` for Postgres. Don't use `pg` or `postgres.js`.
-- `WebSocket` is built-in. Don't use `ws`.
-- Prefer `Bun.file` over `node:fs`'s readFile/writeFile
-- Bun.$`ls` instead of execa.
 
-## Testing
+## Architecture
 
-Use `bun test` to run tests.
-
-```ts#index.test.ts
-import { test, expect } from "bun:test";
-
-test("hello world", () => {
-  expect(1).toBe(1);
-});
+```
+src/
+  cli.ts          CLI entry point (jun stream)
+  grpc.ts         Native gRPC client (subscribe + fetch)
+  schema.ts       Field DSL → BCS schemas + Postgres DDL
+  processor.ts    Event matching + BCS decode
+  state.ts        Cursor/watermark management
+  index.ts        defineIndexer() orchestrator
+  output/
+    postgres.ts   Batch inserts via Bun.sql
+proto/            Sui gRPC proto files (fetched on install, gitignored)
 ```
 
-## Frontend
+## Standard Event Columns
 
-Use HTML imports with `Bun.serve()`. Don't use `vite`. HTML imports fully support React, CSS, Tailwind.
+Every event table gets these automatically — users never declare them:
 
-Server:
+| Column | Type | Source |
+|--------|------|--------|
+| `checkpoint` | BIGINT | `response.cursor` |
+| `tx_digest` | TEXT | `tx.digest` |
+| `event_seq` | INTEGER | index within `tx.events.events[]` |
+| `sender` | TEXT | `ev.sender` |
+| `timestamp` | TIMESTAMPTZ | `checkpoint.summary.timestamp` |
 
-```ts#index.ts
-import index from "./index.html"
+No `gas_sponsor` — that's transaction metadata, not event metadata.
 
-Bun.serve({
-  routes: {
-    "/": index,
-    "/api/users/:id": {
-      GET: (req) => {
-        return new Response(JSON.stringify({ id: req.params.id }));
-      },
-    },
-  },
-  // optional websocket support
-  websocket: {
-    open: (ws) => {
-      ws.send("Hello, world!");
-    },
-    message: (ws, message) => {
-      ws.send(message);
-    },
-    close: (ws) => {
-      // handle close
-    }
-  },
-  development: {
-    hmr: true,
-    console: true,
-  }
-})
+## Default gRPC readMask
+
+```
+transactions.events
+transactions.digest
+summary.timestamp
 ```
 
-HTML files can import .tsx, .jsx or .js files directly and Bun's bundler will transpile & bundle automatically. `<link>` tags can point to stylesheets and Bun's CSS bundler will bundle.
+Minimal bandwidth. Only add more paths if the user explicitly requests via `--include`.
 
-```html#index.html
-<html>
-  <body>
-    <h1>Hello, world!</h1>
-    <script type="module" src="./frontend.tsx"></script>
-  </body>
-</html>
-```
+## Supported Field Types (Primitives Only)
 
-With the following `frontend.tsx`:
+- `address` / `ID` → TEXT (0x hex string)
+- `u8`, `u16`, `u32` → INTEGER
+- `u64`, `u128`, `u256` → BIGINT / NUMERIC
+- `bool` → BOOLEAN
+- `string` → TEXT
+- `option<T>` where T is primitive → nullable column
+- `vector<T>` where T is primitive → array column
 
-```tsx#frontend.tsx
-import React from "react";
-import { createRoot } from "react-dom/client";
+Non-primitive fields (VecMap, nested structs, complex enums) → use granular events or JSONB via custom handler.
 
-// import .css files directly and it works
-import './index.css';
+## Live vs Backfill
 
-const root = createRoot(document.body);
+Two separate modes, never combined in the same process:
+- `live` — long-running gRPC subscription, real-time
+- `backfill` — one-shot from start checkpoint to chain tip, exits when done
 
-export default function Frontend() {
-  return <h1>Hello, world!</h1>;
-}
+## Key Rules
 
-root.render(<Frontend />);
-```
-
-Then, run index.ts
-
-```sh
-bun --hot ./index.ts
-```
-
-For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+- BCS field order must match Move struct exactly (positional encoding)
+- Phantom type params don't affect BCS encoding
+- `ON CONFLICT (tx_digest, event_seq) DO NOTHING` for idempotent replay
+- JSONL (one JSON object per line) for streaming output format
+- Proto files are fetched from MystenLabs/sui-apis on `bun install` (postinstall script)
