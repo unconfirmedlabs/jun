@@ -22,38 +22,41 @@ const READ_MASK_PATHS = [
   "summary.timestamp",
 ];
 
+const PROTO_LOAD_OPTIONS: protoLoader.Options = {
+  keepCase: false,
+  longs: String,
+  enums: String,
+  defaults: true,
+  oneofs: true,
+  includeDirs: [PROTO_DIR],
+};
+
 function loadProto() {
   // Subscription service
   const subDef = protoLoader.loadSync(
     path.join(PROTO_DIR, "sui/rpc/v2/subscription_service.proto"),
-    {
-      keepCase: false,
-      longs: String,
-      enums: String,
-      defaults: true,
-      oneofs: true,
-      includeDirs: [PROTO_DIR],
-    },
+    PROTO_LOAD_OPTIONS,
   );
   const subProto = grpc.loadPackageDefinition(subDef) as any;
 
   // Ledger service (same proto dir, shares types)
   const ledgerDef = protoLoader.loadSync(
     path.join(PROTO_DIR, "sui/rpc/v2/ledger_service.proto"),
-    {
-      keepCase: false,
-      longs: String,
-      enums: String,
-      defaults: true,
-      oneofs: true,
-      includeDirs: [PROTO_DIR],
-    },
+    PROTO_LOAD_OPTIONS,
   );
   const ledgerProto = grpc.loadPackageDefinition(ledgerDef) as any;
+
+  // Move package service
+  const moveDef = protoLoader.loadSync(
+    path.join(PROTO_DIR, "sui/rpc/v2/move_package_service.proto"),
+    PROTO_LOAD_OPTIONS,
+  );
+  const moveProto = grpc.loadPackageDefinition(moveDef) as any;
 
   return {
     SubscriptionService: subProto.sui.rpc.v2.SubscriptionService,
     LedgerService: ledgerProto.sui.rpc.v2.LedgerService,
+    MovePackageService: moveProto.sui.rpc.v2.MovePackageService,
   };
 }
 
@@ -79,6 +82,42 @@ export interface GrpcTransaction {
   events: {
     events: GrpcEvent[];
   } | null;
+}
+
+/** An OpenSignatureBody from a gRPC DatatypeDescriptor field */
+export interface GrpcOpenSignatureBody {
+  type: string; // enum string: "ADDRESS", "U64", "DATATYPE", "VECTOR", etc.
+  typeName: string;
+  typeParameterInstantiation: GrpcOpenSignatureBody[];
+  typeParameter: number;
+  /** proto-loader oneof wrapper — ignore */
+  _type?: string;
+  /** proto-loader oneof wrapper — ignore */
+  _typeName?: string;
+}
+
+/** A field descriptor from a gRPC DatatypeDescriptor */
+export interface GrpcFieldDescriptor {
+  name: string;
+  position: number;
+  type: GrpcOpenSignatureBody;
+}
+
+/** A DatatypeDescriptor from the gRPC MovePackageService */
+export interface GrpcDatatypeDescriptor {
+  typeName: string;
+  definingId: string;
+  module: string;
+  name: string;
+  abilities: string[];
+  typeParameters: Array<{ constraints: string[]; isPhantom: boolean }>;
+  kind: string; // "STRUCT" | "ENUM" | ...
+  fields: GrpcFieldDescriptor[];
+  variants: Array<{
+    name: string;
+    position: number;
+    fields: GrpcFieldDescriptor[];
+  }>;
 }
 
 /** A checkpoint response from gRPC */
@@ -118,17 +157,24 @@ export interface GrpcClient {
    */
   getCheckpoint(seq: bigint): Promise<GrpcCheckpointResponse>;
 
+  /**
+   * Fetch a datatype descriptor by package ID, module name, and type name.
+   * Uses the MovePackageService.GetDatatype RPC.
+   */
+  getDatatype(packageId: string, moduleName: string, name: string): Promise<GrpcDatatypeDescriptor>;
+
   /** Close the underlying gRPC connections */
   close(): void;
 }
 
 export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
-  const { SubscriptionService, LedgerService } = loadProto();
+  const { SubscriptionService, LedgerService, MovePackageService } = loadProto();
   const creds = grpc.credentials.createSsl();
   const readMask = options.readMask ?? READ_MASK_PATHS;
 
   const subClient = new SubscriptionService(options.url, creds);
   const ledgerClient = new LedgerService(options.url, creds);
+  const moveClient = new MovePackageService(options.url, creds);
 
   return {
     subscribeCheckpoints(): AsyncIterable<GrpcCheckpointResponse> {
@@ -226,9 +272,29 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
       });
     },
 
+    getDatatype(packageId: string, moduleName: string, name: string): Promise<GrpcDatatypeDescriptor> {
+      return new Promise((resolve, reject) => {
+        moveClient.GetDatatype(
+          { packageId, moduleName, name },
+          (err: any, response: any) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            if (!response?.datatype) {
+              reject(new Error(`Datatype not found: ${packageId}::${moduleName}::${name}`));
+              return;
+            }
+            resolve(response.datatype);
+          },
+        );
+      });
+    },
+
     close() {
       subClient.close();
       ledgerClient.close();
+      moveClient.close();
     },
   };
 }
