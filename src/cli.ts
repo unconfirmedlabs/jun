@@ -590,6 +590,8 @@ program
   .option("--jsonl", "output as JSON lines instead of formatted text", false)
   .option("--output <path>", "write output to file (.sqlite or .jsonl)")
   .option("--concurrency <n>", "concurrent checkpoint fetches", "16")
+  .option("--verify", "cryptographically verify each checkpoint signature", false)
+  .option("--verify-url <url>", "gRPC URL for fetching validator committees (for --verify)", "fullnode.mainnet.sui.io:443")
   .action(async (opts: {
     from: string;
     to?: string;
@@ -600,6 +602,8 @@ program
     jsonl: boolean;
     output?: string;
     concurrency: string;
+    verify: boolean;
+    verifyUrl: string;
   }) => {
     const from = BigInt(opts.from);
     const concurrency = parseInt(opts.concurrency);
@@ -629,7 +633,11 @@ program
       ? createSqliteWriter({ path: opts.output!, showEvents, showEffects: false, showBalanceChanges: false })
       : null;
 
-    const archive = createArchiveClient({ archiveUrl: opts.archiveUrl });
+    const archive = createArchiveClient({
+      archiveUrl: opts.archiveUrl,
+      verify: opts.verify,
+      grpcUrl: opts.verify ? opts.verifyUrl : undefined,
+    });
 
     let stopped = false;
     const shutdown = () => {

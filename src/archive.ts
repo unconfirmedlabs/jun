@@ -9,6 +9,9 @@
 import { zstdDecompressSync } from "zlib";
 import { bcs as suiBcs } from "@mysten/sui/bcs";
 import { bcs } from "@mysten/bcs";
+import { verifyCheckpoint as keiVerify, PreparedCommittee } from "@unconfirmed/kei/src/index";
+import * as grpc from "@grpc/grpc-js";
+import * as protoLoader from "@grpc/proto-loader";
 import protobuf from "protobufjs";
 import path from "path";
 import type { GrpcCheckpointResponse, GrpcEvent } from "./grpc.ts";
@@ -102,6 +105,10 @@ async function getCheckpointType(): Promise<protobuf.Type> {
 export interface ArchiveClientOptions {
   /** Archive base URL. Default: https://checkpoints.mainnet.sui.io */
   archiveUrl?: string;
+  /** Enable cryptographic checkpoint verification via kei. Requires grpcUrl for committee fetching. */
+  verify?: boolean;
+  /** gRPC URL for fetching validator committees (required when verify=true). */
+  grpcUrl?: string;
 }
 
 export interface ArchiveClient {
@@ -112,8 +119,46 @@ export interface ArchiveClient {
   fetchCheckpoint(seq: bigint): Promise<GrpcCheckpointResponse>;
 }
 
+// Cache prepared committees by epoch (committee changes ~once per 24h)
+const committeeCache = new Map<string, PreparedCommittee>();
+
+async function getCommittee(grpcUrl: string, epoch: string): Promise<PreparedCommittee> {
+  if (committeeCache.has(epoch)) return committeeCache.get(epoch)!;
+
+  const PROTO_DIR = path.join(import.meta.dir, "..", "proto");
+  const def = protoLoader.loadSync(path.join(PROTO_DIR, "sui/rpc/v2/ledger_service.proto"), {
+    keepCase: false, longs: String, enums: String, defaults: true, oneofs: true, includeDirs: [PROTO_DIR],
+  });
+  const proto = grpc.loadPackageDefinition(def) as any;
+  const client = new proto.sui.rpc.v2.LedgerService(grpcUrl, grpc.credentials.createSsl());
+
+  const resp = await new Promise<any>((resolve, reject) => {
+    client.GetEpoch({ epoch, readMask: { paths: ["committee"] } }, (err: any, res: any) => {
+      client.close();
+      if (err) reject(err); else resolve(res);
+    });
+  });
+
+  const prepared = new PreparedCommittee({
+    epoch: BigInt(epoch),
+    members: resp.epoch.committee.members.map((m: any) => ({
+      publicKey: new Uint8Array(m.publicKey),
+      weight: BigInt(m.weight),
+    })),
+  });
+
+  committeeCache.set(epoch, prepared);
+  return prepared;
+}
+
 export function createArchiveClient(options?: ArchiveClientOptions): ArchiveClient {
   const archiveUrl = (options?.archiveUrl ?? "https://checkpoints.mainnet.sui.io").replace(/\/$/, "");
+  const verify = options?.verify ?? false;
+  const grpcUrl = options?.grpcUrl;
+
+  if (verify && !grpcUrl) {
+    throw new Error("grpcUrl is required when verify=true (needed to fetch validator committees)");
+  }
 
   return {
     async fetchCheckpoint(seq: bigint): Promise<GrpcCheckpointResponse> {
@@ -136,10 +181,22 @@ export function createArchiveClient(options?: ArchiveClientOptions): ArchiveClie
 
       // 4. BCS decode CheckpointSummary for timestamp + epoch
       let timestampMs = 0;
-      const summaryBcs = cp.summary?.bcs?.value;
-      if (summaryBcs) {
-        const summary = CheckpointSummary.parse(new Uint8Array(summaryBcs));
+      const summaryBcsRaw = cp.summary?.bcs?.value;
+      if (summaryBcsRaw) {
+        const summaryBcs = new Uint8Array(summaryBcsRaw);
+        const summary = CheckpointSummary.parse(summaryBcs);
         timestampMs = Number(summary.timestampMs);
+
+        // 4b. Cryptographic verification via kei
+        if (verify && cp.signature) {
+          const epochBigInt = BigInt(summary.epoch);
+          const prepared = await getCommittee(grpcUrl!, summary.epoch.toString());
+          keiVerify(summaryBcs, {
+            epoch: epochBigInt,
+            signature: Uint8Array.from(cp.signature.signature),
+            signersMap: Uint8Array.from(cp.signature.bitmap),
+          }, prepared);
+        }
       }
 
       // Convert to the same timestamp format as gRPC stream
