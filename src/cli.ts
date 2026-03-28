@@ -197,7 +197,7 @@ program
     const stop = parseStopConditions(opts);
     const jsonWriter = !isSqlite ? createWriter(opts.output) : null;
     const sqliteWriter = isSqlite
-      ? createSqliteWriter({ path: opts.output!, showEvents, showEffects, showBalanceChanges })
+      ? createSqliteWriter({ path: opts.output!, showEvents, showBalanceChanges })
       : null;
 
     const client = createGrpcClient({ url: opts.url, readMask });
@@ -288,8 +288,11 @@ program
           const txData = (checkpoint.transactions ?? []).map((tx: any) => ({
             digest: tx.digest,
             sender: tx.transaction?.sender,
+            status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
+            gasComputation: tx.effects?.gasUsed?.computationCost ? parseInt(tx.effects.gasUsed.computationCost) : null,
+            gasStorage: tx.effects?.gasUsed?.storageCost ? parseInt(tx.effects.gasUsed.storageCost) : null,
+            gasRebate: tx.effects?.gasUsed?.storageRebate ? parseInt(tx.effects.gasUsed.storageRebate) : null,
             events: tx.events?.events ?? [],
-            effects: tx.effects,
             balanceChanges: tx.balanceChanges ?? [],
           }));
           sqliteWriter.writeCheckpoint({ seq, timestamp: ts, transactions: txData });
@@ -421,7 +424,7 @@ program
     const useJson = (opts.jsonl || !!opts.output) && !isSqlite;
     const jsonWriter = !isSqlite ? createWriter(opts.output) : null;
     const sqliteWriter = isSqlite
-      ? createSqliteWriter({ path: opts.output!, showEvents, showEffects, showBalanceChanges })
+      ? createSqliteWriter({ path: opts.output!, showEvents, showBalanceChanges })
       : null;
 
     const client = createGrpcClient({ url: opts.url, readMask });
@@ -511,8 +514,11 @@ program
           const txData = (checkpoint.transactions ?? []).map((tx: any) => ({
             digest: tx.digest,
             sender: tx.transaction?.sender,
+            status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
+            gasComputation: tx.effects?.gasUsed?.computationCost ? parseInt(tx.effects.gasUsed.computationCost) : null,
+            gasStorage: tx.effects?.gasUsed?.storageCost ? parseInt(tx.effects.gasUsed.storageCost) : null,
+            gasRebate: tx.effects?.gasUsed?.storageRebate ? parseInt(tx.effects.gasUsed.storageRebate) : null,
             events: tx.events?.events ?? [],
-            effects: tx.effects,
             balanceChanges: tx.balanceChanges ?? [],
           }));
           sqliteWriter.writeCheckpoint({ seq: response.cursor, timestamp: ts, transactions: txData });
@@ -691,9 +697,7 @@ program
         if (sqliteWriter) {
           const txData = (checkpoint.transactions ?? []).map((tx) => ({
             digest: tx.digest,
-            sender: undefined,
             events: tx.events?.events ?? [],
-            effects: undefined,
             balanceChanges: [],
           }));
           sqliteWriter.writeCheckpoint({ seq: response.cursor, timestamp: ts, transactions: txData });
