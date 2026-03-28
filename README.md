@@ -20,35 +20,41 @@ bun run src/cli.ts stream
 ```
 
 ```
-[jun] streaming from slc1.rpc.testnet.sui.mirai.cloud:443...
-
-── checkpoint 317936045 ── 2026-03-27T14:23:02.440Z ── 1 event(s) ──
+── checkpoint 317936045 ── 2026-03-27T14:23:02.440Z ── 3 tx(s) ──
+  events (1):
     type:   0x53ee...::marketplace::ListingCancelled
     sender: 0xac27...
     tx:     8Fj2kN...
     bcs:    104 bytes
-
-── checkpoint 317936048 ── 2026-03-27T14:23:02.684Z ── 7 event(s) ──
-    type:   0x01db...::oracle::OraclePricesUpdated
-    sender: 0xe64e...
-    tx:     3Kp9mR...
-    bcs:    56 bytes
 ```
 
 ## CLI
 
 ```bash
-# Stream all events from testnet
-bun run src/cli.ts stream
+# Stream everything (events, effects, balance changes, objects)
+jun stream
+
+# Stream only events
+jun stream --include events
 
 # Filter to specific event types
-bun run src/cli.ts stream --filter "pressing::RecordPressedEvent"
+jun stream --include events --filter "pressing::RecordPressedEvent"
 
-# JSON lines output (pipe to jq, files, etc.)
-bun run src/cli.ts stream --jsonl
+# Multiple data types
+jun stream --include events effects
+
+# Stop conditions
+jun stream --duration 5m                           # stream for 5 minutes
+jun stream --until-checkpoint 318200000            # stop at checkpoint
+jun stream --until "2026-03-28T00:00:00Z"          # stop at timestamp
+
+# Output
+jun stream --jsonl                                 # JSON lines to stdout
+jun stream --jsonl --output events.jsonl            # JSON lines to file
+jun stream --jsonl | jq '.events[]?.type'           # pipe to jq
 
 # Custom gRPC endpoint
-bun run src/cli.ts stream --url "your-fullnode:443"
+jun stream --url "your-fullnode:443"
 ```
 
 ## Programmatic API
@@ -107,7 +113,7 @@ src/
   index.ts        defineIndexer() orchestrator
   output/
     postgres.ts   Batch inserts via Bun.sql
-proto/            Sui gRPC proto files (vendored from sui-apis)
+proto/            Sui gRPC proto files (fetched on install from sui-apis)
 ```
 
 ## Dependencies
