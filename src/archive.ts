@@ -8,7 +8,7 @@
  */
 import { zstdDecompressSync } from "zlib";
 import { bcs as suiBcs } from "@mysten/sui/bcs";
-import { bcs, toBase58 } from "@mysten/bcs";
+import { bcs } from "@mysten/bcs";
 import protobuf from "protobufjs";
 import path from "path";
 import type { GrpcCheckpointResponse, GrpcEvent } from "./grpc.ts";
@@ -50,43 +50,32 @@ const CheckpointSummary = bcs.struct("CheckpointSummary", {
   // are not needed — BCS parse stops here.
 });
 
-/**
- * Extract transaction digest from TransactionEffects BCS.
- *
- * Effects are versioned: variant 0 = V1, variant 1 = V2.
- * V2 layout (most common on mainnet):
- *   [1 byte version=1] [status enum] [8 bytes epoch] [32 bytes gas (4x u64)] [vec<u8> digest]
- *
- * For Success status (tag=0), digest starts at byte 42 (1+1+8+32).
- * For Failure status, we skip the variable-length error and command fields.
- */
-function extractTxDigestFromEffects(effectsBcs: Uint8Array): string {
-  const version = effectsBcs[0];
+/** Decoded transaction metadata from effects BCS. */
+interface TxMeta {
+  digest: string;
+  status: string;
+  gasComputation: number;
+  gasStorage: number;
+  gasRebate: number;
+}
 
-  if (version === 1) {
-    // V2 effects
-    const statusTag = effectsBcs[1];
-    if (statusTag === 0) {
-      // Success: 1(version) + 1(status=0) + 8(epoch) + 32(gas: 4×u64) = 42
-      const digestLen = effectsBcs[42];
-      if (digestLen === 32) {
-        return toBase58(effectsBcs.slice(43, 75));
-      }
-    } else {
-      // Failure: status has variable-length error + optional command
-      // Use a BCS reader to skip past them
-      let pos = 2; // after version + status tag
+/** Extract transaction metadata from TransactionEffects BCS using @mysten/sui/bcs. */
+function decodeTxEffects(effectsBcs: Uint8Array): TxMeta | null {
+  try {
+    const effects = suiBcs.TransactionEffects.parse(effectsBcs);
+    const v2 = effects.V2;
+    if (!v2) return null;
 
-      // ExecutionFailureStatus is a complex enum — read its ULEB variant index + data
-      // We need to skip the entire error field. Since we can't define all variants,
-      // fall back to computing digest from the full effects hash.
-      // For now, return empty — failure txs are rare.
-      return "";
-    }
+    return {
+      digest: v2.transactionDigest,
+      status: v2.status.$kind === "Success" ? "success" : "failure",
+      gasComputation: Number(v2.gasUsed.computationCost),
+      gasStorage: Number(v2.gasUsed.storageCost),
+      gasRebate: Number(v2.gasUsed.storageRebate),
+    };
+  } catch {
+    return null;
   }
-
-  // V1 or unknown version — return empty
-  return "";
 }
 
 // ─── Protobuf loader ─────────────────────────────────────────────────────────
@@ -160,12 +149,10 @@ export function createArchiveClient(options?: ArchiveClientOptions): ArchiveClie
       const transactions: GrpcCheckpointResponse["checkpoint"]["transactions"] = [];
 
       for (const tx of cp.transactions ?? []) {
-        // Extract tx digest from effects BCS (proto digest isn't populated in archive)
-        let digest = tx.digest ?? "";
+        // Decode tx metadata from effects BCS (proto fields aren't populated in archive)
         const effectsBcs = tx.effects?.bcs?.value as Uint8Array | undefined;
-        if (!digest && effectsBcs) {
-          digest = extractTxDigestFromEffects(new Uint8Array(effectsBcs));
-        }
+        const txMeta = effectsBcs ? decodeTxEffects(new Uint8Array(effectsBcs)) : null;
+        const digest = tx.digest || txMeta?.digest || "";
 
         // Decode events from BCS
         const eventsBcs = tx.events?.bcs?.value as Uint8Array | undefined;
@@ -175,7 +162,7 @@ export function createArchiveClient(options?: ArchiveClientOptions): ArchiveClie
           const decoded = TransactionEvents.parse(new Uint8Array(eventsBcs));
           events = decoded.data.map((ev: any) => {
             const typeParams = (ev.type.typeParams ?? []).map((tp: any) => formatTypeTag(tp));
-            const typeSuffix = typeParams.length > 0 ? `<${typeParams.join(", ")}>` : "";
+            const typeSuffix = typeParams.length > 0 ? `<${typeParams.join(",")}>` : "";
             return {
               packageId: ev.packageId,
               module: ev.transactionModule,
@@ -189,10 +176,24 @@ export function createArchiveClient(options?: ArchiveClientOptions): ArchiveClie
           });
         }
 
-        transactions.push({
+        const txResult: any = {
           digest,
           events: events.length > 0 ? { events } : null,
-        });
+        };
+
+        // Attach effects metadata for SQLite writer
+        if (txMeta) {
+          txResult.effects = {
+            status: { success: txMeta.status === "success" },
+            gasUsed: {
+              computationCost: String(txMeta.gasComputation),
+              storageCost: String(txMeta.gasStorage),
+              storageRebate: String(txMeta.gasRebate),
+            },
+          };
+        }
+
+        transactions.push(txResult);
       }
 
       return {
