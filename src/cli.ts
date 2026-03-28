@@ -14,6 +14,8 @@
  */
 import { program } from "commander";
 import { createGrpcClient, type GrpcCheckpointResponse, type GrpcEvent } from "./grpc.ts";
+import { generateFieldDSL, formatCodegenResult } from "./codegen.ts";
+import { createSqliteWriter, type SqliteWriter } from "./output/sqlite.ts";
 
 // ---------------------------------------------------------------------------
 // Read mask mapping
@@ -187,9 +189,13 @@ program
     const showEvents = includes.length === 0 || includes.includes("events");
     const showEffects = includes.length === 0 || includes.includes("effects");
     const showBalanceChanges = includes.length === 0 || includes.includes("balance-changes");
-    const useJson = opts.jsonl || !!opts.output;
+    const isSqlite = opts.output?.endsWith(".sqlite") ?? false;
+    const useJson = (opts.jsonl || !!opts.output) && !isSqlite;
     const stop = parseStopConditions(opts);
-    const writer = createWriter(opts.output);
+    const jsonWriter = !isSqlite ? createWriter(opts.output) : null;
+    const sqliteWriter = isSqlite
+      ? createSqliteWriter({ path: opts.output!, showEvents, showEffects, showBalanceChanges })
+      : null;
 
     const client = createGrpcClient({ url: opts.url, readMask });
 
@@ -199,7 +205,8 @@ program
       if (stopped) process.exit(1);
       stopped = true;
       console.error(`\n[jun] stopping... (${checkpointCount} checkpoints streamed)`);
-      writer.close();
+      jsonWriter?.close();
+      sqliteWriter?.close();
       client.close();
     };
     process.on("SIGINT", shutdown);
@@ -273,6 +280,24 @@ program
         if (!hasData && (opts.filter || includes.length > 0)) continue;
         if (txCount === 0) continue;
 
+        // SQLite output — write full checkpoint data
+        if (sqliteWriter) {
+          const txData = (checkpoint.transactions ?? []).map((tx: any) => ({
+            digest: tx.digest,
+            sender: tx.transaction?.sender,
+            events: tx.events?.events ?? [],
+            effects: tx.effects,
+            balanceChanges: tx.balanceChanges ?? [],
+          }));
+          sqliteWriter.writeCheckpoint({ seq, timestamp: ts, transactions: txData });
+
+          // Log progress periodically
+          if (checkpointCount % 100 === 0) {
+            console.error(`[jun] ${checkpointCount} checkpoints → ${opts.output}`);
+          }
+          continue;
+        }
+
         if (useJson) {
           const record: any = { checkpoint: seq, timestamp: ts, txCount };
           if (filteredEvents.length > 0) {
@@ -332,9 +357,45 @@ program
       }
     }
 
-    writer.close();
+    jsonWriter?.close();
+    sqliteWriter?.close();
     client.close();
     console.error(`[jun] done (${checkpointCount} checkpoints streamed)`);
+  });
+
+// ---------------------------------------------------------------------------
+// Codegen command
+// ---------------------------------------------------------------------------
+
+program
+  .command("codegen")
+  .description("Generate jun field DSL from an on-chain Sui struct")
+  .argument("<type>", "fully qualified type (e.g. 0xPACKAGE::module::StructName)")
+  .option("--url <url>", "gRPC endpoint URL", "slc1.rpc.testnet.sui.mirai.cloud:443")
+  .action(async (typeArg: string, opts: { url: string }) => {
+    // Parse the fully qualified type: 0xPACKAGE::module::StructName
+    const parts = typeArg.split("::");
+    if (parts.length !== 3) {
+      console.error(`[jun] invalid type format: ${typeArg}`);
+      console.error(`[jun] expected: 0xPACKAGE::module::StructName`);
+      process.exit(1);
+    }
+
+    const [packageId, moduleName, structName] = parts;
+
+    const client = createGrpcClient({ url: opts.url });
+
+    try {
+      const descriptor = await client.getDatatype(packageId, moduleName, structName);
+      const result = generateFieldDSL(descriptor);
+      console.log(formatCodegenResult(result));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[jun] error: ${msg}`);
+      process.exit(1);
+    } finally {
+      client.close();
+    }
   });
 
 program.parse();
