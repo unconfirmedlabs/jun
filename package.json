@@ -20,7 +20,7 @@
     "@grpc/grpc-js": "^1.14.3",
     "@grpc/proto-loader": "^0.8.0",
     "@mysten/bcs": "^2.0.3",
-    "@mysten/codegen": "^0.8.3",
+    "@mysten/sui": "^2.13.0",
     "@noble/curves": "^1.9.0",
     "@noble/hashes": "^1.7.0",
     "@unconfirmed/kei": "0.0.8",
