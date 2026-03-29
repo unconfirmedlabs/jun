@@ -5,7 +5,7 @@
  * Usage:
  *   jun stream                                    # stream all checkpoint data
  *   jun stream --include events                   # only events
- *   jun stream --include events --filter pressing::Record
+ *   jun stream --include events --filter marketplace::ItemListed
  *   jun stream --jsonl                             # JSON lines output
  *   jun stream --jsonl --output events.jsonl       # write to file
  *   jun stream --until-checkpoint 318200000       # stop at checkpoint
@@ -169,7 +169,7 @@ program
 program
   .command("stream")
   .description("Stream live checkpoints")
-  .option("--url <url>", "gRPC endpoint URL", "fullnode.mainnet.sui.io:443")
+  .option("--url <url>", "gRPC endpoint URL", "hayabusa.mainnet.unconfirmed.cloud:443")
   .option("--include <types...>", "data to include: events, effects, balance-changes, objects, transactions (default: all)")
   .option("--filter <type>", "only show events matching this type substring")
   .option("--jsonl", "output as JSON lines instead of formatted text", false)
@@ -379,7 +379,7 @@ program
   .requiredOption("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
   .option("--count <n>", "number of checkpoints to fetch (alternative to --to)")
-  .option("--url <url>", "gRPC endpoint URL", "fullnode.mainnet.sui.io:443")
+  .option("--url <url>", "gRPC endpoint URL", "hayabusa.mainnet.unconfirmed.cloud:443")
   .option("--include <types...>", "data to include: events, effects, balance-changes, objects, transactions (default: all)")
   .option("--filter <type>", "only show events matching this type substring")
   .option("--jsonl", "output as JSON lines instead of formatted text", false)
@@ -591,7 +591,7 @@ program
   .option("--output <path>", "write output to file (.sqlite or .jsonl)")
   .option("--concurrency <n>", "concurrent checkpoint fetches", "16")
   .option("--verify", "cryptographically verify each checkpoint signature", false)
-  .option("--verify-url <url>", "gRPC URL for fetching validator committees (for --verify)", "fullnode.mainnet.sui.io:443")
+  .option("--verify-url <url>", "gRPC URL for fetching validator committees (for --verify)", "hayabusa.mainnet.unconfirmed.cloud:443")
   .action(async (opts: {
     from: string;
     to?: string;
@@ -774,7 +774,7 @@ program
   .command("codegen")
   .description("Generate jun field DSL from an on-chain Sui struct")
   .argument("<type>", "fully qualified type (e.g. 0xPACKAGE::module::StructName)")
-  .option("--url <url>", "gRPC endpoint URL", "fullnode.mainnet.sui.io:443")
+  .option("--url <url>", "gRPC endpoint URL", "hayabusa.mainnet.unconfirmed.cloud:443")
   .action(async (typeArg: string, opts: { url: string }) => {
     // Parse the fully qualified type: 0xPACKAGE::module::StructName
     const parts = typeArg.split("::");
@@ -799,6 +799,209 @@ program
     } finally {
       client.close();
     }
+  });
+
+// ---------------------------------------------------------------------------
+// MCP command
+// ---------------------------------------------------------------------------
+
+program
+  .command("mcp")
+  .description("Start MCP server for AI-assisted analysis of a SQLite database")
+  .argument("<db>", "path to SQLite database file")
+  .action(async (dbPath: string) => {
+    const { createMcpServer } = await import("./mcp.ts");
+    const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+
+    const { server } = createMcpServer(dbPath);
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+  });
+
+// ---------------------------------------------------------------------------
+// Chat command
+// ---------------------------------------------------------------------------
+
+program
+  .command("chat")
+  .description("Stream or replay checkpoints and open an AI chat to analyze the data live")
+  .option("--live", "stream live checkpoints (grows in real-time)", false)
+  .option("--url <url>", "gRPC endpoint for live streaming", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .option("--from <checkpoint>", "start checkpoint for replay")
+  .option("--to <checkpoint>", "end checkpoint for replay")
+  .option("--count <n>", "number of checkpoints for replay", "100")
+  .option("--archive-url <url>", "checkpoint archive URL", "https://checkpoints.mainnet.sui.io")
+  .option("--concurrency <n>", "concurrent checkpoint fetches for replay", "32")
+  .option("--verify", "cryptographically verify each checkpoint", false)
+  .option("--verify-url <url>", "gRPC URL for committee fetching", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .action(async (opts: {
+    live: boolean;
+    url: string;
+    from?: string;
+    to?: string;
+    count: string;
+    archiveUrl: string;
+    concurrency: string;
+    verify: boolean;
+    verifyUrl: string;
+  }) => {
+    if (!opts.live && !opts.from) {
+      console.error("[jun] either --live or --from is required");
+      console.error("  jun chat --live                         # stream live data");
+      console.error("  jun chat --from 259063382 --count 100   # replay historical");
+      process.exit(1);
+    }
+
+    const { createSqliteWriter } = await import("./output/sqlite.ts");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const { spawn } = await import("child_process");
+    const { unlinkSync, writeFileSync } = await import("fs");
+
+    const dbPath = join(tmpdir(), `jun-chat-${Date.now()}.sqlite`);
+    const mcpConfigPath = join(tmpdir(), `jun-mcp-${Date.now()}.json`);
+    const sqliteWriter = createSqliteWriter({ path: dbPath, showEvents: true, showBalanceChanges: opts.live });
+
+    let description: string;
+
+    if (opts.live) {
+      // ── Live mode: stream in background, launch chat immediately ──
+      const { createGrpcClient } = await import("./grpc.ts");
+      const readMask = buildReadMask([]);
+      const client = createGrpcClient({ url: opts.url, readMask });
+
+      description = `live stream from ${opts.url} (data growing in real-time)`;
+      console.error(`[jun] streaming live to ${dbPath}`);
+
+      let checkpointCount = 0;
+
+      // Stream in background
+      (async () => {
+        try {
+          for await (const response of client.subscribeCheckpoints()) {
+            const { checkpoint } = response;
+            const seq = response.cursor;
+            const tsMs = getTimestampMs(checkpoint.summary);
+            const ts = formatTimestamp(tsMs);
+
+            const txData = (checkpoint.transactions ?? []).map((tx: any) => ({
+              digest: tx.digest,
+              sender: tx.transaction?.sender,
+              status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
+              gasComputation: tx.effects?.gasUsed?.computationCost ? parseInt(tx.effects.gasUsed.computationCost) : null,
+              gasStorage: tx.effects?.gasUsed?.storageCost ? parseInt(tx.effects.gasUsed.storageCost) : null,
+              gasRebate: tx.effects?.gasUsed?.storageRebate ? parseInt(tx.effects.gasUsed.storageRebate) : null,
+              events: tx.events?.events ?? [],
+              balanceChanges: tx.balanceChanges ?? [],
+            }));
+            sqliteWriter.writeCheckpoint({ seq, timestamp: ts, transactions: txData });
+            checkpointCount++;
+          }
+        } catch {
+          // Stream ended (Claude exited, cleanup will happen)
+        }
+      })();
+
+      // Wait a moment for some data to arrive
+      await Bun.sleep(3000);
+      console.error(`[jun] ${checkpointCount} checkpoints buffered, starting chat...`);
+
+    } else {
+      // ── Replay mode: fetch all data first, then launch chat ──
+      const { createArchiveClient } = await import("./archive.ts");
+      const from = BigInt(opts.from!);
+      const to = opts.to ? BigInt(opts.to) : from + BigInt(opts.count) - 1n;
+      const concurrency = parseInt(opts.concurrency);
+      const total = Number(to - from) + 1;
+
+      description = `${total.toLocaleString()} checkpoints (${from} → ${to})`;
+      console.error(`[jun] replaying ${description}...`);
+
+      const archive = createArchiveClient({
+        archiveUrl: opts.archiveUrl,
+        verify: opts.verify,
+        grpcUrl: opts.verify ? opts.verifyUrl : undefined,
+      });
+
+      const seqs: bigint[] = [];
+      for (let s = from; s <= to; s++) seqs.push(s);
+
+      const pMap = (await import("p-map")).default;
+      const pRetry = (await import("p-retry")).default;
+
+      let processed = 0;
+      const startTime = performance.now();
+
+      await pMap(seqs, async (seq) => {
+        const response = await pRetry(() => archive.fetchCheckpoint(seq), { retries: 3, minTimeout: 1000 });
+        const { checkpoint } = response;
+        const tsMs = getTimestampMs(checkpoint.summary);
+        const ts = formatTimestamp(tsMs);
+
+        const txData = (checkpoint.transactions ?? []).map((tx: any) => ({
+          digest: tx.digest,
+          sender: tx.transaction?.sender,
+          status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
+          gasComputation: tx.effects?.gasUsed?.computationCost ? parseInt(tx.effects.gasUsed.computationCost) : null,
+          gasStorage: tx.effects?.gasUsed?.storageCost ? parseInt(tx.effects.gasUsed.storageCost) : null,
+          gasRebate: tx.effects?.gasUsed?.storageRebate ? parseInt(tx.effects.gasUsed.storageRebate) : null,
+          events: tx.events?.events ?? [],
+          balanceChanges: [],
+        }));
+        sqliteWriter.writeCheckpoint({ seq: response.cursor, timestamp: ts, transactions: txData });
+
+        processed++;
+        if (processed % 50 === 0 || processed === total) {
+          const rate = Math.round(processed / ((performance.now() - startTime) / 1000));
+          console.error(`[jun] ${processed}/${total} (${rate} cp/s)`);
+        }
+      }, { concurrency });
+
+      const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+      console.error(`[jun] replay done in ${elapsed}s`);
+    }
+
+    // Write temp MCP config
+    const junDir = join(import.meta.dir, "..");
+    const mcpConfig = {
+      mcpServers: {
+        jun: {
+          command: "bun",
+          args: [join(junDir, "src", "mcp.ts"), dbPath],
+        },
+      },
+    };
+    writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig));
+
+    // Build system prompt
+    const liveNote = opts.live
+      ? "The database is being written to in REAL-TIME by a live gRPC stream. New checkpoints arrive every ~250ms. Run queries multiple times to see fresh data."
+      : "";
+
+    const systemPrompt = [
+      `You have access to a Sui blockchain SQLite database: ${description}.`,
+      liveNote,
+      `Use the "jun" MCP server tools to analyze the data.`,
+      `Start by calling the "summary" tool to get an overview, then use "query" for specific SQL queries.`,
+      `Tables: transactions (digest, checkpoint, timestamp, sender, status, gas_computation, gas_storage, gas_rebate), events (tx_digest, event_seq, event_type, package_id, module, sender, bcs), balance_changes (tx_digest, checkpoint, timestamp, owner, coin_type, amount).`,
+    ].filter(Boolean).join("\n");
+
+    // Spawn claude
+    console.error(`[jun] starting chat...`);
+    console.error("");
+
+    const claude = spawn("claude", [
+      "--mcp-config", mcpConfigPath,
+      "--system-prompt", systemPrompt,
+    ], {
+      stdio: "inherit",
+    });
+
+    claude.on("close", () => {
+      sqliteWriter.close();
+      try { unlinkSync(dbPath); } catch {}
+      try { unlinkSync(mcpConfigPath); } catch {}
+    });
   });
 
 program.parse();

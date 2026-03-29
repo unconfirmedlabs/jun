@@ -22,7 +22,7 @@ bun run src/cli.ts stream
 ```
 ── checkpoint 317936045 ── 2026-03-27T14:23:02.440Z ── 3 tx(s) ──
   events (1):
-    type:   0x53ee...::marketplace::ListingCancelled
+    type:   0x7d12...::marketplace::ItemListedEvent
     sender: 0xac27...
     tx:     8Fj2kN...
     bcs:    104 bytes
@@ -32,6 +32,8 @@ bun run src/cli.ts stream
 
 ### Stream
 
+Stream live checkpoints from a Sui fullnode via gRPC.
+
 ```bash
 # Stream everything (events, effects, balance changes)
 jun stream
@@ -40,10 +42,10 @@ jun stream
 jun stream --include events
 
 # Filter to specific event types
-jun stream --include events --filter "pressing::RecordPressedEvent"
+jun stream --include events --filter "marketplace::ItemListedEvent"
 
 # Multiple data types
-jun stream --include events effects
+jun stream --include events effects balance-changes
 
 # Stop conditions
 jun stream --duration 5m                           # stream for 5 minutes
@@ -60,22 +62,144 @@ jun stream --jsonl | jq '.events[]?.type'           # pipe to jq
 jun stream --url "your-fullnode:443"
 ```
 
+`--include` values: `events`, `effects`, `balance-changes`, `objects`, `transactions` (default: all).
+
+### Fetch
+
+Fetch historical checkpoints by range via gRPC. Concurrent with retry logic.
+
+```bash
+# Fetch 1000 checkpoints starting from a specific point
+jun fetch --from 318000000 --count 1000
+
+# Fetch a specific range to SQLite
+jun fetch --from 318000000 --to 318001000 --output mainnet.sqlite
+
+# High concurrency
+jun fetch --from 318000000 --count 10000 --concurrency 32 --output backfill.sqlite
+
+# Filter events during fetch
+jun fetch --from 318000000 --count 100 --include events --filter "marketplace::"
+```
+
+### Replay
+
+Replay historical checkpoints from the [Sui checkpoint archive](https://checkpoints.mainnet.sui.io/) — every checkpoint from genesis, no pruning, no fullnode required.
+
+```bash
+# Replay 1000 checkpoints from mainnet genesis
+jun replay --from 0 --count 1000
+
+# Replay a specific range to SQLite
+jun replay --from 259000000 --to 259001000 --output mainnet.sqlite
+
+# Replay with cryptographic verification
+jun replay --from 259000000 --count 100 --verify
+
+# High concurrency for fast backfill
+jun replay --from 100000000 --count 10000 --concurrency 32 --output backfill.sqlite
+```
+
+#### Light client verification
+
+With `--verify`, each checkpoint is cryptographically verified using [kei](https://github.com/unconfirmedlabs/kei) — a pure TypeScript Sui light client. Every checkpoint's BLS12-381 aggregate signature is checked against the validator committee, proving the data was signed by a quorum (≥66.67%) of validators.
+
+```bash
+jun replay --from 259063382 --count 100 --verify --output verified.sqlite
+```
+
+The validator committee is fetched once per epoch (~24h) and cached. Verification adds ~11ms per checkpoint — negligible vs the network fetch time.
+
+No trust required in the archive CDN — the math proves the data is authentic.
+
+#### Data parity
+
+Stream, fetch, and replay produce identical output for the same checkpoint range — transactions, digests, senders, status, gas costs, events, and timestamps all match.
+
+### Codegen
+
+Auto-generate field definitions from on-chain Move structs:
+
+```bash
+jun codegen 0xPACKAGE::module::EventName
+```
+
+```
+ItemListedEvent — all fields are primitive ✓
+
+{
+  listing_id: "address",
+  marketplace_id: "address",
+  item_id: "address",
+  price: "u64",
+  seller: "address",
+  expiry_ms: "u64",
+}
+```
+
+Non-primitive fields are flagged:
+
+```
+OrderFilledEvent — 1 field is not primitive
+
+{
+  order_id: "address",
+  buyer: "address",
+  // metadata: Metadata — not a primitive type. Use a granular event or "json" override.
+  amount: "u64",
+  ...
+}
+```
+
+### MCP
+
+Start an [MCP](https://modelcontextprotocol.io/) server for AI-assisted analysis of a SQLite checkpoint database.
+
+```bash
+jun mcp mainnet.sqlite
+```
+
+Exposes:
+
+| | Name | Description |
+|---|---|---|
+| Resource | `schema` | Database DDL with row counts for all tables |
+| Tool | `query` | Execute read-only SQL (SELECT, WITH, EXPLAIN) |
+| Tool | `summary` | Quick overview — row counts, time range, status breakdown, top events/senders |
+
+### Chat
+
+Stream or replay checkpoints into a temporary SQLite database and open an interactive Claude session with MCP access to the data.
+
+```bash
+# Chat about live mainnet data
+jun chat --live
+
+# Chat about a historical range
+jun chat --from 259063382 --count 100
+
+# With cryptographic verification
+jun chat --from 259063382 --count 100 --verify
+```
+
+In live mode, the database grows in real-time as checkpoints arrive — Claude can query fresh data on every turn.
+
 ### SQLite export
 
-Stream checkpoint data directly into a portable SQLite file:
+Stream, fetch, or replay checkpoint data directly into a portable SQLite file:
 
 ```bash
 jun stream --duration 5m --output testnet.sqlite
+jun fetch --from 318000000 --count 1000 --output mainnet.sqlite
+jun replay --from 0 --count 1000 --output genesis.sqlite
 ```
 
-This creates a SQLite database with five tables:
+This creates a SQLite database with three tables:
 
 | Table | Contents |
 |-------|----------|
-| `checkpoints` | Checkpoint sequence numbers and timestamps |
-| `transactions` | Transaction digests, checkpoint references, senders |
-| `events` | Event type, sender, package, module, raw BCS bytes |
-| `effects` | Transaction status, gas costs |
+| `transactions` | Transaction digests, checkpoint, timestamp, sender, status, gas costs |
+| `events` | Event type, package, module, sender, raw BCS bytes |
 | `balance_changes` | Coin transfers with owner, coin type, amount |
 
 Query examples:
@@ -111,85 +235,6 @@ sqlite3 -column -header testnet.sqlite "
   FROM transactions
   GROUP BY status
 "
-
-# Checkpoint time range
-sqlite3 -column -header testnet.sqlite "
-  SELECT MIN(timestamp) as start_time, MAX(timestamp) as end_time,
-         COUNT(DISTINCT checkpoint) as checkpoints
-  FROM transactions
-"
-```
-
-### Replay
-
-Replay historical checkpoints from the [Sui checkpoint archive](https://checkpoints.mainnet.sui.io/) — every checkpoint from genesis, no pruning, no fullnode required.
-
-```bash
-# Replay 1000 checkpoints from mainnet genesis
-jun replay --from 0 --count 1000
-
-# Replay a specific range to SQLite
-jun replay --from 259000000 --to 259001000 --output mainnet.sqlite
-
-# Replay with cryptographic verification
-jun replay --from 259000000 --count 100 --verify
-
-# High concurrency for fast backfill
-jun replay --from 100000000 --count 10000 --concurrency 32 --output backfill.sqlite
-```
-
-#### Light client verification
-
-With `--verify`, each checkpoint is cryptographically verified using [kei](https://github.com/unconfirmedlabs/kei) — a pure TypeScript Sui light client. Every checkpoint's BLS12-381 aggregate signature is checked against the validator committee, proving the data was signed by a quorum (≥66.67%) of validators.
-
-```bash
-jun replay --from 259063382 --count 100 --verify --output verified.sqlite
-```
-
-The validator committee is fetched once per epoch (~24h) and cached. Verification adds ~11ms per checkpoint — negligible vs the network fetch time.
-
-No trust required in the archive CDN — the math proves the data is authentic.
-
-#### Data parity
-
-Stream and replay produce identical output for the same checkpoint range — transactions, digests, senders, status, gas costs, events, and timestamps all match byte-for-byte.
-
-### Codegen
-
-Auto-generate field definitions from on-chain Move structs:
-
-```bash
-jun codegen 0xPACKAGE::module::EventName
-```
-
-```
-RecordPressedEvent — all fields are primitive ✓
-
-{
-  pressing_id: "address",
-  release_id: "address",
-  edition: "u16",
-  record_id: "address",
-  record_number: "u64",
-  quantity: "u64",
-  pressed_by: "address",
-  paid_value: "u64",
-  timestamp_ms: "u64",
-}
-```
-
-Non-primitive fields are flagged:
-
-```
-CompositionPublishedEvent — 1 field is not primitive
-
-{
-  composition_id: "address",
-  title: "string",
-  // split_bps: BPS — not a primitive type. Use a granular event or "json" override.
-  has_lyrics: "bool",
-  ...
-}
 ```
 
 ## Programmatic API
@@ -198,7 +243,7 @@ CompositionPublishedEvent — 1 field is not primitive
 import { createGrpcClient } from "jun/grpc";
 
 const client = createGrpcClient({
-  url: "slc1.rpc.testnet.sui.mirai.cloud:443",
+  url: "hayabusa.mainnet.unconfirmed.cloud:443",
 });
 
 for await (const response of client.subscribeCheckpoints()) {
@@ -233,13 +278,13 @@ Jun uses `@grpc/grpc-js` with proto files directly from [MystenLabs/sui-apis](ht
 - [x] Light client verification via [kei](https://github.com/unconfirmedlabs/kei)
 - [x] BCS event decoding via `@mysten/bcs`
 - [x] Full TransactionKind BCS support (all 11 variants)
-- [x] CLI: stream, replay, codegen
+- [x] CLI: stream, fetch, replay, codegen, mcp, chat
 - [x] SQLite + JSONL export
 - [x] Auto-generate BCS schemas from on-chain type layouts
-- [x] Data parity between stream and replay
+- [x] Data parity between stream, fetch, and replay
+- [x] Postgres output with batch inserts (`Bun.sql`)
+- [x] MCP server for AI-assisted analysis
 - [ ] Typed event indexer (`defineIndexer()` with config file)
-- [ ] Postgres output with batch inserts (`Bun.sql`)
-- [ ] Balance changes (pending Sui accumulator feature on mainnet)
 - [ ] Parquet export (local files + S3)
 - [ ] `bun create jun` project scaffold
 
@@ -247,9 +292,10 @@ Jun uses `@grpc/grpc-js` with proto files directly from [MystenLabs/sui-apis](ht
 
 ```
 src/
-  cli.ts          CLI (jun stream, jun replay, jun codegen)
+  cli.ts          CLI (jun stream, jun fetch, jun replay, jun codegen, jun mcp, jun chat)
   grpc.ts         Native gRPC client (subscribe + fetch + type introspection)
   archive.ts      Checkpoint archive client (fetch + zstd + proto + BCS decode + verify)
+  mcp.ts          MCP server (schema resource + query/summary tools)
   sui-bcs.ts      Complete TransactionKind BCS (all 11 variants the SDK is missing)
   codegen.ts      On-chain type → field DSL mapping
   schema.ts       Field DSL → BCS schemas + DDL
@@ -265,13 +311,18 @@ proto/            Sui gRPC proto files (fetched on install from sui-apis)
 ## Dependencies
 
 ```
-@grpc/grpc-js        Native gRPC client (HTTP/2)
-@grpc/proto-loader   Runtime proto file loading
-@mysten/bcs          BCS binary codec
-@unconfirmed/kei     Light client checkpoint verification (BLS12-381)
-commander            CLI framework
-p-map                Concurrent backfill
-protobufjs           Archive checkpoint decoding
+@grpc/grpc-js                  Native gRPC client (HTTP/2)
+@grpc/proto-loader             Runtime proto file loading
+@modelcontextprotocol/sdk      MCP server for AI integration
+@mysten/bcs                    BCS binary codec
+@mysten/sui                    Sui SDK (type layouts, address utils)
+@noble/curves                  BLS12-381 signature verification
+@noble/hashes                  Cryptographic hash functions
+@unconfirmed/kei               Light client checkpoint verification
+commander                      CLI framework
+p-map                          Concurrent backfill
+p-retry                        Retry with exponential backoff
+protobufjs                     Archive checkpoint decoding
 ```
 
 Zero additional runtime dependencies beyond these + Bun builtins (`bun:sqlite`, `zlib`).
