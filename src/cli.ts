@@ -942,11 +942,10 @@ client
     const sui = getSuiClient(opts.url);
 
     try {
-      const include = opts.bcs
-        ? { objectBcs: true, previousTransaction: true }
-        : { json: true, previousTransaction: true };
-
-      const result = await sui.core.getObject({ objectId: id, include });
+      const result = await sui.core.getObject({
+        objectId: id,
+        include: { json: true, previousTransaction: true, objectBcs: opts.bcs },
+      });
       const obj = result.object;
       if (!obj) throw new Error(`Object ${id} not found`);
 
@@ -961,24 +960,24 @@ client
           ?? (owner?.Shared ? `Shared (v${owner.Shared.initialSharedVersion})` : null)
           ?? (owner?.Immutable === true ? "Immutable" : "unknown");
 
-      console.log(`\n  object    ${obj.objectId}`);
-      if (obj.type) console.log(`  type      ${obj.type}`);
-      console.log(`  version   ${obj.version}`);
-      console.log(`  digest    ${obj.digest}`);
-      console.log(`  owner     ${ownerStr}`);
-      if (obj.previousTransaction) console.log(`  prev tx   ${obj.previousTransaction}`);
+      console.log(`\n  object      ${obj.objectId}`);
+      if (obj.type) console.log(`  type        ${obj.type}`);
+      console.log(`  version     ${obj.version}`);
+      console.log(`  digest      ${obj.digest}`);
+      console.log(`  owner       ${ownerStr}`);
+      if (obj.previousTransaction) console.log(`  prev tx     ${obj.previousTransaction}`);
 
-      if (obj.json && !opts.bcs) {
+      if (obj.objectBcs) {
+        console.log(`  bcs         ${obj.objectBcs.length} bytes`);
+      }
+
+      if (obj.json) {
         console.log(`\n  content:`);
         for (const [key, val] of Object.entries(obj.json)) {
           const display = typeof val === "object" ? JSON.stringify(val) : String(val);
-          const truncated = display.length > 80 ? display.slice(0, 77) + "..." : display;
+          const truncated = display.length > 120 ? display.slice(0, 117) + "..." : display;
           console.log(`    ${key}: ${truncated}`);
         }
-      }
-
-      if (obj.objectBcs && opts.bcs) {
-        console.log(`\n  bcs: ${obj.objectBcs.length} bytes`);
       }
 
       console.log("");
@@ -1014,30 +1013,75 @@ client
         return;
       }
 
-      const status = tx.status?.success ? "success" : "failure";
+      const status = tx.status?.success ? "success" : `failure (${tx.status?.error?.message ?? "unknown"})`;
       const gas = tx.effects?.gasUsed;
+      const effects = tx.effects;
+      const txData = tx.transaction;
 
-      console.log(`\n  digest      ${tx.digest}`);
-      console.log(`  status      ${status}`);
-      if (tx.epoch) console.log(`  epoch       ${tx.epoch}`);
+      console.log(`\n  digest        ${tx.digest}`);
+      console.log(`  status        ${status}`);
+      if (txData?.sender) console.log(`  sender        ${txData.sender}`);
+      if (tx.epoch) console.log(`  epoch         ${tx.epoch}`);
+      if (tx.signatures?.length) console.log(`  signatures    ${tx.signatures.length}`);
       if (gas) {
         const total = BigInt(gas.computationCost) + BigInt(gas.storageCost) - BigInt(gas.storageRebate);
-        console.log(`  gas         ${total} MIST (${gas.computationCost} compute, ${gas.storageCost} storage, -${gas.storageRebate} rebate)`);
-      }
-
-      if (tx.events?.length) {
-        console.log(`\n  events (${tx.events.length}):`);
-        for (const ev of tx.events) {
-          console.log(`    ${(ev as { eventType?: string }).eventType ?? ev.type}`);
+        console.log(`  gas total     ${total} MIST`);
+        console.log(`  gas compute   ${gas.computationCost} MIST`);
+        console.log(`  gas storage   ${gas.storageCost} MIST`);
+        console.log(`  gas rebate    -${gas.storageRebate} MIST`);
+        if (gas.nonRefundableStorageFee !== "0") {
+          console.log(`  non-refund    ${gas.nonRefundableStorageFee} MIST`);
         }
       }
 
+      // Transaction data
+      if (txData?.commands?.length) {
+        console.log(`\n  commands (${txData.commands.length}):`);
+        for (const cmd of txData.commands) {
+          const kind = Object.keys(cmd).find(k => k !== "$kind") ?? cmd.$kind ?? "unknown";
+          console.log(`    ${kind}`);
+        }
+      }
+
+      // Dependencies
+      if (effects?.dependencies?.length) {
+        console.log(`\n  dependencies (${effects.dependencies.length}):`);
+        for (const dep of effects.dependencies.slice(0, 10)) {
+          console.log(`    ${dep}`);
+        }
+        if (effects.dependencies.length > 10) {
+          console.log(`    ... and ${effects.dependencies.length - 10} more`);
+        }
+      }
+
+      // Changed objects
+      if (effects?.changedObjects?.length) {
+        console.log(`\n  changed objects (${effects.changedObjects.length}):`);
+        for (const co of effects.changedObjects) {
+          const id = co.objectId ? co.objectId.slice(0, 18) + "..." : "";
+          const change = co.inputState && co.outputState
+            ? `${co.inputState} → ${co.outputState}`
+            : co.outputState ?? "changed";
+          console.log(`    ${id}  ${change}`);
+        }
+      }
+
+      // Events
+      if (tx.events?.length) {
+        console.log(`\n  events (${tx.events.length}):`);
+        for (const ev of tx.events) {
+          const evAny = ev as { eventType?: string; sender?: string; json?: Record<string, unknown> };
+          console.log(`    ${evAny.eventType ?? ev.type}`);
+          if (evAny.sender) console.log(`      sender: ${evAny.sender}`);
+        }
+      }
+
+      // Balance changes
       if (tx.balanceChanges?.length) {
         console.log(`\n  balance changes (${tx.balanceChanges.length}):`);
         for (const bc of tx.balanceChanges) {
           const addr = (bc as { address?: string }).address ?? "unknown";
-          const owner = addr.length > 20 ? addr.slice(0, 18) + "..." : addr;
-          console.log(`    ${owner}  ${bc.amount} ${bc.coinType}`);
+          console.log(`    ${addr}  ${bc.amount} ${bc.coinType}`);
         }
       }
 
@@ -1051,34 +1095,96 @@ client
 
 client
   .command("epoch")
-  .description("Get current epoch info and system state")
+  .description("Get epoch info (current if no argument, or a specific epoch)")
+  .argument("[epoch]", "epoch number (omit for current)")
   .option("--json", "output raw JSON", false)
   .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
-  .action(async (opts: { json: boolean; url: string }) => {
+  .action(async (epochArg: string | undefined, opts: { json: boolean; url: string }) => {
     const { getSuiClient } = await import("./rpc.ts");
     const sui = getSuiClient(opts.url);
 
     try {
-      const result = await sui.core.getCurrentSystemState();
-      const state = result.systemState;
+      // Determine epoch number — if not provided, fetch current
+      let epochNum: string;
+      if (epochArg) {
+        epochNum = epochArg;
+      } else {
+        const sysResult = await sui.core.getCurrentSystemState();
+        epochNum = sysResult.systemState.epoch;
+      }
+
+      // Fetch full epoch data via gRPC
+      const { response } = await sui.ledgerService.getEpoch({
+        epoch: epochNum,
+        readMask: { paths: ["*"] },
+      });
+      const e = response.epoch;
+      const ss = e.systemState;
 
       if (opts.json) {
-        console.log(JSON.stringify(state, null, 2));
+        console.log(JSON.stringify(e, (_: string, v: unknown) => typeof v === "bigint" ? v.toString() : v, 2));
         return;
       }
 
-      const start = new Date(Number(state.epochStartTimestampMs)).toISOString();
-      const elapsed = Date.now() - Number(state.epochStartTimestampMs);
-      const remaining = Math.max(0, Number(state.parameters.epochDurationMs) - elapsed);
-      const remainingH = (remaining / 3_600_000).toFixed(1);
-      const durationH = (Number(state.parameters.epochDurationMs) / 3_600_000).toFixed(1);
+      const isCurrent = !e.lastCheckpoint;
+      const startMs = e.start?.seconds ? Number(e.start.seconds) * 1000 : null;
+      const endMs = e.end?.seconds ? Number(e.end.seconds) * 1000 : null;
+      const startIso = startMs ? new Date(startMs).toISOString() : "unknown";
+      const endIso = endMs ? new Date(endMs).toISOString() : null;
 
-      console.log(`\n  epoch             ${state.epoch}`);
-      console.log(`  protocol          v${state.protocolVersion}`);
-      console.log(`  started           ${start}`);
-      console.log(`  duration          ${durationH}h (${remainingH}h remaining)`);
-      console.log(`  ref gas price     ${state.referenceGasPrice} MIST`);
-      console.log(`  safe mode         ${state.safeMode}`);
+      const validators = ss?.validators?.activeValidators ?? [];
+      const totalStake = ss?.validators?.totalStake;
+      const totalStakeSui = totalStake ? (BigInt(totalStake) / 1_000_000_000n).toLocaleString() : null;
+      const subsidy = ss?.stakeSubsidy;
+      const storageFund = ss?.storageFund;
+
+      console.log(`\n  epoch               ${e.epoch}${isCurrent ? " (current)" : ""}`);
+      console.log(`  protocol            v${ss?.protocolVersion ?? "unknown"}`);
+      console.log(`  ref gas price       ${e.referenceGasPrice} MIST`);
+      console.log(`  safe mode           ${ss?.safeMode ?? false}`);
+
+      // Time
+      console.log(`\n  started             ${startIso}`);
+      if (endIso) {
+        const durationMs = endMs! - startMs!;
+        console.log(`  ended               ${endIso}`);
+        console.log(`  duration            ${(durationMs / 3_600_000).toFixed(1)}h`);
+      } else if (startMs) {
+        const elapsed = Date.now() - startMs;
+        const durationMs = Number(ss?.parameters?.epochDurationMs ?? 86_400_000);
+        const remaining = Math.max(0, durationMs - elapsed);
+        console.log(`  duration            ${(durationMs / 3_600_000).toFixed(1)}h (${(remaining / 3_600_000).toFixed(1)}h remaining)`);
+      }
+
+      // Checkpoints
+      console.log(`\n  first checkpoint    ${e.firstCheckpoint}`);
+      if (e.lastCheckpoint) {
+        const range = Number(e.lastCheckpoint) - Number(e.firstCheckpoint) + 1;
+        console.log(`  last checkpoint     ${e.lastCheckpoint} (${range.toLocaleString()} total)`);
+      }
+
+      // Validators
+      console.log(`\n  validators          ${validators.length}`);
+      if (totalStakeSui) console.log(`  total stake         ${totalStakeSui} SUI`);
+
+      // Subsidy
+      if (subsidy) {
+        const balanceSui = (BigInt(subsidy.balance) / 1_000_000_000n).toLocaleString();
+        const distSui = (BigInt(subsidy.currentDistributionAmount) / 1_000_000_000n).toLocaleString();
+        console.log(`\n  subsidy balance     ${balanceSui} SUI`);
+        console.log(`  subsidy/epoch       ${distSui} SUI`);
+        console.log(`  subsidy period      ${subsidy.stakeSubsidyPeriodLength} epochs`);
+        console.log(`  subsidy counter     ${subsidy.distributionCounter}`);
+      }
+
+      // Storage fund
+      if (storageFund) {
+        const rebates = (BigInt(storageFund.totalObjectStorageRebates) / 1_000_000_000n).toLocaleString();
+        const nonRefundable = (BigInt(storageFund.nonRefundableBalance) / 1_000_000_000n).toLocaleString();
+        console.log(`\n  storage rebates     ${rebates} SUI`);
+        console.log(`  non-refundable      ${nonRefundable} SUI`);
+      }
+
       console.log("");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
