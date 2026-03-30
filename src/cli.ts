@@ -1036,7 +1036,11 @@ message
 
 const client = program
   .command("client")
-  .description("Query Sui objects, transactions, and epochs");
+  .alias("c")
+  .description("Query the Sui blockchain");
+
+// -- client helpers (imported from cli-helpers.ts) --
+import { formatOwner, printObject, jsonReplacer, formatBalance, cliError } from "./cli-helpers.ts";
 
 client
   .command("object")
@@ -1063,37 +1067,10 @@ client
         return;
       }
 
-      const owner = obj.owner;
-      const ownerStr = typeof owner === "string" ? owner
-        : owner?.AddressOwner ?? owner?.ObjectOwner
-          ?? (owner?.Shared ? `Shared (v${owner.Shared.initialSharedVersion})` : null)
-          ?? (owner?.Immutable === true ? "Immutable" : "unknown");
-
-      console.log(`\n  object      ${obj.objectId}`);
-      if (obj.type) console.log(`  type        ${obj.type}`);
-      console.log(`  version     ${obj.version}`);
-      console.log(`  digest      ${obj.digest}`);
-      console.log(`  owner       ${ownerStr}`);
-      if (obj.previousTransaction) console.log(`  prev tx     ${obj.previousTransaction}`);
-
-      if (obj.objectBcs) {
-        console.log(`  bcs         ${obj.objectBcs.length} bytes`);
-      }
-
-      if (obj.json) {
-        console.log(`\n  content:`);
-        for (const [key, val] of Object.entries(obj.json)) {
-          const display = typeof val === "object" ? JSON.stringify(val) : String(val);
-          const truncated = display.length > 120 ? display.slice(0, 117) + "..." : display;
-          console.log(`    ${key}: ${truncated}`);
-        }
-      }
-
+      printObject(obj);
       console.log("");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[jun] error: ${msg}`);
-      process.exit(1);
+      cliError(err);
     }
   });
 
@@ -1179,9 +1156,8 @@ client
       if (tx.events?.length) {
         console.log(`\n  events (${tx.events.length}):`);
         for (const ev of tx.events) {
-          const evAny = ev as { eventType?: string; sender?: string; json?: Record<string, unknown> };
-          console.log(`    ${evAny.eventType ?? ev.type}`);
-          if (evAny.sender) console.log(`      sender: ${evAny.sender}`);
+          console.log(`    ${ev.eventType}`);
+          if (ev.sender) console.log(`      sender: ${ev.sender}`);
         }
       }
 
@@ -1189,16 +1165,13 @@ client
       if (tx.balanceChanges?.length) {
         console.log(`\n  balance changes (${tx.balanceChanges.length}):`);
         for (const bc of tx.balanceChanges) {
-          const addr = (bc as { address?: string }).address ?? "unknown";
-          console.log(`    ${addr}  ${bc.amount} ${bc.coinType}`);
+          console.log(`    ${bc.address}  ${bc.amount} ${bc.coinType}`);
         }
       }
 
       console.log("");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[jun] error: ${msg}`);
-      process.exit(1);
+      cliError(err);
     }
   });
 
@@ -1231,7 +1204,7 @@ client
       const ss = e.systemState;
 
       if (opts.json) {
-        console.log(JSON.stringify(e, (_: string, v: unknown) => typeof v === "bigint" ? v.toString() : v, 2));
+        console.log(JSON.stringify(e, jsonReplacer, 2));
         return;
       }
 
@@ -1296,9 +1269,945 @@ client
 
       console.log("");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[jun] error: ${msg}`);
-      process.exit(1);
+      cliError(err);
+    }
+  });
+
+client
+  .command("balance")
+  .alias("bal")
+  .description("Get coin balance for an address")
+  .argument("<address>", "Sui address (0x...)")
+  .option("--coin-type <type>", "coin type (default: 0x2::sui::SUI)")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (address: string, opts: { coinType?: string; json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const coinType = opts.coinType ?? "0x2::sui::SUI";
+      const result = await sui.core.getBalance({ owner: address, coinType });
+      const bal = result.balance;
+
+      if (opts.json) {
+        console.log(JSON.stringify(bal, null, 2));
+        return;
+      }
+
+      // Fetch metadata for decimals/symbol
+      let decimals = 9;
+      let symbol = coinType.split("::").pop() ?? coinType;
+      try {
+        const meta = await sui.core.getCoinMetadata({ coinType });
+        if (meta.coinMetadata) {
+          decimals = meta.coinMetadata.decimals;
+          symbol = meta.coinMetadata.symbol;
+        }
+      } catch { /* metadata unavailable, use defaults */ }
+
+      const raw = BigInt(bal.balance);
+
+      console.log(`\n  address       ${address}`);
+      console.log(`  coin type     ${coinType}`);
+      console.log(`  balance       ${raw.toLocaleString()} (${formatBalance(raw, decimals, symbol)})`);
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("balances")
+  .alias("bals")
+  .description("List all coin balances for an address")
+  .argument("<address>", "Sui address (0x...)")
+  .option("--limit <n>", "max results per page")
+  .option("--cursor <token>", "pagination cursor from previous call")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (address: string, opts: { limit?: string; cursor?: string; json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const limit = opts.limit ? parseInt(opts.limit, 10) : undefined;
+      const result = await sui.core.listBalances({ owner: address, limit, cursor: opts.cursor ?? null });
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      // Batch-fetch metadata for symbol/decimals
+      const metaCache = new Map<string, { decimals: number; symbol: string }>();
+      for (const bal of result.balances) {
+        if (!metaCache.has(bal.coinType)) {
+          try {
+            const meta = await sui.core.getCoinMetadata({ coinType: bal.coinType });
+            if (meta.coinMetadata) {
+              metaCache.set(bal.coinType, { decimals: meta.coinMetadata.decimals, symbol: meta.coinMetadata.symbol });
+            }
+          } catch { /* skip */ }
+        }
+      }
+
+      console.log(`\n  balances for ${address}\n`);
+
+      if (result.balances.length === 0) {
+        console.log("  (no balances)");
+      } else {
+        for (const bal of result.balances) {
+          const raw = BigInt(bal.balance);
+          const meta = metaCache.get(bal.coinType);
+          const decimals = meta?.decimals ?? 9;
+          const symbol = meta?.symbol ?? bal.coinType.split("::").pop() ?? "";
+          console.log(`  ${bal.coinType}`);
+          console.log(`    ${formatBalance(raw, decimals, symbol)} (${raw.toLocaleString()} MIST)\n`);
+        }
+      }
+
+      if (result.hasNextPage && result.cursor) {
+        console.log(`  cursor: ${result.cursor}  (has more pages)`);
+      }
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("coins")
+  .description("List coin objects for an address")
+  .argument("<address>", "Sui address (0x...)")
+  .option("--coin-type <type>", "coin type (default: 0x2::sui::SUI)")
+  .option("--limit <n>", "max results per page")
+  .option("--cursor <token>", "pagination cursor from previous call")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (address: string, opts: { coinType?: string; limit?: string; cursor?: string; json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const coinType = opts.coinType ?? "0x2::sui::SUI";
+      const limit = opts.limit ? parseInt(opts.limit, 10) : undefined;
+      const result = await sui.core.listCoins({ owner: address, coinType, limit, cursor: opts.cursor ?? null });
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(`\n  coins for ${address} (${coinType})\n`);
+
+      if (result.objects.length === 0) {
+        console.log("  (no coins)");
+      } else {
+        const idW = 44;
+        const verW = 10;
+        console.log(`  ${"object id".padEnd(idW)} ${"version".padEnd(verW)} balance`);
+        for (const coin of result.objects) {
+          const short = coin.objectId.slice(0, 18) + "..." + coin.objectId.slice(-4);
+          console.log(`  ${short.padEnd(idW)} ${(coin.version ?? "").toString().padEnd(verW)} ${BigInt(coin.balance ?? "0").toLocaleString()}`);
+        }
+      }
+
+      if (result.hasNextPage && result.cursor) {
+        console.log(`\n  cursor: ${result.cursor}  (has more pages)`);
+      }
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("owned")
+  .alias("own")
+  .description("List objects owned by an address")
+  .argument("<address>", "Sui address (0x...)")
+  .option("--type <move_type>", "filter by Move type")
+  .option("--limit <n>", "max results per page", "10")
+  .option("--cursor <token>", "pagination cursor from previous call")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (address: string, opts: { type?: string; limit: string; cursor?: string; json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const limit = parseInt(opts.limit, 10);
+      const result = await sui.core.listOwnedObjects({
+        owner: address,
+        type: opts.type,
+        limit,
+        cursor: opts.cursor ?? null,
+        include: { json: true },
+      });
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(`\n  objects owned by ${address}${opts.type ? ` (type: ${opts.type})` : ""}\n`);
+
+      if (result.objects.length === 0) {
+        console.log("  (no objects)");
+      } else {
+        const idW = 44;
+        const verW = 10;
+        console.log(`  ${"object id".padEnd(idW)} ${"version".padEnd(verW)} type`);
+        for (const obj of result.objects) {
+          const short = obj.objectId.slice(0, 18) + "..." + obj.objectId.slice(-4);
+          const typeStr = obj.type ?? "unknown";
+          const typeTrunc = typeStr.length > 60 ? typeStr.slice(0, 57) + "..." : typeStr;
+          console.log(`  ${short.padEnd(idW)} ${(obj.version ?? "").toString().padEnd(verW)} ${typeTrunc}`);
+        }
+      }
+
+      const showing = result.objects.length;
+      const pageInfo = result.hasNextPage ? `cursor: ${result.cursor}  (has more pages)` : "(no more pages)";
+      console.log(`\n  showing ${showing}, ${pageInfo}`);
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("objects")
+  .alias("objs")
+  .description("Get multiple objects by ID")
+  .argument("<ids...>", "object IDs (0x...)")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (ids: string[], opts: { json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const result = await sui.core.getObjects({
+        objectIds: ids,
+        include: { json: true, previousTransaction: true },
+      });
+
+      if (opts.json) {
+        console.log(JSON.stringify(result.objects, null, 2));
+        return;
+      }
+
+      for (const item of result.objects) {
+        if (item instanceof Error) {
+          console.log(`\n  error: ${item.message}`);
+          continue;
+        }
+        printObject(item);
+      }
+
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("txs")
+  .description("Get multiple transactions by digest")
+  .argument("<digests...>", "transaction digests (base58)")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (digests: string[], opts: { json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      // Fetch each transaction individually (core.getTransaction)
+      const results = await Promise.all(
+        digests.map(digest => sui.core.getTransaction({
+          digest,
+          include: { effects: true, events: true, transaction: true, balanceChanges: true },
+        }).catch(err => ({ error: err instanceof Error ? err.message : String(err), digest })))
+      );
+
+      if (opts.json) {
+        console.log(JSON.stringify(results, jsonReplacer, 2));
+        return;
+      }
+
+      for (const result of results) {
+        if ("error" in result) {
+          console.log(`\n  error for ${result.digest}: ${result.error}`);
+          continue;
+        }
+        const tx = result.Transaction ?? result.FailedTransaction;
+        if (!tx) continue;
+
+        const status = tx.status?.success ? "success" : `failure (${tx.status?.error?.message ?? "unknown"})`;
+        const gas = tx.effects?.gasUsed;
+        const txData = tx.transaction;
+
+        console.log(`\n  digest        ${tx.digest}`);
+        console.log(`  status        ${status}`);
+        if (txData?.sender) console.log(`  sender        ${txData.sender}`);
+        if (tx.epoch) console.log(`  epoch         ${tx.epoch}`);
+        if (gas) {
+          const total = BigInt(gas.computationCost) + BigInt(gas.storageCost) - BigInt(gas.storageRebate);
+          console.log(`  gas total     ${total} MIST`);
+        }
+
+        if (tx.events?.length) {
+          console.log(`  events        ${tx.events.length}`);
+        }
+        if (tx.balanceChanges?.length) {
+          console.log(`  bal changes   ${tx.balanceChanges.length}`);
+        }
+      }
+
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("dynamic-fields")
+  .alias("df")
+  .description("List dynamic fields of an object")
+  .argument("<parent-id>", "parent object ID (0x...)")
+  .option("--include-value", "include field values", false)
+  .option("--limit <n>", "max results per page")
+  .option("--cursor <token>", "pagination cursor from previous call")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (parentId: string, opts: { includeValue: boolean; limit?: string; cursor?: string; json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const limit = opts.limit ? parseInt(opts.limit, 10) : undefined;
+      const result = await sui.listDynamicFields({
+        parentId,
+        limit,
+        cursor: opts.cursor ?? null,
+        include: { value: opts.includeValue },
+      });
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, jsonReplacer, 2));
+        return;
+      }
+
+      console.log(`\n  dynamic fields for ${parentId}\n`);
+
+      if (result.dynamicFields.length === 0) {
+        console.log("  (no dynamic fields)");
+      } else {
+        for (const df of result.dynamicFields) {
+          const kind = df.$kind === "DynamicObject" ? "Object" : "Field";
+          const fieldId = df.fieldId.slice(0, 18) + "..." + df.fieldId.slice(-4);
+          console.log(`  ${kind.padEnd(8)} ${fieldId}`);
+          console.log(`    name type:  ${df.name.type}`);
+          console.log(`    value type: ${df.valueType}`);
+          const val = df.value as { type: string; bcs: Uint8Array } | undefined;
+          if (opts.includeValue && val) {
+            console.log(`    value bcs:  ${Buffer.from(val.bcs).toString("hex").slice(0, 64)}${val.bcs.length > 32 ? "..." : ""}`);
+          }
+          console.log("");
+        }
+      }
+
+      if (result.hasNextPage && result.cursor) {
+        console.log(`  cursor: ${result.cursor}  (has more pages)`);
+      }
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("checkpoint")
+  .alias("cp")
+  .description("Get checkpoint info by sequence number")
+  .argument("[seq]", "checkpoint sequence number (omit for latest)")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (seqArg: string | undefined, opts: { json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      let seq: bigint;
+      if (seqArg) {
+        seq = BigInt(seqArg);
+      } else {
+        // Get latest checkpoint from service info
+        const { response: info } = await sui.ledgerService.getServiceInfo({});
+        seq = info.checkpointHeight ?? 0n;
+      }
+
+      const { response } = await sui.ledgerService.getCheckpoint({
+        checkpointId: { oneofKind: "sequenceNumber", sequenceNumber: seq },
+        readMask: { paths: ["*"] },
+      });
+      const cp = response.checkpoint;
+      if (!cp) throw new Error(`Checkpoint ${seq} not found`);
+
+      if (opts.json) {
+        console.log(JSON.stringify(cp, jsonReplacer, 2));
+        return;
+      }
+
+      const summary = cp.summary;
+      const ts = summary?.timestamp?.seconds
+        ? new Date(Number(summary.timestamp.seconds) * 1000).toISOString()
+        : null;
+      const txCount = cp.transactions?.length ?? 0;
+
+      console.log(`\n  checkpoint    ${cp.sequenceNumber}`);
+      if (summary?.contentDigest) console.log(`  digest        ${summary.contentDigest}`);
+      if (summary?.epoch !== undefined) console.log(`  epoch         ${summary.epoch}`);
+      if (ts) console.log(`  timestamp     ${ts}`);
+      console.log(`  tx count      ${txCount}`);
+      if (summary?.totalNetworkTransactions !== undefined) {
+        console.log(`  total txs     ${BigInt(summary.totalNetworkTransactions).toLocaleString()}`);
+      }
+      if (summary?.previousDigest) console.log(`  prev digest   ${summary.previousDigest}`);
+      if (summary?.epochRollingGasCostSummary) {
+        const g = summary.epochRollingGasCostSummary;
+        console.log(`  gas compute   ${g.computationCost}`);
+        console.log(`  gas storage   ${g.storageCost}`);
+        console.log(`  gas rebate    ${g.storageRebate}`);
+      }
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("info")
+  .description("Get chain info from the gRPC endpoint")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (opts: { json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const { response } = await sui.ledgerService.getServiceInfo({});
+
+      if (opts.json) {
+        console.log(JSON.stringify(response, jsonReplacer, 2));
+        return;
+      }
+
+      const ts = response.timestamp?.seconds
+        ? new Date(Number(response.timestamp.seconds) * 1000).toISOString()
+        : null;
+
+      console.log(`\n  chain           ${response.chain ?? "unknown"}`);
+      if (response.chainId) console.log(`  chain id        ${response.chainId}`);
+      if (response.epoch !== undefined) console.log(`  epoch           ${response.epoch}`);
+      if (response.checkpointHeight !== undefined) console.log(`  checkpoint      ${BigInt(response.checkpointHeight).toLocaleString()}`);
+      if (ts) console.log(`  timestamp       ${ts}`);
+      if (response.lowestAvailableCheckpoint !== undefined) console.log(`  lowest cp       ${response.lowestAvailableCheckpoint}`);
+      if (response.lowestAvailableCheckpointObjects !== undefined) console.log(`  lowest cp objs  ${response.lowestAvailableCheckpointObjects}`);
+      if (response.server) console.log(`  server          ${response.server}`);
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("coin-meta")
+  .alias("coin")
+  .description("Get coin metadata (name, symbol, decimals)")
+  .argument("<coin-type>", "coin type (e.g. 0x2::sui::SUI)")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (coinType: string, opts: { json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const result = await sui.core.getCoinMetadata({ coinType });
+      const meta = result.coinMetadata;
+      if (!meta) throw new Error(`No metadata found for coin type ${coinType}`);
+
+      if (opts.json) {
+        console.log(JSON.stringify(meta, null, 2));
+        return;
+      }
+
+      console.log(`\n  coin type     ${coinType}`);
+      console.log(`  name          ${meta.name}`);
+      console.log(`  symbol        ${meta.symbol}`);
+      console.log(`  decimals      ${meta.decimals}`);
+      if (meta.description) console.log(`  description   ${meta.description}`);
+      if (meta.iconUrl) console.log(`  icon url      ${meta.iconUrl}`);
+      if (meta.id) console.log(`  metadata id   ${meta.id}`);
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("package")
+  .alias("pkg")
+  .description("Get Move package metadata")
+  .argument("<id>", "package object ID (0x...)")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (id: string, opts: { json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const { response } = await sui.movePackageService.getPackage({ packageId: id });
+      const pkg = response.package;
+      if (!pkg) throw new Error(`Package ${id} not found`);
+
+      if (opts.json) {
+        console.log(JSON.stringify(pkg, jsonReplacer, 2));
+        return;
+      }
+
+      console.log(`\n  package       ${pkg.storageId}`);
+      if (pkg.originalId) console.log(`  original id   ${pkg.originalId}`);
+      if (pkg.version !== undefined) console.log(`  version       ${pkg.version}`);
+
+      if (pkg.modules?.length) {
+        console.log(`\n  modules (${pkg.modules.length}):`);
+        for (const mod of pkg.modules) {
+          const dtCount = mod.datatypes?.length ?? 0;
+          const fnCount = mod.functions?.length ?? 0;
+          console.log(`    ${mod.name ?? "?"}    ${dtCount} type${dtCount !== 1 ? "s" : ""}, ${fnCount} function${fnCount !== 1 ? "s" : ""}`);
+        }
+      }
+
+      if (pkg.typeOrigins?.length) {
+        const shown = pkg.typeOrigins.slice(0, 20);
+        console.log(`\n  type origins (${pkg.typeOrigins.length}):`);
+        for (const to of shown) {
+          console.log(`    ${to.moduleName}::${to.datatypeName} → ${to.packageId}`);
+        }
+        if (pkg.typeOrigins.length > 20) {
+          console.log(`    ... and ${pkg.typeOrigins.length - 20} more`);
+        }
+      }
+
+      if (pkg.linkage?.length) {
+        console.log(`\n  linkage (${pkg.linkage.length}):`);
+        for (const link of pkg.linkage) {
+          console.log(`    ${link.originalId} → ${link.upgradedId} v${link.upgradedVersion}`);
+        }
+      }
+
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("function")
+  .alias("fn")
+  .description("Get Move function signature")
+  .argument("<type>", "fully qualified name (0xPKG::module::function)")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (typeArg: string, opts: { json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const parts = typeArg.split("::");
+      if (parts.length !== 3) throw new Error("Expected format: 0xPKG::module::function_name");
+      const [packageId, moduleName, name] = parts as [string, string, string];
+
+      const result = await sui.core.getMoveFunction({ packageId, moduleName, name });
+      const fn = result.function;
+
+      if (opts.json) {
+        console.log(JSON.stringify(fn, null, 2));
+        return;
+      }
+
+      const formatSigBody = (body: any): string => {
+        if (!body) return "unknown";
+        const kind = body.$kind ?? Object.keys(body).find((k: string) => k !== "$kind" && k !== "reference") ?? "";
+        if (["u8", "u16", "u32", "u64", "u128", "u256", "bool", "address", "unknown"].includes(kind)) return kind;
+        if (kind === "vector") return `vector<${formatSigBody(body.vector)}>`;
+        if (kind === "datatype") {
+          const dt = body.datatype;
+          const typeParams = dt.typeParameters?.length
+            ? `<${dt.typeParameters.map(formatSigBody).join(", ")}>`
+            : "";
+          return `${dt.typeName}${typeParams}`;
+        }
+        if (kind === "typeParameter") return `T${body.index ?? body.typeParameter ?? ""}`;
+        return kind;
+      };
+
+      const formatSig = (sig: any): string => {
+        const ref = sig.reference === "mutable" ? "&mut " : sig.reference === "immutable" ? "&" : "";
+        return ref + formatSigBody(sig.body);
+      };
+
+      console.log(`\n  function      ${fn.name}`);
+      console.log(`  package       ${fn.packageId}`);
+      console.log(`  module        ${fn.moduleName}`);
+      console.log(`  visibility    ${fn.visibility}`);
+      console.log(`  is entry      ${fn.isEntry}`);
+
+      if (fn.typeParameters?.length) {
+        console.log(`\n  type params (${fn.typeParameters.length}):`);
+        for (let i = 0; i < fn.typeParameters.length; i++) {
+          const tp = fn.typeParameters[i]!;
+          const constraints = tp.constraints?.length ? tp.constraints.join(" + ") : "none";
+          console.log(`    T${i}: [${constraints}]`);
+        }
+      }
+
+      if (fn.parameters?.length) {
+        console.log(`\n  parameters (${fn.parameters.length}):`);
+        for (const param of fn.parameters) {
+          console.log(`    ${formatSig(param)}`);
+        }
+      }
+
+      if (fn.returns?.length) {
+        console.log(`\n  returns (${fn.returns.length}):`);
+        for (const ret of fn.returns) {
+          console.log(`    ${formatSig(ret)}`);
+        }
+      } else {
+        console.log(`\n  returns       (none)`);
+      }
+
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("package-versions")
+  .alias("pkg-v")
+  .description("List all versions of a Move package")
+  .argument("<id>", "package object ID (any version)")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (id: string, opts: { json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const { response } = await sui.movePackageService.listPackageVersions({ packageId: id });
+
+      if (opts.json) {
+        console.log(JSON.stringify(response.versions, jsonReplacer, 2));
+        return;
+      }
+
+      console.log(`\n  versions of package ${id}\n`);
+
+      if (!response.versions?.length) {
+        console.log("  (no versions found)");
+      } else {
+        const verW = 10;
+        console.log(`  ${"version".padEnd(verW)} package id`);
+        for (const ver of response.versions) {
+          console.log(`  ${String(ver.version ?? "?").padEnd(verW)} ${ver.packageId ?? "?"}`);
+        }
+      }
+
+      if (response.nextPageToken?.length) {
+        console.log(`\n  (has more pages)`);
+      }
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("gas-price")
+  .description("Get the current reference gas price")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (opts: { json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const result = await sui.core.getReferenceGasPrice();
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(`\n  reference gas price    ${result.referenceGasPrice} MIST`);
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("protocol-config")
+  .alias("proto")
+  .description("Get protocol configuration (feature flags and attributes)")
+  .option("--all", "show all entries (default: first 20 per section)", false)
+  .option("--flags-only", "show only feature flags", false)
+  .option("--attrs-only", "show only attributes", false)
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (opts: { all: boolean; flagsOnly: boolean; attrsOnly: boolean; json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const result = await sui.core.getProtocolConfig();
+      const config = result.protocolConfig;
+
+      if (opts.json) {
+        console.log(JSON.stringify(config, null, 2));
+        return;
+      }
+
+      console.log(`\n  protocol version    ${config.protocolVersion}`);
+
+      if (!opts.attrsOnly) {
+        const flags = Object.entries(config.featureFlags).sort(([a], [b]) => a.localeCompare(b));
+        const showFlags = opts.all ? flags : flags.slice(0, 20);
+        console.log(`\n  feature flags (${flags.length}):`);
+        for (const [key, val] of showFlags) {
+          console.log(`    ${key.padEnd(50)} ${val}`);
+        }
+        if (!opts.all && flags.length > 20) {
+          console.log(`    ... and ${flags.length - 20} more (use --all to show all)`);
+        }
+      }
+
+      if (!opts.flagsOnly) {
+        const attrs = Object.entries(config.attributes).sort(([a], [b]) => a.localeCompare(b));
+        const showAttrs = opts.all ? attrs : attrs.slice(0, 20);
+        console.log(`\n  attributes (${attrs.length}):`);
+        for (const [key, val] of showAttrs) {
+          console.log(`    ${key.padEnd(50)} ${val ?? "null"}`);
+        }
+        if (!opts.all && attrs.length > 20) {
+          console.log(`    ... and ${attrs.length - 20} more (use --all to show all)`);
+        }
+      }
+
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("system-state")
+  .alias("sys")
+  .description("Get current system state snapshot")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (opts: { json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const result = await sui.core.getCurrentSystemState();
+      const ss = result.systemState;
+
+      if (opts.json) {
+        console.log(JSON.stringify(ss, jsonReplacer, 2));
+        return;
+      }
+
+      console.log(`\n  epoch               ${ss.epoch}`);
+      console.log(`  protocol            v${ss.protocolVersion}`);
+      console.log(`  ref gas price       ${ss.referenceGasPrice} MIST`);
+      console.log(`  safe mode           ${ss.safeMode}`);
+
+      const startMs = Number(ss.epochStartTimestampMs);
+      if (startMs) {
+        console.log(`  epoch start         ${new Date(startMs).toISOString()}`);
+        const durationMs = Number(ss.parameters?.epochDurationMs ?? 86_400_000);
+        const remaining = Math.max(0, durationMs - (Date.now() - startMs));
+        console.log(`  epoch duration      ${(durationMs / 3_600_000).toFixed(1)}h (${(remaining / 3_600_000).toFixed(1)}h remaining)`);
+      }
+
+      if (ss.storageFund) {
+        const rebates = (BigInt(ss.storageFund.totalObjectStorageRebates) / 1_000_000_000n).toLocaleString();
+        const nonRefundable = (BigInt(ss.storageFund.nonRefundableBalance) / 1_000_000_000n).toLocaleString();
+        console.log(`\n  storage rebates     ${rebates} SUI`);
+        console.log(`  non-refundable      ${nonRefundable} SUI`);
+      }
+
+      if (ss.stakeSubsidy) {
+        const sub = ss.stakeSubsidy;
+        const balanceSui = (BigInt(sub.balance) / 1_000_000_000n).toLocaleString();
+        const distSui = (BigInt(sub.currentDistributionAmount) / 1_000_000_000n).toLocaleString();
+        console.log(`\n  subsidy balance     ${balanceSui} SUI`);
+        console.log(`  subsidy/epoch       ${distSui} SUI`);
+      }
+
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("ping")
+  .description("Measure gRPC endpoint latency")
+  .option("--count <n>", "number of pings", "5")
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (opts: { count: string; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+    const isHayabusa = opts.url.includes("hayabusa");
+
+    try {
+      const count = parseInt(opts.count, 10);
+
+      const measure = async (fn: () => Promise<void>) => {
+        const times: number[] = [];
+        for (let i = 0; i < count; i++) {
+          const start = performance.now();
+          await fn();
+          times.push(performance.now() - start);
+        }
+        return times;
+      };
+
+      const printStats = (times: number[]) => {
+        const sorted = [...times].sort((a, b) => a - b);
+        for (let i = 0; i < times.length; i++) {
+          console.log(`  ${(i + 1).toString().padStart(2)}   ${times[i]!.toFixed(1)} ms`);
+        }
+        console.log(`\n  min       ${sorted[0]!.toFixed(1)} ms`);
+        console.log(`  max       ${sorted[sorted.length - 1]!.toFixed(1)} ms`);
+        console.log(`  avg       ${(times.reduce((a, b) => a + b, 0) / times.length).toFixed(1)} ms`);
+        console.log(`  median    ${sorted[Math.floor(sorted.length / 2)]!.toFixed(1)} ms`);
+      };
+
+      console.log(`\n  pinging ${opts.url} ...\n`);
+
+      // GetServiceInfo — not cacheable, measures real round-trip
+      const uncachedTimes = await measure(() => sui.ledgerService.getServiceInfo({}));
+
+      console.log("  ── latency (GetServiceInfo) ──\n");
+      printStats(uncachedTimes);
+
+      // Hayabusa: test cached path via GetTransaction (tier 1, always cached)
+      if (isHayabusa) {
+        // Get a tx digest from a recent checkpoint
+        const { response: info } = await sui.ledgerService.getServiceInfo({});
+        const cpSeq = (info.checkpointHeight ?? 0n) - 10n;
+        const { response: cpResp } = await sui.ledgerService.getCheckpoint({
+          checkpointId: { oneofKind: "sequenceNumber", sequenceNumber: cpSeq },
+          readMask: { paths: ["transactions.digest"] },
+        });
+        const digest = cpResp.checkpoint?.transactions?.[0]?.digest;
+
+        if (digest) {
+          // Warm the cache
+          await sui.core.getTransaction({ digest });
+
+          console.log(`\n  ── cached (GetTransaction via hayabusa L1/L2) ──\n`);
+          const cachedTimes = await measure(() => sui.core.getTransaction({ digest }));
+          printStats(cachedTimes);
+        }
+      }
+
+      console.log("");
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+client
+  .command("simulate")
+  .alias("sim")
+  .description("Simulate a transaction (dry-run, read-only)")
+  .argument("<base64-tx>", "base64-encoded transaction bytes")
+  .option("--no-checks", "disable validation checks")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (base64Tx: string, opts: { checks: boolean; json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const txBytes = Uint8Array.from(atob(base64Tx), c => c.charCodeAt(0));
+      const result = await sui.core.simulateTransaction({
+        transaction: txBytes,
+        include: { effects: true, events: true, balanceChanges: true, transaction: true },
+        checksEnabled: opts.checks,
+      });
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, jsonReplacer, 2));
+        return;
+      }
+
+      const tx = result.Transaction ?? result.FailedTransaction;
+      const simStatus = result.$kind === "FailedTransaction" ? "FAILED" : "SUCCESS";
+
+      console.log(`\n  ── SIMULATED (dry-run) ──\n`);
+      console.log(`  status        ${simStatus}`);
+
+      if (tx) {
+        if (tx.transaction?.sender) console.log(`  sender        ${tx.transaction.sender}`);
+
+        const gas = tx.effects?.gasUsed;
+        if (gas) {
+          const total = BigInt(gas.computationCost) + BigInt(gas.storageCost) - BigInt(gas.storageRebate);
+          console.log(`  gas total     ${total} MIST`);
+          console.log(`  gas compute   ${gas.computationCost} MIST`);
+          console.log(`  gas storage   ${gas.storageCost} MIST`);
+          console.log(`  gas rebate    -${gas.storageRebate} MIST`);
+        }
+
+        if (tx.effects?.changedObjects?.length) {
+          console.log(`\n  changed objects (${tx.effects.changedObjects.length}):`);
+          for (const co of tx.effects.changedObjects) {
+            const id = co.objectId ? co.objectId.slice(0, 18) + "..." : "";
+            const change = co.inputState && co.outputState
+              ? `${co.inputState} → ${co.outputState}`
+              : co.outputState ?? "changed";
+            console.log(`    ${id}  ${change}`);
+          }
+        }
+
+        if (tx.events?.length) {
+          console.log(`\n  events (${tx.events.length}):`);
+          for (const ev of tx.events) {
+            console.log(`    ${ev.eventType}`);
+          }
+        }
+
+        if (tx.balanceChanges?.length) {
+          console.log(`\n  balance changes (${tx.balanceChanges.length}):`);
+          for (const bc of tx.balanceChanges) {
+            console.log(`    ${bc.address}  ${bc.amount} ${bc.coinType}`);
+          }
+        }
+      }
+
+      console.log("");
+    } catch (err) {
+      cliError(err);
     }
   });
 
@@ -1326,9 +2235,7 @@ ns
       if (opts.json) { console.log(JSON.stringify({ name, address })); return; }
       console.log(`\n  ${name} \u2192 ${address}\n`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[jun] error: ${msg}`);
-      process.exit(1);
+      cliError(err);
     }
   });
 
@@ -1348,9 +2255,7 @@ ns
       if (opts.json) { console.log(JSON.stringify({ address, name })); return; }
       console.log(`\n  ${address} \u2192 ${name}\n`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[jun] error: ${msg}`);
-      process.exit(1);
+      cliError(err);
     }
   });
 
@@ -1398,9 +2303,7 @@ configCmd
       console.log(`  grpc_url    ${config.grpcUrl}`);
       console.log(`  archive_url ${config.archiveUrl}\n`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[jun] error: ${msg}`);
-      process.exit(1);
+      cliError(err);
     }
   });
 
@@ -1560,9 +2463,7 @@ program
       const result = generateFieldDSL(descriptor);
       console.log(formatCodegenResult(result));
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[jun] error: ${msg}`);
-      process.exit(1);
+      cliError(err);
     } finally {
       client.close();
     }
@@ -1574,13 +2475,14 @@ program
 
 program
   .command("mcp")
-  .description("Start MCP server for AI-assisted analysis of a SQLite database")
-  .argument("<db>", "path to SQLite database file")
-  .action(async (dbPath: string) => {
+  .description("Start MCP server for Sui chain queries and optional SQLite analysis")
+  .argument("[db]", "path to SQLite database file (optional)")
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .action(async (dbPath: string | undefined, opts: { url: string }) => {
     const { createMcpServer } = await import("./mcp.ts");
     const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
 
-    const { server } = createMcpServer(dbPath);
+    const { server } = createMcpServer({ dbPath, grpcUrl: opts.url });
     const transport = new StdioServerTransport();
     await server.connect(transport);
   });
