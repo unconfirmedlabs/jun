@@ -1,6 +1,6 @@
 # jun
 
-Sui event indexer for Bun. Native gRPC streaming over HTTP/2 with BCS binary decoding.
+Sui swiss army knife for Bun. Checkpoint streaming, cryptographic verification, message signing, and event indexing — all with native gRPC over HTTP/2 and BCS binary decoding.
 
 > **Status:** Early development, building in public.
 
@@ -115,6 +115,62 @@ No trust required in the archive CDN — the math proves the data is authentic.
 #### Data parity
 
 Stream, fetch, and replay produce identical output for the same checkpoint range — transactions, digests, senders, status, gas costs, events, and timestamps all match.
+
+### Verify
+
+Cryptographically verify transactions and objects against signed checkpoints. Fetches data from the [checkpoint archive](https://checkpoints.mainnet.sui.io/) and runs the full [kei](https://github.com/unconfirmedlabs/kei) verification chain: BLS signature → contents digest → effects → events → objects.
+
+```bash
+# Verify a transaction
+jun verify tx 8bFJ3kN...
+jun verify transaction 8bFJ3kN...
+
+# Verify an object's last state
+jun verify obj 0x5
+jun verify object 0xabc123...
+```
+
+```
+  ✓ Transaction located — checkpoint 259687000
+  ✓ Checkpoint fetched from archive — 12 transactions
+  ✓ Checkpoint signature verified — epoch 1082, 127 validators
+  ✓ Checkpoint contents verified — 12 transactions
+  ✓ Transaction found in checkpoint — index 1
+  ✓ Transaction effects verified — 1735 bytes
+  ✓ Transaction events verified — 616 bytes
+
+  Transaction 8bFJ3kN... is cryptographically verified
+  via checkpoint 259687000 (epoch 1082)
+```
+
+Options: `--url` (RPC endpoint), `--archive-url` (archive CDN), `--grpc-url` (committee fetching).
+
+### Message
+
+Sign and verify Sui personal messages using your local keystore (`~/.sui/sui_config/sui.keystore`).
+
+```bash
+# Sign a message with your active keypair
+jun message sign "hello world"
+jun msg sign "hello world"
+
+# Sign with a specific address
+jun msg sign "hello" --address 0xabc...
+
+# Verify a signature
+jun message verify "hello world" <signature> <address>
+jun msg verify "hello world" <signature> <address>
+```
+
+```json
+{
+  "message": "hello world",
+  "address": "0xf84c...",
+  "signature": "AH+Gl+brQVCq..."
+}
+```
+
+Supports ed25519, secp256k1, and secp256r1 key schemes.
 
 ### Codegen
 
@@ -278,7 +334,9 @@ Jun uses `@grpc/grpc-js` with proto files directly from [MystenLabs/sui-apis](ht
 - [x] Light client verification via [kei](https://github.com/unconfirmedlabs/kei)
 - [x] BCS event decoding via `@mysten/bcs`
 - [x] Full TransactionKind BCS support (all 11 variants)
-- [x] CLI: stream, fetch, replay, codegen, mcp, chat
+- [x] Transaction and object verification (effects, events, objects)
+- [x] Personal message signing and verification
+- [x] CLI: stream, fetch, replay, verify, message, codegen, mcp, chat
 - [x] SQLite + JSONL export
 - [x] Auto-generate BCS schemas from on-chain type layouts
 - [x] Data parity between stream, fetch, and replay
@@ -292,9 +350,11 @@ Jun uses `@grpc/grpc-js` with proto files directly from [MystenLabs/sui-apis](ht
 
 ```
 src/
-  cli.ts          CLI (jun stream, jun fetch, jun replay, jun codegen, jun mcp, jun chat)
+  cli.ts          CLI (stream, fetch, replay, verify, message, codegen, mcp, chat)
   grpc.ts         Native gRPC client (subscribe + fetch + type introspection)
   archive.ts      Checkpoint archive client (fetch + zstd + proto + BCS decode + verify)
+  verify.ts       Transaction and object verification orchestration (kei)
+  message.ts      Personal message signing/verification (keystore integration)
   mcp.ts          MCP server (schema resource + query/summary tools)
   sui-bcs.ts      Complete TransactionKind BCS (all 11 variants the SDK is missing)
   codegen.ts      On-chain type → field DSL mapping
