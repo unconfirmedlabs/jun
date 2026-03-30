@@ -16,6 +16,7 @@ import {
   type PreparedCommittee,
 } from "@unconfirmed/kei";
 import { fetchRawCheckpoint, getCommittee, type RawCheckpoint } from "./archive.ts";
+import { jsonRpc } from "./rpc.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -45,17 +46,6 @@ export interface VerifyObjectResult extends VerifyTxResult {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-async function jsonRpc(url: string, method: string, params: unknown[]) {
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  });
-  const json = (await resp.json()) as { result?: unknown; error?: { message: string } };
-  if (json.error) throw new Error(`RPC error: ${json.error.message}`);
-  return json.result;
-}
 
 function hexToBytes(hex: string): Uint8Array {
   const clean = (hex.startsWith("0x") ? hex.slice(2) : hex).padStart(64, "0");
@@ -129,7 +119,7 @@ export async function verifyTransaction(
   const steps: VerifyStep[] = [];
 
   // 1. Look up which checkpoint contains this transaction
-  const txInfo = (await jsonRpc(opts.rpcUrl, "sui_getTransactionBlock", [digest, {}])) as {
+  const txInfo = (await jsonRpc("sui_getTransactionBlock", [digest, {}], opts.rpcUrl)) as {
     checkpoint: string;
   };
   if (!txInfo?.checkpoint) throw new Error(`Transaction ${digest} not found or has no checkpoint`);
@@ -188,10 +178,10 @@ export async function verifyObject(
   opts: VerifyOptions,
 ): Promise<VerifyObjectResult> {
   // 1. Look up which transaction last modified this object
-  const objInfo = (await jsonRpc(opts.rpcUrl, "sui_getObject", [
+  const objInfo = (await jsonRpc("sui_getObject", [
     objectId,
     { showPreviousTransaction: true },
-  ])) as { data?: { previousTransaction: string } };
+  ], opts.rpcUrl)) as { data?: { previousTransaction: string } };
 
   const txDigest = objInfo?.data?.previousTransaction;
   if (!txDigest) throw new Error(`Object ${objectId} not found`);

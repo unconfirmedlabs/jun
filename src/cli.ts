@@ -900,6 +900,209 @@ message
   });
 
 // ---------------------------------------------------------------------------
+// Client command
+// ---------------------------------------------------------------------------
+
+const client = program
+  .command("client")
+  .description("Query Sui objects and transactions");
+
+client
+  .command("object")
+  .alias("obj")
+  .description("Get object data by ID")
+  .argument("<id>", "object ID (0x...)")
+  .option("--bcs", "return BCS-serialized object data", false)
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
+  .action(async (id: string, opts: { bcs: boolean; json: boolean; url: string }) => {
+    const { jsonRpc } = await import("./rpc.ts");
+
+    try {
+      const options = opts.bcs
+        ? { showBcs: true, showType: true, showOwner: true, showPreviousTransaction: true, showStorageRebate: true }
+        : { showType: true, showOwner: true, showPreviousTransaction: true, showContent: true, showStorageRebate: true };
+
+      const result = (await jsonRpc("sui_getObject", [id, options], opts.url)) as {
+        data?: {
+          objectId: string;
+          version: string;
+          digest: string;
+          type?: string;
+          owner?: { AddressOwner?: string; ObjectOwner?: string; Shared?: { initial_shared_version: string }; Immutable?: boolean };
+          previousTransaction?: string;
+          storageRebate?: string;
+          content?: { type: string; fields: Record<string, unknown> };
+          bcs?: { bcsBytes: string; type: string };
+        };
+        error?: { code: string; message?: string };
+      };
+
+      if (result?.error) throw new Error(result.error.message ?? result.error.code);
+      if (!result?.data) throw new Error(`Object ${id} not found`);
+
+      const obj = result.data;
+
+      if (opts.json) {
+        console.log(JSON.stringify(obj, null, 2));
+        return;
+      }
+
+      const ownerStr = obj.owner
+        ? obj.owner.AddressOwner ?? obj.owner.ObjectOwner
+          ?? (obj.owner.Shared ? `Shared (v${obj.owner.Shared.initial_shared_version})` : null)
+          ?? (obj.owner.Immutable ? "Immutable" : "unknown")
+        : "unknown";
+
+      console.log(`\n  object    ${obj.objectId}`);
+      if (obj.type) console.log(`  type      ${obj.type}`);
+      console.log(`  version   ${obj.version}`);
+      console.log(`  digest    ${obj.digest}`);
+      console.log(`  owner     ${ownerStr}`);
+      if (obj.previousTransaction) console.log(`  prev tx   ${obj.previousTransaction}`);
+      if (obj.storageRebate) console.log(`  rebate    ${obj.storageRebate} MIST`);
+
+      if (obj.content?.fields && !opts.bcs) {
+        console.log(`\n  content (${obj.content.type}):`);
+        for (const [key, val] of Object.entries(obj.content.fields)) {
+          const display = typeof val === "object" ? JSON.stringify(val) : String(val);
+          const truncated = display.length > 80 ? display.slice(0, 77) + "..." : display;
+          console.log(`    ${key}: ${truncated}`);
+        }
+      }
+
+      if (obj.bcs && opts.bcs) {
+        console.log(`\n  bcs (${obj.bcs.bcsBytes.length} chars base64, type: ${obj.bcs.type})`);
+      }
+
+      console.log("");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[jun] error: ${msg}`);
+      process.exit(1);
+    }
+  });
+
+client
+  .command("tx-block")
+  .alias("txb")
+  .description("Get transaction block data by digest")
+  .argument("<digest>", "transaction digest (base58)")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
+  .action(async (digest: string, opts: { json: boolean; url: string }) => {
+    const { jsonRpc } = await import("./rpc.ts");
+
+    try {
+      const result = (await jsonRpc("sui_getTransactionBlock", [digest, {
+        showInput: true,
+        showEffects: true,
+        showEvents: true,
+        showObjectChanges: true,
+        showBalanceChanges: true,
+      }], opts.url)) as {
+        digest: string;
+        checkpoint?: string;
+        timestampMs?: string;
+        transaction?: { data?: { sender?: string; transaction?: { kind?: string } }; txSignatures?: string[] };
+        effects?: { status?: { status: string }; gasUsed?: { computationCost: string; storageCost: string; storageRebate: string; nonRefundableStorageFee: string } };
+        events?: Array<{ type: string; sender: string; parsedJson?: Record<string, unknown> }>;
+        objectChanges?: Array<{ type: string; objectType?: string; objectId?: string; sender?: string }>;
+        balanceChanges?: Array<{ owner: { AddressOwner?: string }; coinType: string; amount: string }>;
+      };
+
+      if (!result) throw new Error(`Transaction ${digest} not found`);
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      const status = result.effects?.status?.status ?? "unknown";
+      const gas = result.effects?.gasUsed;
+      const sender = result.transaction?.data?.sender ?? "unknown";
+      const ts = result.timestampMs ? new Date(Number(result.timestampMs)).toISOString() : null;
+
+      console.log(`\n  digest      ${result.digest}`);
+      console.log(`  status      ${status}`);
+      console.log(`  sender      ${sender}`);
+      if (result.checkpoint) console.log(`  checkpoint  ${result.checkpoint}`);
+      if (ts) console.log(`  timestamp   ${ts}`);
+      if (gas) {
+        const total = BigInt(gas.computationCost) + BigInt(gas.storageCost) - BigInt(gas.storageRebate);
+        console.log(`  gas         ${total} MIST (${gas.computationCost} compute, ${gas.storageCost} storage, -${gas.storageRebate} rebate)`);
+      }
+
+      if (result.events?.length) {
+        console.log(`\n  events (${result.events.length}):`);
+        for (const ev of result.events) {
+          console.log(`    ${ev.type}`);
+        }
+      }
+
+      if (result.objectChanges?.length) {
+        console.log(`\n  object changes (${result.objectChanges.length}):`);
+        for (const oc of result.objectChanges) {
+          const id = oc.objectId ? oc.objectId.slice(0, 18) + "..." : "";
+          const typ = oc.objectType ?? "";
+          console.log(`    ${oc.type.padEnd(10)} ${id}  ${typ}`);
+        }
+      }
+
+      if (result.balanceChanges?.length) {
+        console.log(`\n  balance changes (${result.balanceChanges.length}):`);
+        for (const bc of result.balanceChanges) {
+          const owner = bc.owner.AddressOwner?.slice(0, 18) + "..." ?? "unknown";
+          console.log(`    ${owner}  ${bc.amount} ${bc.coinType}`);
+        }
+      }
+
+      console.log("");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[jun] error: ${msg}`);
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// Name service command
+// ---------------------------------------------------------------------------
+
+const ns = program
+  .command("ns")
+  .description("SuiNS name service lookups");
+
+ns
+  .command("resolve")
+  .description("Resolve a SuiNS name to an address, or an address to a name")
+  .argument("<value>", "SuiNS name (e.g. example.sui) or address (0x...)")
+  .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
+  .action(async (value: string, opts: { url: string }) => {
+    const { jsonRpc } = await import("./rpc.ts");
+
+    try {
+      if (value.endsWith(".sui")) {
+        // Name → Address
+        const address = (await jsonRpc("suix_resolveNameServiceAddress", [value], opts.url)) as string | null;
+        if (!address) throw new Error(`Name "${value}" not found`);
+        console.log(`\n  ${value} \u2192 ${address}\n`);
+      } else {
+        // Address → Name
+        const result = (await jsonRpc("suix_resolveNameServiceNames", [value], opts.url)) as { data?: string[] };
+        if (!result?.data?.length) throw new Error(`No SuiNS name for ${value}`);
+        for (const name of result.data) {
+          console.log(`\n  ${value} \u2192 ${name}\n`);
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[jun] error: ${msg}`);
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
 // Codegen command
 // ---------------------------------------------------------------------------
 
