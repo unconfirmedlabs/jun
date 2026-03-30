@@ -849,6 +849,57 @@ verify
   });
 
 // ---------------------------------------------------------------------------
+// Message command
+// ---------------------------------------------------------------------------
+
+const message = program
+  .command("message")
+  .alias("msg")
+  .description("Sign and verify Sui personal messages");
+
+message
+  .command("sign")
+  .description("Sign a personal message with your active Sui keypair")
+  .argument("<message>", "message to sign")
+  .option("--address <address>", "use a specific address from keystore (default: active)")
+  .action(async (msg: string, opts: { address?: string }) => {
+    const { signMessage } = await import("./message.ts");
+
+    try {
+      const result = await signMessage(msg, opts.address);
+      console.log(JSON.stringify(result, null, 2));
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error(`[jun] error: ${detail}`);
+      process.exit(1);
+    }
+  });
+
+message
+  .command("verify")
+  .description("Verify a Sui personal message signature")
+  .argument("<message>", "original message")
+  .argument("<signature>", "base64-encoded signature")
+  .argument("<address>", "expected signer address (0x...)")
+  .action(async (msg: string, signature: string, address: string) => {
+    const { verifyMessage } = await import("./message.ts");
+
+    try {
+      const result = await verifyMessage(msg, signature, address);
+      if (result.valid) {
+        console.error(`\n  \u2713 Valid ${result.scheme} signature from ${result.address}\n`);
+      } else {
+        console.error(`\n  \u2717 Invalid signature\n`);
+        process.exit(1);
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error(`[jun] error: ${detail}`);
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
 // Codegen command
 // ---------------------------------------------------------------------------
 
