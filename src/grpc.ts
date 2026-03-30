@@ -172,9 +172,13 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
   const creds = grpc.credentials.createSsl();
   const readMask = options.readMask ?? READ_MASK_PATHS;
 
-  const subClient = new SubscriptionService(options.url, creds);
-  const ledgerClient = new LedgerService(options.url, creds);
-  const moveClient = new MovePackageService(options.url, creds);
+  // Normalize URL for @grpc/grpc-js: strip https://, ensure :443
+  let addr = options.url.replace(/^https?:\/\//, "");
+  if (!addr.includes(":")) addr += ":443";
+
+  const subClient = new SubscriptionService(addr, creds);
+  const ledgerClient = new LedgerService(addr, creds);
+  const moveClient = new MovePackageService(addr, creds);
 
   return {
     subscribeCheckpoints(): AsyncIterable<GrpcCheckpointResponse> {

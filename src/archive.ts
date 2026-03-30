@@ -13,6 +13,7 @@ import { verifyCheckpoint as keiVerify, PreparedCommittee } from "@unconfirmed/k
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import protobuf from "protobufjs";
+import { cacheGet, cachePut } from "./cache.ts";
 import path from "path";
 import type { GrpcCheckpointResponse, GrpcEvent } from "./grpc.ts";
 import { parseSender } from "./sui-bcs.ts";
@@ -100,6 +101,23 @@ export async function getCheckpointType(): Promise<protobuf.Type> {
   return checkpointType;
 }
 
+// ─── Cached archive fetch ────────────────────────────────────────────────────
+
+/** Fetch compressed checkpoint bytes with local cache. */
+async function fetchCompressed(seq: bigint, archiveUrl: string): Promise<Uint8Array> {
+  const cached = await cacheGet(seq);
+  if (cached) return cached;
+
+  const url = `${archiveUrl}/${seq}.binpb.zst`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(`Archive fetch failed: ${resp.status} ${resp.statusText} for checkpoint ${seq}`);
+  }
+  const compressed = new Uint8Array(await resp.arrayBuffer());
+  await cachePut(seq, compressed);
+  return compressed;
+}
+
 // ─── Archive client ──────────────────────────────────────────────────────────
 
 export interface ArchiveClientOptions {
@@ -122,6 +140,13 @@ export interface ArchiveClient {
 // Cache prepared committees by epoch (committee changes ~once per 24h)
 const committeeCache = new Map<string, PreparedCommittee>();
 
+/** Normalize URL for @grpc/grpc-js: strip https://, ensure :443 */
+function toNativeGrpcUrl(url: string): string {
+  let addr = url.replace(/^https?:\/\//, "");
+  if (!addr.includes(":")) addr += ":443";
+  return addr;
+}
+
 export async function getCommittee(grpcUrl: string, epoch: string): Promise<PreparedCommittee> {
   if (committeeCache.has(epoch)) return committeeCache.get(epoch)!;
 
@@ -130,7 +155,7 @@ export async function getCommittee(grpcUrl: string, epoch: string): Promise<Prep
     keepCase: false, longs: String, enums: String, defaults: true, oneofs: true, includeDirs: [PROTO_DIR],
   });
   const proto = grpc.loadPackageDefinition(def) as any;
-  const client = new proto.sui.rpc.v2.LedgerService(grpcUrl, grpc.credentials.createSsl());
+  const client = new proto.sui.rpc.v2.LedgerService(toNativeGrpcUrl(grpcUrl), grpc.credentials.createSsl());
 
   const resp = await new Promise<any>((resolve, reject) => {
     client.GetEpoch({ epoch, readMask: { paths: ["committee"] } }, (err: any, res: any) => {
@@ -164,15 +189,10 @@ export function createArchiveClient(options?: ArchiveClientOptions): ArchiveClie
     async fetchCheckpoint(seq: bigint): Promise<GrpcCheckpointResponse> {
       const Checkpoint = await getCheckpointType();
 
-      // 1. Fetch compressed checkpoint from archive
-      const url = `${archiveUrl}/${seq}.binpb.zst`;
-      const resp = await fetch(url);
-      if (!resp.ok) {
-        throw new Error(`Archive fetch failed: ${resp.status} ${resp.statusText} for checkpoint ${seq}`);
-      }
+      // 1. Fetch compressed checkpoint (cache-aware)
+      const compressed = await fetchCompressed(seq, archiveUrl);
 
       // 2. Zstd decompress (Bun built-in)
-      const compressed = new Uint8Array(await resp.arrayBuffer());
       const decompressed = zstdDecompressSync(Buffer.from(compressed));
 
       // 3. Protobuf decode outer Checkpoint
@@ -294,12 +314,7 @@ export async function fetchRawCheckpoint(
   archiveUrl = "https://checkpoints.mainnet.sui.io",
 ): Promise<RawCheckpoint> {
   const Checkpoint = await getCheckpointType();
-  const url = `${archiveUrl.replace(/\/$/, "")}/${seq}.binpb.zst`;
-  const resp = await fetch(url);
-  if (!resp.ok) {
-    throw new Error(`Archive fetch failed: ${resp.status} ${resp.statusText} for checkpoint ${seq}`);
-  }
-  const compressed = new Uint8Array(await resp.arrayBuffer());
+  const compressed = await fetchCompressed(seq, archiveUrl.replace(/\/$/, ""));
   const decompressed = zstdDecompressSync(Buffer.from(compressed));
   const decoded = Checkpoint.decode(decompressed);
   const cp = Checkpoint.toObject(decoded, { longs: String, enums: String, defaults: false });

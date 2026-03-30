@@ -1365,11 +1365,15 @@ const configCmd = program
 configCmd
   .command("show")
   .description("Show current configuration")
-  .action(() => {
+  .action(async () => {
     const config = loadConfig();
-    console.log(`\n  active env    ${config.activeEnv}`);
-    console.log(`  grpc_url      ${config.grpcUrl}`);
-    console.log(`  archive_url   ${config.archiveUrl}`);
+    const { cacheStats } = await import("./cache.ts");
+    const cache = cacheStats();
+
+    console.log(`\n  active env      ${config.activeEnv}`);
+    console.log(`  grpc_url        ${config.grpcUrl}`);
+    console.log(`  archive_url     ${config.archiveUrl}`);
+    console.log(`  cache           ${cache.files.toLocaleString()} checkpoints, ${(cache.sizeBytes / 1_000_000).toFixed(1)} MB / ${config.cacheMaxMb} MB`);
 
     const otherEnvs = Object.keys(config.allEnvs).filter(e => e !== config.activeEnv);
     if (otherEnvs.length) {
@@ -1421,6 +1425,36 @@ configCmd
   .action(async () => {
     const { getConfigPath } = await import("./config.ts");
     console.log(getConfigPath());
+  });
+
+// ---------------------------------------------------------------------------
+// Cache command
+// ---------------------------------------------------------------------------
+
+const cacheCmd = program
+  .command("cache")
+  .description("Manage local checkpoint cache (~/.jun/cache/checkpoints/)");
+
+cacheCmd
+  .command("show")
+  .description("Show cache stats")
+  .action(async () => {
+    const { cacheStats } = await import("./cache.ts");
+    const stats = cacheStats();
+    const config = loadConfig();
+    console.log(`\n  path       ${stats.dir}`);
+    console.log(`  files      ${stats.files.toLocaleString()} checkpoints`);
+    console.log(`  size       ${(stats.sizeBytes / 1_000_000).toFixed(1)} MB / ${config.cacheMaxMb} MB`);
+    console.log("");
+  });
+
+cacheCmd
+  .command("clear")
+  .description("Clear all cached checkpoints")
+  .action(async () => {
+    const { cacheClear } = await import("./cache.ts");
+    const count = cacheClear();
+    console.log(`\n  Cleared ${count.toLocaleString()} cached checkpoints\n`);
   });
 
 // ---------------------------------------------------------------------------

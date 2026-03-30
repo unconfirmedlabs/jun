@@ -16,6 +16,7 @@ export interface EnvConfig {
 
 export interface JunConfig {
   active_env: string;
+  cache_max_mb: number;
   envs: Record<string, EnvConfig>;
 }
 
@@ -23,6 +24,7 @@ export interface ResolvedConfig {
   activeEnv: string;
   grpcUrl: string;
   archiveUrl: string;
+  cacheMaxMb: number;
   allEnvs: Record<string, EnvConfig>;
 }
 
@@ -30,6 +32,7 @@ export interface ResolvedConfig {
 
 const DEFAULT_CONFIG: JunConfig = {
   active_env: "mainnet",
+  cache_max_mb: 1000,
   envs: {
     mainnet: {
       grpc_url: "https://fullnode.mainnet.sui.io",
@@ -59,7 +62,7 @@ export { getConfigPath };
 // ─── YAML helpers (flat key: value, no library needed) ───────────────────────
 
 function serializeConfig(config: JunConfig): string {
-  const lines: string[] = [`active_env: ${config.active_env}`, "", "envs:"];
+  const lines: string[] = [`active_env: ${config.active_env}`, `cache_max_mb: ${config.cache_max_mb}`, "", "envs:"];
   for (const [name, env] of Object.entries(config.envs)) {
     lines.push(`  ${name}:`);
     lines.push(`    grpc_url: ${env.grpc_url}`);
@@ -69,7 +72,7 @@ function serializeConfig(config: JunConfig): string {
 }
 
 function parseConfig(yaml: string): JunConfig {
-  const config: JunConfig = { active_env: "mainnet", envs: {} };
+  const config: JunConfig = { active_env: "mainnet", cache_max_mb: 1000, envs: {} };
   let currentEnv: string | null = null;
 
   for (const rawLine of yaml.split("\n")) {
@@ -80,6 +83,13 @@ function parseConfig(yaml: string): JunConfig {
     const topMatch = line.match(/^active_env:\s*(.+)/);
     if (topMatch) {
       config.active_env = topMatch[1].trim();
+      continue;
+    }
+
+    // Top-level: cache_max_mb
+    const cacheMatch = line.match(/^cache_max_mb:\s*(\d+)/);
+    if (cacheMatch) {
+      config.cache_max_mb = parseInt(cacheMatch[1]);
       continue;
     }
 
@@ -131,6 +141,7 @@ export function loadConfig(): ResolvedConfig {
     activeEnv: config.active_env,
     grpcUrl: env.grpc_url,
     archiveUrl: env.archive_url,
+    cacheMaxMb: config.cache_max_mb,
     allEnvs: config.envs,
   };
 }
