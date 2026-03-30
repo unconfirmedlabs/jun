@@ -443,8 +443,8 @@ program
 program
   .command("fetch")
   .description("Fetch historical checkpoints by range")
-  .option("--from <checkpoint>", "start checkpoint (inclusive)")
-  .option("--to <checkpoint>", "end checkpoint (inclusive)")
+  .option("--from-checkpoint <checkpoint>", "start checkpoint (inclusive)")
+  .option("--to-checkpoint <checkpoint>", "end checkpoint (inclusive)")
   .option("--count <n>", "number of checkpoints to fetch (alternative to --to)")
   .option("--from-epoch <epoch>", "start from this epoch's first checkpoint")
   .option("--to-epoch <epoch>", "end at this epoch's last checkpoint")
@@ -456,8 +456,8 @@ program
   .option("--concurrency <n>", "concurrent checkpoint fetches", "16")
   .option("--include-system-txs", "include system transactions (filtered by default)", false)
   .action(async (opts: {
-    from?: string;
-    to?: string;
+    fromCheckpoint?: string;
+    toCheckpoint?: string;
     count?: string;
     fromEpoch?: string;
     toEpoch?: string;
@@ -479,18 +479,18 @@ program
       from = range.from;
       to = range.to;
       console.error(`[jun] epoch ${opts.fromEpoch}${opts.toEpoch ? `–${opts.toEpoch}` : ""} → checkpoints ${from}–${to}`);
-    } else if (opts.from) {
-      from = BigInt(opts.from);
-      if (opts.to) {
-        to = BigInt(opts.to);
+    } else if (opts.fromCheckpoint) {
+      from = BigInt(opts.fromCheckpoint);
+      if (opts.toCheckpoint) {
+        to = BigInt(opts.toCheckpoint);
       } else if (opts.count) {
         to = from + BigInt(opts.count) - 1n;
       } else {
-        console.error("[jun] either --to, --count, or --from-epoch is required");
+        console.error("[jun] either --to-checkpoint, --count, or --from-epoch is required");
         process.exit(1);
       }
     } else {
-      console.error("[jun] either --from or --from-epoch is required");
+      console.error("[jun] either --from-checkpoint or --from-epoch is required");
       process.exit(1);
     }
 
@@ -669,8 +669,8 @@ program
 program
   .command("replay")
   .description("Replay historical checkpoints from the archive (genesis to present)")
-  .option("--from <checkpoint>", "start checkpoint (inclusive)")
-  .option("--to <checkpoint>", "end checkpoint (inclusive)")
+  .option("--from-checkpoint <checkpoint>", "start checkpoint (inclusive)")
+  .option("--to-checkpoint <checkpoint>", "end checkpoint (inclusive)")
   .option("--count <n>", "number of checkpoints to replay (alternative to --to)")
   .option("--from-epoch <epoch>", "start from this epoch's first checkpoint")
   .option("--to-epoch <epoch>", "end at this epoch's last checkpoint")
@@ -684,8 +684,8 @@ program
   .option("--verify-url <url>", "gRPC URL for fetching validator committees (for --verify)", cfg.grpcUrl)
   .option("--include-system-txs", "include system transactions (filtered by default)", false)
   .action(async (opts: {
-    from?: string;
-    to?: string;
+    fromCheckpoint?: string;
+    toCheckpoint?: string;
     count?: string;
     fromEpoch?: string;
     toEpoch?: string;
@@ -710,18 +710,18 @@ program
       from = range.from;
       to = range.to;
       console.error(`[jun] epoch ${opts.fromEpoch}${opts.toEpoch ? `–${opts.toEpoch}` : ""} → checkpoints ${from}–${to}`);
-    } else if (opts.from) {
-      from = BigInt(opts.from);
-      if (opts.to) {
-        to = BigInt(opts.to);
+    } else if (opts.fromCheckpoint) {
+      from = BigInt(opts.fromCheckpoint);
+      if (opts.toCheckpoint) {
+        to = BigInt(opts.toCheckpoint);
       } else if (opts.count) {
         to = from + BigInt(opts.count) - 1n;
       } else {
-        console.error("[jun] either --to, --count, or --from-epoch is required");
+        console.error("[jun] either --to-checkpoint, --count, or --from-epoch is required");
         process.exit(1);
       }
     } else {
-      console.error("[jun] either --from or --from-epoch is required");
+      console.error("[jun] either --from-checkpoint or --from-epoch is required");
       process.exit(1);
     }
 
@@ -1451,15 +1451,15 @@ cacheCmd
 cacheCmd
   .command("fill")
   .description("Download checkpoints from the archive into the local cache")
-  .option("--from <checkpoint>", "start checkpoint (inclusive)")
-  .option("--to <checkpoint>", "end checkpoint (inclusive)")
+  .option("--from-checkpoint <checkpoint>", "start checkpoint (inclusive)")
+  .option("--to-checkpoint <checkpoint>", "end checkpoint (inclusive)")
   .option("--count <n>", "number of checkpoints (alternative to --to)")
   .option("--from-epoch <epoch>", "start from this epoch's first checkpoint")
   .option("--to-epoch <epoch>", "end at this epoch's last checkpoint")
   .option("--archive-url <url>", "checkpoint archive URL", cfg.archiveUrl)
   .option("--concurrency <n>", "concurrent downloads", "32")
   .action(async (opts: {
-    from?: string; to?: string; count?: string;
+    fromCheckpoint?: string; toCheckpoint?: string; count?: string;
     fromEpoch?: string; toEpoch?: string;
     archiveUrl: string; concurrency: string;
   }) => {
@@ -1474,13 +1474,13 @@ cacheCmd
       from = range.from;
       to = range.to;
       console.error(`[jun] epoch ${opts.fromEpoch}${opts.toEpoch ? `–${opts.toEpoch}` : ""} → checkpoints ${from}–${to}`);
-    } else if (opts.from) {
-      from = BigInt(opts.from);
-      if (opts.to) to = BigInt(opts.to);
+    } else if (opts.fromCheckpoint) {
+      from = BigInt(opts.fromCheckpoint);
+      if (opts.toCheckpoint) to = BigInt(opts.toCheckpoint);
       else if (opts.count) to = from + BigInt(opts.count) - 1n;
-      else { console.error("[jun] --to, --count, or --from-epoch required"); process.exit(1); }
+      else { console.error("[jun] --to-checkpoint, --count, or --from-epoch required"); process.exit(1); }
     } else {
-      console.error("[jun] --from or --from-epoch required"); process.exit(1);
+      console.error("[jun] --from-checkpoint or --from-epoch required"); process.exit(1);
     }
 
     const total = Number(to - from) + 1;
@@ -1594,7 +1594,7 @@ program
   .description("Stream or replay checkpoints and open an AI chat to analyze the data live")
   .option("--live", "stream live checkpoints (grows in real-time)", false)
   .option("--url <url>", "gRPC endpoint for live streaming", cfg.grpcUrl)
-  .option("--from <checkpoint>", "start checkpoint for replay")
+  .option("--from-checkpoint <checkpoint>", "start checkpoint for replay")
   .option("--to <checkpoint>", "end checkpoint for replay")
   .option("--count <n>", "number of checkpoints for replay", "100")
   .option("--archive-url <url>", "checkpoint archive URL", cfg.archiveUrl)
@@ -1612,10 +1612,10 @@ program
     verify: boolean;
     verifyUrl: string;
   }) => {
-    if (!opts.live && !opts.from) {
-      console.error("[jun] either --live or --from is required");
-      console.error("  jun chat --live                         # stream live data");
-      console.error("  jun chat --from 259063382 --count 100   # replay historical");
+    if (!opts.live && !opts.fromCheckpoint) {
+      console.error("[jun] either --live or --from-checkpoint is required");
+      console.error("  jun chat --live                                    # stream live data");
+      console.error("  jun chat --from-checkpoint 259063382 --count 100   # replay historical");
       process.exit(1);
     }
 
@@ -1676,8 +1676,8 @@ program
     } else {
       // ── Replay mode: stream into DB in background, launch chat immediately ──
       const { createArchiveClient } = await import("./archive.ts");
-      const from = BigInt(opts.from!);
-      const to = opts.to ? BigInt(opts.to) : from + BigInt(opts.count) - 1n;
+      const from = BigInt(opts.fromCheckpoint!);
+      const to = opts.toCheckpoint ? BigInt(opts.toCheckpoint) : from + BigInt(opts.count) - 1n;
       const concurrency = parseInt(opts.concurrency);
       const total = Number(to - from) + 1;
 
@@ -1750,7 +1750,7 @@ program
     // Build system prompt
     const liveNote = opts.live
       ? "The database is being written to in REAL-TIME by a live gRPC stream. New checkpoints arrive every ~250ms. Run queries multiple times to see fresh data."
-      : opts.from
+      : opts.fromCheckpoint
         ? "The database is being populated from the archive in the background. New checkpoints are being added as they download. Run queries multiple times to see more data."
         : "";
 

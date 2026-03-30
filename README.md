@@ -70,23 +70,23 @@ Fetch historical checkpoints by range via gRPC. Concurrent with retry logic.
 
 ```bash
 # Fetch 1000 checkpoints starting from a specific point
-jun fetch --from 318000000 --count 1000
+jun fetch --from-checkpoint 318000000 --count 1000
 
 # Fetch by epoch range
 jun fetch --from-epoch 1080
 jun fetch --from-epoch 1080 --to-epoch 1082
 
 # Fetch a specific range to SQLite
-jun fetch --from 318000000 --to 318001000 --output mainnet.sqlite
+jun fetch --from-checkpoint 318000000 --to-checkpoint 318001000 --output mainnet.sqlite
 
 # High concurrency
-jun fetch --from 318000000 --count 10000 --concurrency 32 --output backfill.sqlite
+jun fetch --from-checkpoint 318000000 --count 10000 --concurrency 32 --output backfill.sqlite
 
 # Filter events during fetch
-jun fetch --from 318000000 --count 100 --include events --filter "marketplace::"
+jun fetch --from-checkpoint 318000000 --count 100 --include events --filter "marketplace::"
 
 # Include system transactions (filtered by default)
-jun fetch --from 318000000 --count 100 --include-system-txs
+jun fetch --from-checkpoint 318000000 --count 100 --include-system-txs
 ```
 
 ### Replay
@@ -95,20 +95,20 @@ Replay historical checkpoints from the [Sui checkpoint archive](https://checkpoi
 
 ```bash
 # Replay 1000 checkpoints from mainnet genesis
-jun replay --from 0 --count 1000
+jun replay --from-checkpoint 0 --count 1000
 
 # Replay by epoch range
 jun replay --from-epoch 1080
 jun replay --from-epoch 1080 --to-epoch 1082
 
 # Replay a specific range to SQLite
-jun replay --from 259000000 --to 259001000 --output mainnet.sqlite
+jun replay --from-checkpoint 259000000 --to-checkpoint 259001000 --output mainnet.sqlite
 
 # Replay with cryptographic verification
-jun replay --from 259000000 --count 100 --verify
+jun replay --from-checkpoint 259000000 --count 100 --verify
 
 # High concurrency for fast backfill
-jun replay --from 100000000 --count 10000 --concurrency 32 --output backfill.sqlite
+jun replay --from-checkpoint 100000000 --count 10000 --concurrency 32 --output backfill.sqlite
 ```
 
 #### Light client verification
@@ -116,7 +116,7 @@ jun replay --from 100000000 --count 10000 --concurrency 32 --output backfill.sql
 With `--verify`, each checkpoint is cryptographically verified using [kei](https://github.com/unconfirmedlabs/kei) — a pure TypeScript Sui light client. Every checkpoint's BLS12-381 aggregate signature is checked against the validator committee, proving the data was signed by a quorum (≥66.67%) of validators.
 
 ```bash
-jun replay --from 259063382 --count 100 --verify --output verified.sqlite
+jun replay --from-checkpoint 259063382 --count 100 --verify --output verified.sqlite
 ```
 
 The validator committee is fetched once per epoch (~24h) and cached. Verification adds ~11ms per checkpoint — negligible vs the network fetch time.
@@ -266,7 +266,7 @@ Local checkpoint cache at `~/.jun/cache/checkpoints/`. Caches compressed `.binpb
 ```bash
 jun cache show                               # cache stats
 jun cache fill --from-epoch 1080             # prefill an epoch
-jun cache fill --from 259000000 --count 1000 --concurrency 64
+jun cache fill --from-checkpoint 259000000 --count 1000 --concurrency 64
 jun cache clear                              # wipe all cached checkpoints
 ```
 
@@ -332,10 +332,10 @@ Stream or replay checkpoints into a temporary SQLite database and open an intera
 jun chat --live
 
 # Chat about a historical range
-jun chat --from 259063382 --count 100
+jun chat --from-checkpoint 259063382 --count 100
 
 # With cryptographic verification
-jun chat --from 259063382 --count 100 --verify
+jun chat --from-checkpoint 259063382 --count 100 --verify
 ```
 
 In both modes, the database grows in real-time — checkpoints stream in the background while Claude runs. Claude can query fresh data on every turn.
@@ -346,8 +346,8 @@ Stream, fetch, or replay checkpoint data directly into a portable SQLite file:
 
 ```bash
 jun stream --duration 5m --output testnet.sqlite
-jun fetch --from 318000000 --count 1000 --output mainnet.sqlite
-jun replay --from 0 --count 1000 --output genesis.sqlite
+jun fetch --from-checkpoint 318000000 --count 1000 --output mainnet.sqlite
+jun replay --from-checkpoint 0 --count 1000 --output genesis.sqlite
 ```
 
 This creates a SQLite database with three tables:
