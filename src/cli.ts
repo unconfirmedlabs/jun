@@ -1449,6 +1449,82 @@ cacheCmd
   });
 
 cacheCmd
+  .command("fill")
+  .description("Download checkpoints from the archive into the local cache")
+  .option("--from <checkpoint>", "start checkpoint (inclusive)")
+  .option("--to <checkpoint>", "end checkpoint (inclusive)")
+  .option("--count <n>", "number of checkpoints (alternative to --to)")
+  .option("--from-epoch <epoch>", "start from this epoch's first checkpoint")
+  .option("--to-epoch <epoch>", "end at this epoch's last checkpoint")
+  .option("--archive-url <url>", "checkpoint archive URL", cfg.archiveUrl)
+  .option("--concurrency <n>", "concurrent downloads", "32")
+  .action(async (opts: {
+    from?: string; to?: string; count?: string;
+    fromEpoch?: string; toEpoch?: string;
+    archiveUrl: string; concurrency: string;
+  }) => {
+    const { cachePut, cacheGet, cacheStats } = await import("./cache.ts");
+    const concurrency = parseInt(opts.concurrency);
+
+    let from: bigint;
+    let to: bigint;
+
+    if (opts.fromEpoch) {
+      const range = await resolveEpochRange(opts.fromEpoch, opts.toEpoch, cfg.grpcUrl);
+      from = range.from;
+      to = range.to;
+      console.error(`[jun] epoch ${opts.fromEpoch}${opts.toEpoch ? `–${opts.toEpoch}` : ""} → checkpoints ${from}–${to}`);
+    } else if (opts.from) {
+      from = BigInt(opts.from);
+      if (opts.to) to = BigInt(opts.to);
+      else if (opts.count) to = from + BigInt(opts.count) - 1n;
+      else { console.error("[jun] --to, --count, or --from-epoch required"); process.exit(1); }
+    } else {
+      console.error("[jun] --from or --from-epoch required"); process.exit(1);
+    }
+
+    const total = Number(to - from) + 1;
+    const archiveUrl = opts.archiveUrl.replace(/\/$/, "");
+
+    console.error(`[jun] filling cache: checkpoints ${from}–${to} (${total.toLocaleString()})`);
+
+    const seqs: bigint[] = [];
+    for (let s = from; s <= to; s++) seqs.push(s);
+
+    let downloaded = 0;
+    let skipped = 0;
+    const startTime = performance.now();
+    let lastLogTime = startTime;
+
+    await pMap(seqs, async (seq) => {
+      // Skip if already cached
+      if (await cacheGet(seq)) { skipped++; }
+      else {
+        const url = `${archiveUrl}/${seq}.binpb.zst`;
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`Failed: ${resp.status} for checkpoint ${seq}`);
+        const compressed = new Uint8Array(await resp.arrayBuffer());
+        await cachePut(seq, compressed);
+        downloaded++;
+      }
+
+      const done = downloaded + skipped;
+      const now = performance.now();
+      if (now - lastLogTime >= 2000 || done === total) {
+        const rate = Math.round(done / ((now - startTime) / 1000));
+        const pct = Math.round((done / total) * 100);
+        console.error(`[jun] ${done.toLocaleString()}/${total.toLocaleString()} (${pct}%) ${rate} cp/s — ${downloaded} downloaded, ${skipped} already cached`);
+        lastLogTime = now;
+      }
+    }, { concurrency });
+
+    const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+    const stats = cacheStats();
+    console.error(`[jun] done in ${elapsed}s — ${downloaded.toLocaleString()} downloaded, ${skipped.toLocaleString()} skipped`);
+    console.error(`[jun] cache: ${stats.files.toLocaleString()} checkpoints, ${(stats.sizeBytes / 1_000_000).toFixed(1)} MB`);
+  });
+
+cacheCmd
   .command("clear")
   .description("Clear all cached checkpoints")
   .action(async () => {
