@@ -782,7 +782,8 @@ verify
   .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
   .option("--archive-url <url>", "checkpoint archive URL", "https://checkpoints.mainnet.sui.io")
   .option("--grpc-url <url>", "gRPC endpoint for committee fetching", "hayabusa.mainnet.unconfirmed.cloud:443")
-  .action(async (digest: string, opts: { url: string; archiveUrl: string; grpcUrl: string }) => {
+  .option("--json", "output raw JSON", false)
+  .action(async (digest: string, opts: { url: string; archiveUrl: string; grpcUrl: string; json: boolean }) => {
     const { verifyTransaction } = await import("./verify.ts");
 
     try {
@@ -791,6 +792,11 @@ verify
         archiveUrl: opts.archiveUrl,
         grpcUrl: opts.grpcUrl,
       });
+
+      if (opts.json) {
+        console.log(JSON.stringify({ verified: true, digest, checkpoint: result.checkpointSeq, epoch: result.epoch, hasEvents: result.hasEvents, steps: result.steps }));
+        return;
+      }
 
       console.error("");
       for (const step of result.steps) {
@@ -803,6 +809,7 @@ verify
       console.error("");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (opts.json) { console.log(JSON.stringify({ verified: false, digest, error: msg })); process.exit(1); }
       console.error(`\n  \u2717 ${msg}\n`);
       process.exit(1);
     }
@@ -816,7 +823,8 @@ verify
   .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
   .option("--archive-url <url>", "checkpoint archive URL", "https://checkpoints.mainnet.sui.io")
   .option("--grpc-url <url>", "gRPC endpoint for committee fetching", "hayabusa.mainnet.unconfirmed.cloud:443")
-  .action(async (id: string, opts: { url: string; archiveUrl: string; grpcUrl: string }) => {
+  .option("--json", "output raw JSON", false)
+  .action(async (id: string, opts: { url: string; archiveUrl: string; grpcUrl: string; json: boolean }) => {
     const { verifyObject } = await import("./verify.ts");
 
     try {
@@ -825,6 +833,11 @@ verify
         archiveUrl: opts.archiveUrl,
         grpcUrl: opts.grpcUrl,
       });
+
+      if (opts.json) {
+        console.log(JSON.stringify({ verified: true, objectId: id, objectDigest: result.objectDigest, txDigest: result.txDigest, checkpoint: result.checkpointSeq, epoch: result.epoch, steps: result.steps }));
+        return;
+      }
 
       console.error("");
       for (const step of result.steps) {
@@ -843,6 +856,7 @@ verify
       console.error("");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (opts.json) { console.log(JSON.stringify({ verified: false, objectId: id, error: msg })); process.exit(1); }
       console.error(`\n  \u2717 ${msg}\n`);
       process.exit(1);
     }
@@ -881,11 +895,16 @@ message
   .argument("<message>", "original message")
   .argument("<signature>", "base64-encoded signature")
   .argument("<address>", "expected signer address (0x...)")
-  .action(async (msg: string, signature: string, address: string) => {
+  .option("--json", "output raw JSON", false)
+  .action(async (msg: string, signature: string, address: string, opts: { json: boolean }) => {
     const { verifyMessage } = await import("./message.ts");
 
     try {
       const result = await verifyMessage(msg, signature, address);
+      if (opts.json) {
+        console.log(JSON.stringify(result));
+        return;
+      }
       if (result.valid) {
         console.error(`\n  \u2713 Valid ${result.scheme} signature from ${result.address}\n`);
       } else {
@@ -1077,12 +1096,14 @@ ns
   .command("resolve-address")
   .description("Resolve a SuiNS name to an address")
   .argument("<name>", "SuiNS name (e.g. example.sui)")
+  .option("--json", "output raw JSON", false)
   .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
-  .action(async (name: string, opts: { url: string }) => {
+  .action(async (name: string, opts: { json: boolean; url: string }) => {
     const { jsonRpc } = await import("./rpc.ts");
     try {
       const address = (await jsonRpc("suix_resolveNameServiceAddress", [name], opts.url)) as string | null;
       if (!address) throw new Error(`Name "${name}" not found`);
+      if (opts.json) { console.log(JSON.stringify({ name, address })); return; }
       console.log(`\n  ${name} \u2192 ${address}\n`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1095,12 +1116,14 @@ ns
   .command("resolve-name")
   .description("Resolve an address to its SuiNS name")
   .argument("<address>", "Sui address (0x...)")
+  .option("--json", "output raw JSON", false)
   .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
-  .action(async (address: string, opts: { url: string }) => {
+  .action(async (address: string, opts: { json: boolean; url: string }) => {
     const { jsonRpc } = await import("./rpc.ts");
     try {
       const result = (await jsonRpc("suix_resolveNameServiceNames", [address], opts.url)) as { data?: string[] };
       if (!result?.data?.length) throw new Error(`No SuiNS name for ${address}`);
+      if (opts.json) { console.log(JSON.stringify({ address, names: result.data })); return; }
       for (const name of result.data) {
         console.log(`\n  ${address} \u2192 ${name}\n`);
       }
