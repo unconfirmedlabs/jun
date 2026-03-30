@@ -102,6 +102,16 @@ function shouldStop(stop: StopConditions, seq: string, checkpointTimestamp: numb
 }
 
 // ---------------------------------------------------------------------------
+// System transaction filter
+// ---------------------------------------------------------------------------
+
+const SYSTEM_ADDRESS = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+function isSystemTx(tx: { digest: string; transaction?: { sender?: string }; effects?: any }): boolean {
+  return tx.transaction?.sender === SYSTEM_ADDRESS || (tx as any).sender === SYSTEM_ADDRESS;
+}
+
+// ---------------------------------------------------------------------------
 // Epoch → checkpoint resolution
 // ---------------------------------------------------------------------------
 
@@ -228,6 +238,7 @@ program
   .option("--until-checkpoint <seq>", "stop after reaching this checkpoint")
   .option("--until <timestamp>", "stop after this ISO timestamp (e.g. 2026-03-28T00:00:00Z)")
   .option("--duration <time>", "stream for this duration then stop (e.g. 30s, 5m, 1h)")
+  .option("--include-system-txs", "include system transactions (filtered by default)", false)
   .action(async (opts: {
     url: string;
     include?: string[];
@@ -237,6 +248,7 @@ program
     untilCheckpoint?: string;
     until?: string;
     duration?: string;
+    includeSystemTxs: boolean;
   }) => {
     const includes = opts.include ?? [];
     const readMask = buildReadMask(includes);
@@ -299,7 +311,11 @@ program
         const balanceChanges: Array<{ change: any; txDigest: string }> = [];
         const effects: Array<{ effects: any; txDigest: string }> = [];
 
-        for (const tx of checkpoint.transactions ?? []) {
+        const txList = opts.includeSystemTxs
+          ? (checkpoint.transactions ?? [])
+          : (checkpoint.transactions ?? []).filter(tx => !isSystemTx(tx as any));
+
+        for (const tx of txList) {
           const txDigest = tx.digest;
 
           if (showEvents && tx.events?.events?.length) {
@@ -336,7 +352,7 @@ program
 
         // SQLite output — write full checkpoint data
         if (sqliteWriter) {
-          const txData = (checkpoint.transactions ?? []).map((tx: any) => ({
+          const txData = txList.map((tx: any) => ({
             digest: tx.digest,
             sender: tx.transaction?.sender,
             status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
@@ -438,6 +454,7 @@ program
   .option("--jsonl", "output as JSON lines instead of formatted text", false)
   .option("--output <path>", "write output to file (.sqlite or .jsonl)")
   .option("--concurrency <n>", "concurrent checkpoint fetches", "16")
+  .option("--include-system-txs", "include system transactions (filtered by default)", false)
   .action(async (opts: {
     from?: string;
     to?: string;
@@ -450,6 +467,7 @@ program
     jsonl: boolean;
     output?: string;
     concurrency: string;
+    includeSystemTxs: boolean;
   }) => {
     const concurrency = parseInt(opts.concurrency);
 
@@ -545,11 +563,14 @@ program
         const txCount = checkpoint.transactions?.length ?? 0;
 
         // Collect data
+        const txList = opts.includeSystemTxs
+          ? (checkpoint.transactions ?? [])
+          : (checkpoint.transactions ?? []).filter(tx => !isSystemTx(tx as any));
         const events: Array<{ event: GrpcEvent; txDigest: string }> = [];
         const balanceChanges: Array<{ change: any; txDigest: string }> = [];
         const effects: Array<{ effects: any; txDigest: string }> = [];
 
-        for (const tx of checkpoint.transactions ?? []) {
+        for (const tx of txList) {
           const txDigest = tx.digest;
           if (showEvents && tx.events?.events?.length) {
             for (const ev of tx.events.events) {
@@ -578,7 +599,7 @@ program
 
         // SQLite output
         if (sqliteWriter) {
-          const txData = (checkpoint.transactions ?? []).map((tx: any) => ({
+          const txData = txList.map((tx: any) => ({
             digest: tx.digest,
             sender: tx.transaction?.sender,
             status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
@@ -661,6 +682,7 @@ program
   .option("--concurrency <n>", "concurrent checkpoint fetches", "16")
   .option("--verify", "cryptographically verify each checkpoint signature", false)
   .option("--verify-url <url>", "gRPC URL for fetching validator committees (for --verify)", cfg.grpcUrl)
+  .option("--include-system-txs", "include system transactions (filtered by default)", false)
   .action(async (opts: {
     from?: string;
     to?: string;
@@ -675,6 +697,7 @@ program
     concurrency: string;
     verify: boolean;
     verifyUrl: string;
+    includeSystemTxs: boolean;
   }) => {
     const concurrency = parseInt(opts.concurrency);
 
@@ -769,10 +792,15 @@ program
         const tsMs = getTimestampMs(checkpoint.summary);
         const ts = formatTimestamp(tsMs);
 
+        // Filter system transactions
+        const txList = opts.includeSystemTxs
+          ? (checkpoint.transactions ?? [])
+          : (checkpoint.transactions ?? []).filter((tx: any) => !isSystemTx(tx));
+
         // Collect events
         const events: Array<{ event: GrpcEvent; txDigest: string }> = [];
         if (showEvents) {
-          for (const tx of checkpoint.transactions ?? []) {
+          for (const tx of txList) {
             for (const ev of tx.events?.events ?? []) {
               events.push({ event: ev, txDigest: tx.digest });
             }
@@ -787,7 +815,7 @@ program
 
         // SQLite output
         if (sqliteWriter) {
-          const txData = (checkpoint.transactions ?? []).map((tx: any) => ({
+          const txData = txList.map((tx: any) => ({
             digest: tx.digest,
             sender: tx.transaction?.sender,
             status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
@@ -1513,7 +1541,7 @@ program
             const tsMs = getTimestampMs(checkpoint.summary);
             const ts = formatTimestamp(tsMs);
 
-            const txData = (checkpoint.transactions ?? []).map((tx: any) => ({
+            const txData = (checkpoint.transactions ?? []).filter((tx: any) => !isSystemTx(tx)).map((tx: any) => ({
               digest: tx.digest,
               sender: tx.transaction?.sender,
               status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
