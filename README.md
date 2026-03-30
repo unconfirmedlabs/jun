@@ -72,6 +72,10 @@ Fetch historical checkpoints by range via gRPC. Concurrent with retry logic.
 # Fetch 1000 checkpoints starting from a specific point
 jun fetch --from 318000000 --count 1000
 
+# Fetch by epoch range
+jun fetch --from-epoch 1080
+jun fetch --from-epoch 1080 --to-epoch 1082
+
 # Fetch a specific range to SQLite
 jun fetch --from 318000000 --to 318001000 --output mainnet.sqlite
 
@@ -80,6 +84,9 @@ jun fetch --from 318000000 --count 10000 --concurrency 32 --output backfill.sqli
 
 # Filter events during fetch
 jun fetch --from 318000000 --count 100 --include events --filter "marketplace::"
+
+# Include system transactions (filtered by default)
+jun fetch --from 318000000 --count 100 --include-system-txs
 ```
 
 ### Replay
@@ -89,6 +96,10 @@ Replay historical checkpoints from the [Sui checkpoint archive](https://checkpoi
 ```bash
 # Replay 1000 checkpoints from mainnet genesis
 jun replay --from 0 --count 1000
+
+# Replay by epoch range
+jun replay --from-epoch 1080
+jun replay --from-epoch 1080 --to-epoch 1082
 
 # Replay a specific range to SQLite
 jun replay --from 259000000 --to 259001000 --output mainnet.sqlite
@@ -172,6 +183,95 @@ jun msg verify "hello world" <signature> <address>
 
 Supports ed25519, secp256k1, and secp256r1 key schemes.
 
+### Client
+
+Query Sui objects, transactions, and epoch info via gRPC.
+
+```bash
+# Get object data
+jun client object 0x5
+jun client obj 0x5 --bcs                     # include BCS bytes
+jun client obj 0x5 --json                    # raw JSON output
+
+# Get transaction block
+jun client tx-block 8bFJ3kN...
+jun client txb 8bFJ3kN... --json
+
+# Get epoch info (current or specific)
+jun client epoch                             # current epoch
+jun client epoch 1080                        # historical epoch
+jun client epoch --json
+```
+
+```
+  epoch               1082 (current)
+  protocol            v118
+  ref gas price       556 MIST
+  safe mode           false
+
+  started             2026-03-29T20:28:15.000Z
+  duration            24.0h (8.3h remaining)
+
+  first checkpoint    259495252
+
+  validators          127
+  total stake         7,466,619,106 SUI
+
+  subsidy balance     288,705,748 SUI
+  subsidy/epoch       348,678 SUI
+```
+
+### Name Service
+
+SuiNS name resolution via gRPC.
+
+```bash
+jun ns resolve-address adeniyi.sui           # name → address
+jun ns resolve-name 0x1eb7...                # address → name
+jun ns resolve-address adeniyi.sui --json    # JSON output
+```
+
+### Config
+
+Manage jun configuration at `~/.jun/config.yml`. Named environments with gRPC and archive URLs.
+
+```bash
+jun config show                              # view active env + cache stats
+jun config set testnet                       # switch to testnet
+jun config set mainnet                       # switch to mainnet
+jun config add staging --grpc-url https://my-staging.example.com
+jun config path                              # print config file path
+```
+
+```yaml
+# ~/.jun/config.yml
+active_env: mainnet
+cache_max_mb: 1000
+
+envs:
+  mainnet:
+    grpc_url: https://fullnode.mainnet.sui.io
+    archive_url: https://checkpoints.mainnet.sui.io
+  testnet:
+    grpc_url: https://fullnode.testnet.sui.io
+    archive_url: https://checkpoints.testnet.sui.io
+```
+
+All commands read defaults from the active environment. CLI `--url` / `--archive-url` flags still override.
+
+### Cache
+
+Local checkpoint cache at `~/.jun/cache/checkpoints/`. Caches compressed `.binpb.zst` files from archive fetches — subsequent replays and verifications over the same range are instant.
+
+```bash
+jun cache show                               # cache stats
+jun cache fill --from-epoch 1080             # prefill an epoch
+jun cache fill --from 259000000 --count 1000 --concurrency 64
+jun cache clear                              # wipe all cached checkpoints
+```
+
+LRU eviction when cache exceeds `cache_max_mb` (default 1GB, configurable in `~/.jun/config.yml`).
+
 ### Codegen
 
 Auto-generate field definitions from on-chain Move structs:
@@ -238,7 +338,7 @@ jun chat --from 259063382 --count 100
 jun chat --from 259063382 --count 100 --verify
 ```
 
-In live mode, the database grows in real-time as checkpoints arrive — Claude can query fresh data on every turn.
+In both modes, the database grows in real-time — checkpoints stream in the background while Claude runs. Claude can query fresh data on every turn.
 
 ### SQLite export
 
@@ -336,7 +436,14 @@ Jun uses `@grpc/grpc-js` with proto files directly from [MystenLabs/sui-apis](ht
 - [x] Full TransactionKind BCS support (all 11 variants)
 - [x] Transaction and object verification (effects, events, objects)
 - [x] Personal message signing and verification
-- [x] CLI: stream, fetch, replay, verify, message, codegen, mcp, chat
+- [x] Object, transaction, and epoch queries via gRPC
+- [x] SuiNS name resolution
+- [x] Named environment config (`~/.jun/config.yml`)
+- [x] Local checkpoint cache with LRU eviction
+- [x] Epoch-based ranges for fetch and replay
+- [x] System transaction filtering (excluded by default)
+- [x] `--json` output for all query commands
+- [x] CLI: stream, fetch, replay, verify, message, client, ns, config, cache, codegen, mcp, chat
 - [x] SQLite + JSONL export
 - [x] Auto-generate BCS schemas from on-chain type layouts
 - [x] Data parity between stream, fetch, and replay
@@ -350,9 +457,12 @@ Jun uses `@grpc/grpc-js` with proto files directly from [MystenLabs/sui-apis](ht
 
 ```
 src/
-  cli.ts          CLI (stream, fetch, replay, verify, message, codegen, mcp, chat)
+  cli.ts          CLI (stream, fetch, replay, verify, message, client, ns, config, cache, codegen, mcp, chat)
   grpc.ts         Native gRPC client (subscribe + fetch + type introspection)
   archive.ts      Checkpoint archive client (fetch + zstd + proto + BCS decode + verify)
+  rpc.ts          Shared SuiGrpcClient factory (gRPC-web via @mysten/sui)
+  config.ts       Named environment config (~/.jun/config.yml)
+  cache.ts        Local checkpoint cache with LRU eviction (~/.jun/cache/checkpoints/)
   verify.ts       Transaction and object verification orchestration (kei)
   message.ts      Personal message signing/verification (keystore integration)
   mcp.ts          MCP server (schema resource + query/summary tools)
@@ -387,6 +497,10 @@ protobufjs                     Archive checkpoint decoding
 
 Zero additional runtime dependencies beyond these + Bun builtins (`bun:sqlite`, `zlib`).
 
+### System transactions
+
+System transactions (consensus commit prologue, authenticator state updates, etc.) are filtered by default across all commands. They bloat SQLite databases without being useful for indexing. Add `--include-system-txs` to any stream/fetch/replay command to include them.
+
 ## License
 
-MIT
+Apache-2.0
