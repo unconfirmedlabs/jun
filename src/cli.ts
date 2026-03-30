@@ -19,6 +19,9 @@ import { createGrpcClient, type GrpcCheckpointResponse, type GrpcEvent } from ".
 import { createArchiveClient } from "./archive.ts";
 import { generateFieldDSL, formatCodegenResult } from "./codegen.ts";
 import { createSqliteWriter, type SqliteWriter } from "./output/sqlite.ts";
+import { loadConfig } from "./config.ts";
+
+const cfg = loadConfig();
 
 // ---------------------------------------------------------------------------
 // Read mask mapping
@@ -169,7 +172,7 @@ program
 program
   .command("stream")
   .description("Stream live checkpoints")
-  .option("--url <url>", "gRPC endpoint URL", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
   .option("--include <types...>", "data to include: events, effects, balance-changes, objects, transactions (default: all)")
   .option("--filter <type>", "only show events matching this type substring")
   .option("--jsonl", "output as JSON lines instead of formatted text", false)
@@ -379,7 +382,7 @@ program
   .requiredOption("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
   .option("--count <n>", "number of checkpoints to fetch (alternative to --to)")
-  .option("--url <url>", "gRPC endpoint URL", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
   .option("--include <types...>", "data to include: events, effects, balance-changes, objects, transactions (default: all)")
   .option("--filter <type>", "only show events matching this type substring")
   .option("--jsonl", "output as JSON lines instead of formatted text", false)
@@ -584,14 +587,14 @@ program
   .requiredOption("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
   .option("--count <n>", "number of checkpoints to replay (alternative to --to)")
-  .option("--archive-url <url>", "checkpoint archive URL", "https://checkpoints.mainnet.sui.io")
+  .option("--archive-url <url>", "checkpoint archive URL", cfg.archiveUrl)
   .option("--include <types...>", "data to include: events (default: all)")
   .option("--filter <type>", "only show events matching this type substring")
   .option("--jsonl", "output as JSON lines instead of formatted text", false)
   .option("--output <path>", "write output to file (.sqlite or .jsonl)")
   .option("--concurrency <n>", "concurrent checkpoint fetches", "16")
   .option("--verify", "cryptographically verify each checkpoint signature", false)
-  .option("--verify-url <url>", "gRPC URL for fetching validator committees (for --verify)", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .option("--verify-url <url>", "gRPC URL for fetching validator committees (for --verify)", cfg.grpcUrl)
   .action(async (opts: {
     from: string;
     to?: string;
@@ -779,9 +782,9 @@ verify
   .alias("transaction")
   .description("Verify a transaction's inclusion in a signed checkpoint")
   .argument("<digest>", "transaction digest (base58)")
-  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
-  .option("--archive-url <url>", "checkpoint archive URL", "https://checkpoints.mainnet.sui.io")
-  .option("--grpc-url <url>", "gRPC endpoint for committee fetching", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .option("--archive-url <url>", "checkpoint archive URL", cfg.archiveUrl)
+  .option("--grpc-url <url>", "gRPC endpoint for committee fetching", cfg.grpcUrl)
   .option("--json", "output raw JSON", false)
   .action(async (digest: string, opts: { url: string; archiveUrl: string; grpcUrl: string; json: boolean }) => {
     const { verifyTransaction } = await import("./verify.ts");
@@ -820,9 +823,9 @@ verify
   .alias("obj")
   .description("Verify an object's state against its last modifying transaction")
   .argument("<id>", "object ID (0x...)")
-  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
-  .option("--archive-url <url>", "checkpoint archive URL", "https://checkpoints.mainnet.sui.io")
-  .option("--grpc-url <url>", "gRPC endpoint for committee fetching", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
+  .option("--archive-url <url>", "checkpoint archive URL", cfg.archiveUrl)
+  .option("--grpc-url <url>", "gRPC endpoint for committee fetching", cfg.grpcUrl)
   .option("--json", "output raw JSON", false)
   .action(async (id: string, opts: { url: string; archiveUrl: string; grpcUrl: string; json: boolean }) => {
     const { verifyObject } = await import("./verify.ts");
@@ -933,7 +936,7 @@ client
   .argument("<id>", "object ID (0x...)")
   .option("--bcs", "return BCS-serialized object data", false)
   .option("--json", "output raw JSON", false)
-  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
   .action(async (id: string, opts: { bcs: boolean; json: boolean; url: string }) => {
     const { getSuiClient } = await import("./rpc.ts");
     const sui = getSuiClient(opts.url);
@@ -992,7 +995,7 @@ client
   .description("Get transaction block data by digest")
   .argument("<digest>", "transaction digest (base58)")
   .option("--json", "output raw JSON", false)
-  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
   .action(async (digest: string, opts: { json: boolean; url: string }) => {
     const { getSuiClient } = await import("./rpc.ts");
     const sui = getSuiClient(opts.url);
@@ -1050,7 +1053,7 @@ client
   .command("epoch")
   .description("Get current epoch info and system state")
   .option("--json", "output raw JSON", false)
-  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
   .action(async (opts: { json: boolean; url: string }) => {
     const { getSuiClient } = await import("./rpc.ts");
     const sui = getSuiClient(opts.url);
@@ -1097,7 +1100,7 @@ ns
   .description("Resolve a SuiNS name to an address")
   .argument("<name>", "SuiNS name (e.g. example.sui)")
   .option("--json", "output raw JSON", false)
-  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
   .action(async (name: string, opts: { json: boolean; url: string }) => {
     const { getSuiClient } = await import("./rpc.ts");
     const sui = getSuiClient(opts.url);
@@ -1119,7 +1122,7 @@ ns
   .description("Resolve an address to its SuiNS name")
   .argument("<address>", "Sui address (0x...)")
   .option("--json", "output raw JSON", false)
-  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
   .action(async (address: string, opts: { json: boolean; url: string }) => {
     const { getSuiClient } = await import("./rpc.ts");
     const sui = getSuiClient(opts.url);
@@ -1137,6 +1140,75 @@ ns
   });
 
 // ---------------------------------------------------------------------------
+// Config command
+// ---------------------------------------------------------------------------
+
+const configCmd = program
+  .command("config")
+  .description("Manage jun configuration (~/.jun/config.yml)");
+
+configCmd
+  .command("show")
+  .description("Show current configuration")
+  .action(() => {
+    const config = loadConfig();
+    console.log(`\n  active env    ${config.activeEnv}`);
+    console.log(`  grpc_url      ${config.grpcUrl}`);
+    console.log(`  archive_url   ${config.archiveUrl}`);
+
+    const otherEnvs = Object.keys(config.allEnvs).filter(e => e !== config.activeEnv);
+    if (otherEnvs.length) {
+      console.log(`\n  other envs:`);
+      for (const name of otherEnvs) {
+        console.log(`    ${name}: ${config.allEnvs[name].grpc_url}`);
+      }
+    }
+    console.log("");
+  });
+
+configCmd
+  .command("set")
+  .description("Switch active environment")
+  .argument("<env>", "environment name (e.g. mainnet, testnet)")
+  .action(async (env: string) => {
+    const { setActiveEnv } = await import("./config.ts");
+    try {
+      setActiveEnv(env);
+      const config = loadConfig();
+      console.log(`\n  Switched to ${env}`);
+      console.log(`  grpc_url    ${config.grpcUrl}`);
+      console.log(`  archive_url ${config.archiveUrl}\n`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[jun] error: ${msg}`);
+      process.exit(1);
+    }
+  });
+
+configCmd
+  .command("add")
+  .description("Add a custom environment")
+  .argument("<name>", "environment name")
+  .requiredOption("--grpc-url <url>", "gRPC endpoint URL")
+  .option("--archive-url <url>", "checkpoint archive URL", "")
+  .action(async (name: string, opts: { grpcUrl: string; archiveUrl: string }) => {
+    const { addEnv } = await import("./config.ts");
+    addEnv(name, opts.grpcUrl, opts.archiveUrl);
+    console.log(`\n  Added environment "${name}"`);
+    console.log(`  grpc_url    ${opts.grpcUrl}`);
+    if (opts.archiveUrl) console.log(`  archive_url ${opts.archiveUrl}`);
+    console.log(`\n  Switch to it: jun config set ${name}\n`);
+  });
+
+configCmd
+  .command("path")
+  .description("Print config file path")
+  .action(async () => {
+    const { getConfigPath } = await import("./config.ts");
+    console.log(getConfigPath());
+  });
+
+// ---------------------------------------------------------------------------
 // Codegen command
 // ---------------------------------------------------------------------------
 
@@ -1144,7 +1216,7 @@ program
   .command("codegen")
   .description("Generate jun field DSL from an on-chain Sui struct")
   .argument("<type>", "fully qualified type (e.g. 0xPACKAGE::module::StructName)")
-  .option("--url <url>", "gRPC endpoint URL", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
   .action(async (typeArg: string, opts: { url: string }) => {
     // Parse the fully qualified type: 0xPACKAGE::module::StructName
     const parts = typeArg.split("::");
@@ -1196,14 +1268,14 @@ program
   .command("chat")
   .description("Stream or replay checkpoints and open an AI chat to analyze the data live")
   .option("--live", "stream live checkpoints (grows in real-time)", false)
-  .option("--url <url>", "gRPC endpoint for live streaming", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .option("--url <url>", "gRPC endpoint for live streaming", cfg.grpcUrl)
   .option("--from <checkpoint>", "start checkpoint for replay")
   .option("--to <checkpoint>", "end checkpoint for replay")
   .option("--count <n>", "number of checkpoints for replay", "100")
-  .option("--archive-url <url>", "checkpoint archive URL", "https://checkpoints.mainnet.sui.io")
+  .option("--archive-url <url>", "checkpoint archive URL", cfg.archiveUrl)
   .option("--concurrency <n>", "concurrent checkpoint fetches for replay", "32")
   .option("--verify", "cryptographically verify each checkpoint", false)
-  .option("--verify-url <url>", "gRPC URL for committee fetching", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .option("--verify-url <url>", "gRPC URL for committee fetching", cfg.grpcUrl)
   .action(async (opts: {
     live: boolean;
     url: string;
