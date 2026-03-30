@@ -86,7 +86,7 @@ function decodeTxEffects(effectsBcs: Uint8Array): TxMeta | null {
 
 let checkpointType: protobuf.Type | null = null;
 
-async function getCheckpointType(): Promise<protobuf.Type> {
+export async function getCheckpointType(): Promise<protobuf.Type> {
   if (checkpointType) return checkpointType;
 
   const PROTO_DIR = path.join(import.meta.dir, "..", "proto");
@@ -122,7 +122,7 @@ export interface ArchiveClient {
 // Cache prepared committees by epoch (committee changes ~once per 24h)
 const committeeCache = new Map<string, PreparedCommittee>();
 
-async function getCommittee(grpcUrl: string, epoch: string): Promise<PreparedCommittee> {
+export async function getCommittee(grpcUrl: string, epoch: string): Promise<PreparedCommittee> {
   if (committeeCache.has(epoch)) return committeeCache.get(epoch)!;
 
   const PROTO_DIR = path.join(import.meta.dir, "..", "proto");
@@ -268,6 +268,58 @@ export function createArchiveClient(options?: ArchiveClientOptions): ArchiveClie
         },
       };
     },
+  };
+}
+
+// ─── Raw checkpoint for verification ─────────────────────────────────────────
+
+export interface RawCheckpoint {
+  sequenceNumber: string;
+  summary: { bcs: { value: Uint8Array } };
+  signature: { signature: Uint8Array; bitmap: Uint8Array; epoch: string };
+  contents: { bcs: { value: Uint8Array } };
+  transactions: Array<{
+    digest: string;
+    effects: { bcs: { value: Uint8Array } };
+    events?: { bcs: { value: Uint8Array } };
+  }>;
+}
+
+/**
+ * Fetch a raw checkpoint from the archive with all BCS fields intact.
+ * No event/effects processing — returns the protobuf-decoded structure for verification.
+ */
+export async function fetchRawCheckpoint(
+  seq: bigint,
+  archiveUrl = "https://checkpoints.mainnet.sui.io",
+): Promise<RawCheckpoint> {
+  const Checkpoint = await getCheckpointType();
+  const url = `${archiveUrl.replace(/\/$/, "")}/${seq}.binpb.zst`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(`Archive fetch failed: ${resp.status} ${resp.statusText} for checkpoint ${seq}`);
+  }
+  const compressed = new Uint8Array(await resp.arrayBuffer());
+  const decompressed = zstdDecompressSync(Buffer.from(compressed));
+  const decoded = Checkpoint.decode(decompressed);
+  const cp = Checkpoint.toObject(decoded, { longs: String, enums: String, defaults: false });
+
+  return {
+    sequenceNumber: cp.sequenceNumber ?? seq.toString(),
+    summary: { bcs: { value: new Uint8Array(cp.summary?.bcs?.value) } },
+    signature: {
+      signature: new Uint8Array(cp.signature?.signature),
+      bitmap: new Uint8Array(cp.signature?.bitmap),
+      epoch: cp.signature?.epoch ?? "0",
+    },
+    contents: { bcs: { value: new Uint8Array(cp.contents?.bcs?.value) } },
+    transactions: (cp.transactions ?? []).map((tx: any) => ({
+      digest: tx.digest ?? "",
+      effects: { bcs: { value: new Uint8Array(tx.effects?.bcs?.value) } },
+      events: tx.events?.bcs?.value
+        ? { bcs: { value: new Uint8Array(tx.events.bcs.value) } }
+        : undefined,
+    })),
   };
 }
 

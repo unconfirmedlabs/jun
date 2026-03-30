@@ -24,7 +24,7 @@
     "@mysten/sui": "^2.13.0",
     "@noble/curves": "^1.9.0",
     "@noble/hashes": "^1.7.0",
-    "@unconfirmed/kei": "0.0.8",
+    "@unconfirmed/kei": "0.0.9",
     "commander": "^14.0.3",
     "p-map": "^7.0.4",
     "p-retry": "^8.0.0",

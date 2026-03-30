@@ -767,6 +767,86 @@ program
   });
 
 // ---------------------------------------------------------------------------
+// Verify command
+// ---------------------------------------------------------------------------
+
+const verify = program
+  .command("verify")
+  .description("Cryptographically verify transactions and objects against checkpoint signatures");
+
+verify
+  .command("tx")
+  .description("Verify a transaction's inclusion in a signed checkpoint")
+  .argument("<digest>", "transaction digest (base58)")
+  .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
+  .option("--archive-url <url>", "checkpoint archive URL", "https://checkpoints.mainnet.sui.io")
+  .option("--grpc-url <url>", "gRPC endpoint for committee fetching", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .action(async (digest: string, opts: { url: string; archiveUrl: string; grpcUrl: string }) => {
+    const { verifyTransaction } = await import("./verify.ts");
+
+    try {
+      const result = await verifyTransaction(digest, {
+        rpcUrl: opts.url,
+        archiveUrl: opts.archiveUrl,
+        grpcUrl: opts.grpcUrl,
+      });
+
+      console.error("");
+      for (const step of result.steps) {
+        const detail = step.detail ? ` — ${step.detail}` : "";
+        console.error(`  \u2713 ${step.label}${detail}`);
+      }
+      console.error("");
+      console.error(`  Transaction ${digest} is cryptographically verified`);
+      console.error(`  via checkpoint ${result.checkpointSeq} (epoch ${result.epoch})`);
+      console.error("");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`\n  \u2717 ${msg}\n`);
+      process.exit(1);
+    }
+  });
+
+verify
+  .command("object")
+  .description("Verify an object's state against its last modifying transaction")
+  .argument("<id>", "object ID (0x...)")
+  .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
+  .option("--archive-url <url>", "checkpoint archive URL", "https://checkpoints.mainnet.sui.io")
+  .option("--grpc-url <url>", "gRPC endpoint for committee fetching", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .action(async (id: string, opts: { url: string; archiveUrl: string; grpcUrl: string }) => {
+    const { verifyObject } = await import("./verify.ts");
+
+    try {
+      const result = await verifyObject(id, {
+        rpcUrl: opts.url,
+        archiveUrl: opts.archiveUrl,
+        grpcUrl: opts.grpcUrl,
+      });
+
+      console.error("");
+      for (const step of result.steps) {
+        const detail = step.detail ? ` — ${step.detail}` : "";
+        console.error(`  \u2713 ${step.label}${detail}`);
+      }
+      console.error("");
+      if (result.objectDigest) {
+        console.error(`  Object ${id} is cryptographically verified`);
+        console.error(`  last modified by tx ${result.txDigest}`);
+        console.error(`  via checkpoint ${result.checkpointSeq} (epoch ${result.epoch})`);
+      } else {
+        console.error(`  Object ${id} was deleted/wrapped`);
+        console.error(`  in tx ${result.txDigest} (checkpoint ${result.checkpointSeq})`);
+      }
+      console.error("");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`\n  \u2717 ${msg}\n`);
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
 // Codegen command
 // ---------------------------------------------------------------------------
 
