@@ -1564,14 +1564,14 @@ program
       console.error(`[jun] ${checkpointCount} checkpoints buffered, starting chat...`);
 
     } else {
-      // ── Replay mode: fetch all data first, then launch chat ──
+      // ── Replay mode: stream into DB in background, launch chat immediately ──
       const { createArchiveClient } = await import("./archive.ts");
       const from = BigInt(opts.from!);
       const to = opts.to ? BigInt(opts.to) : from + BigInt(opts.count) - 1n;
       const concurrency = parseInt(opts.concurrency);
       const total = Number(to - from) + 1;
 
-      description = `${total.toLocaleString()} checkpoints (${from} → ${to})`;
+      description = `${total.toLocaleString()} checkpoints (${from} → ${to}, loading in background)`;
       console.error(`[jun] replaying ${description}...`);
 
       const archive = createArchiveClient({
@@ -1589,33 +1589,40 @@ program
       let processed = 0;
       const startTime = performance.now();
 
-      await pMap(seqs, async (seq) => {
-        const response = await pRetry(() => archive.fetchCheckpoint(seq), { retries: 3, minTimeout: 1000 });
-        const { checkpoint } = response;
-        const tsMs = getTimestampMs(checkpoint.summary);
-        const ts = formatTimestamp(tsMs);
+      // Stream in background — Claude starts while data is still loading
+      (async () => {
+        try {
+          await pMap(seqs, async (seq) => {
+            const response = await pRetry(() => archive.fetchCheckpoint(seq), { retries: 3, minTimeout: 1000 });
+            const { checkpoint } = response;
+            const tsMs = getTimestampMs(checkpoint.summary);
+            const ts = formatTimestamp(tsMs);
 
-        const txData = (checkpoint.transactions ?? []).map((tx: any) => ({
-          digest: tx.digest,
-          sender: tx.transaction?.sender,
-          status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
-          gasComputation: tx.effects?.gasUsed?.computationCost ? parseInt(tx.effects.gasUsed.computationCost) : null,
-          gasStorage: tx.effects?.gasUsed?.storageCost ? parseInt(tx.effects.gasUsed.storageCost) : null,
-          gasRebate: tx.effects?.gasUsed?.storageRebate ? parseInt(tx.effects.gasUsed.storageRebate) : null,
-          events: tx.events?.events ?? [],
-          balanceChanges: [],
-        }));
-        sqliteWriter.writeCheckpoint({ seq: response.cursor, timestamp: ts, transactions: txData });
+            const txData = (checkpoint.transactions ?? []).filter((tx: any) => !isSystemTx(tx)).map((tx: any) => ({
+              digest: tx.digest,
+              sender: tx.transaction?.sender,
+              status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
+              gasComputation: tx.effects?.gasUsed?.computationCost ? parseInt(tx.effects.gasUsed.computationCost) : null,
+              gasStorage: tx.effects?.gasUsed?.storageCost ? parseInt(tx.effects.gasUsed.storageCost) : null,
+              gasRebate: tx.effects?.gasUsed?.storageRebate ? parseInt(tx.effects.gasUsed.storageRebate) : null,
+              events: tx.events?.events ?? [],
+              balanceChanges: [],
+            }));
+            sqliteWriter.writeCheckpoint({ seq: response.cursor, timestamp: ts, transactions: txData });
+            processed++;
+          }, { concurrency });
 
-        processed++;
-        if (processed % 50 === 0 || processed === total) {
-          const rate = Math.round(processed / ((performance.now() - startTime) / 1000));
-          console.error(`[jun] ${processed}/${total} (${rate} cp/s)`);
+          const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+          console.error(`\n[jun] replay complete — ${processed.toLocaleString()} checkpoints in ${elapsed}s`);
+        } catch {
+          // Replay ended (Claude exited, cleanup will happen)
         }
-      }, { concurrency });
+      })();
 
-      const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
-      console.error(`[jun] replay done in ${elapsed}s`);
+      // Wait for initial buffer before launching Claude
+      const bufferTarget = Math.min(total, 50);
+      while (processed < bufferTarget) await Bun.sleep(100);
+      console.error(`[jun] ${processed}/${total} checkpoints loaded, starting chat (loading continues in background)...`);
     }
 
     // Write temp MCP config
@@ -1633,7 +1640,9 @@ program
     // Build system prompt
     const liveNote = opts.live
       ? "The database is being written to in REAL-TIME by a live gRPC stream. New checkpoints arrive every ~250ms. Run queries multiple times to see fresh data."
-      : "";
+      : opts.from
+        ? "The database is being populated from the archive in the background. New checkpoints are being added as they download. Run queries multiple times to see more data."
+        : "";
 
     const systemPrompt = [
       `You have access to a Sui blockchain SQLite database: ${description}.`,
