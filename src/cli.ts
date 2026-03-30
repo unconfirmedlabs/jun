@@ -776,6 +776,7 @@ const verify = program
 
 verify
   .command("tx")
+  .alias("transaction")
   .description("Verify a transaction's inclusion in a signed checkpoint")
   .argument("<digest>", "transaction digest (base58)")
   .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
@@ -809,6 +810,7 @@ verify
 
 verify
   .command("object")
+  .alias("obj")
   .description("Verify an object's state against its last modifying transaction")
   .argument("<id>", "object ID (0x...)")
   .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
