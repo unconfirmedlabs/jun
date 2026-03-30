@@ -1,7 +1,7 @@
 /**
  * Transaction and object verification using kei.
  *
- * Full trustless chain: JSON-RPC lookup → archive fetch → kei verification
+ * Full trustless chain: gRPC lookup → archive fetch → kei verification
  * (checkpoint signature → contents → transaction → effects → events → objects)
  */
 import {
@@ -16,7 +16,7 @@ import {
   type PreparedCommittee,
 } from "@unconfirmed/kei";
 import { fetchRawCheckpoint, getCommittee, type RawCheckpoint } from "./archive.ts";
-import { jsonRpc } from "./rpc.ts";
+import { getSuiClient } from "./rpc.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -118,12 +118,14 @@ export async function verifyTransaction(
 ): Promise<VerifyTxResult> {
   const steps: VerifyStep[] = [];
 
-  // 1. Look up which checkpoint contains this transaction
-  const txInfo = (await jsonRpc("sui_getTransactionBlock", [digest, {}], opts.rpcUrl)) as {
-    checkpoint: string;
-  };
-  if (!txInfo?.checkpoint) throw new Error(`Transaction ${digest} not found or has no checkpoint`);
-  const checkpointSeq = txInfo.checkpoint;
+  // 1. Look up which checkpoint contains this transaction (via gRPC)
+  const client = getSuiClient(opts.rpcUrl);
+  const { response: txLookup } = await client.ledgerService.getTransaction({
+    digest,
+    readMask: { paths: ["checkpoint"] },
+  });
+  const checkpointSeq = txLookup.transaction?.checkpoint?.toString();
+  if (!checkpointSeq) throw new Error(`Transaction ${digest} not found or has no checkpoint`);
   steps.push({ label: "Transaction located", detail: `checkpoint ${checkpointSeq}` });
 
   // 2. Fetch raw checkpoint from archive
@@ -177,13 +179,13 @@ export async function verifyObject(
   objectId: string,
   opts: VerifyOptions,
 ): Promise<VerifyObjectResult> {
-  // 1. Look up which transaction last modified this object
-  const objInfo = (await jsonRpc("sui_getObject", [
+  // 1. Look up which transaction last modified this object (via gRPC)
+  const client = getSuiClient(opts.rpcUrl);
+  const objResult = await client.core.getObject({
     objectId,
-    { showPreviousTransaction: true },
-  ], opts.rpcUrl)) as { data?: { previousTransaction: string } };
-
-  const txDigest = objInfo?.data?.previousTransaction;
+    include: { previousTransaction: true },
+  });
+  const txDigest = objResult.object?.previousTransaction;
   if (!txDigest) throw new Error(`Object ${objectId} not found`);
 
   // 2. Verify the transaction (full chain)

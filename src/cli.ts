@@ -779,7 +779,7 @@ verify
   .alias("transaction")
   .description("Verify a transaction's inclusion in a signed checkpoint")
   .argument("<digest>", "transaction digest (base58)")
-  .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
+  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
   .option("--archive-url <url>", "checkpoint archive URL", "https://checkpoints.mainnet.sui.io")
   .option("--grpc-url <url>", "gRPC endpoint for committee fetching", "hayabusa.mainnet.unconfirmed.cloud:443")
   .option("--json", "output raw JSON", false)
@@ -820,7 +820,7 @@ verify
   .alias("obj")
   .description("Verify an object's state against its last modifying transaction")
   .argument("<id>", "object ID (0x...)")
-  .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
+  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
   .option("--archive-url <url>", "checkpoint archive URL", "https://checkpoints.mainnet.sui.io")
   .option("--grpc-url <url>", "gRPC endpoint for committee fetching", "hayabusa.mainnet.unconfirmed.cloud:443")
   .option("--json", "output raw JSON", false)
@@ -924,7 +924,7 @@ message
 
 const client = program
   .command("client")
-  .description("Query Sui objects and transactions");
+  .description("Query Sui objects, transactions, and epochs");
 
 client
   .command("object")
@@ -933,45 +933,30 @@ client
   .argument("<id>", "object ID (0x...)")
   .option("--bcs", "return BCS-serialized object data", false)
   .option("--json", "output raw JSON", false)
-  .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
+  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
   .action(async (id: string, opts: { bcs: boolean; json: boolean; url: string }) => {
-    const { jsonRpc } = await import("./rpc.ts");
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
 
     try {
-      const options = opts.bcs
-        ? { showBcs: true, showType: true, showOwner: true, showPreviousTransaction: true, showStorageRebate: true }
-        : { showType: true, showOwner: true, showPreviousTransaction: true, showContent: true, showStorageRebate: true };
+      const include = opts.bcs
+        ? { objectBcs: true, previousTransaction: true }
+        : { json: true, previousTransaction: true };
 
-      const result = (await jsonRpc("sui_getObject", [id, options], opts.url)) as {
-        data?: {
-          objectId: string;
-          version: string;
-          digest: string;
-          type?: string;
-          owner?: { AddressOwner?: string; ObjectOwner?: string; Shared?: { initial_shared_version: string }; Immutable?: boolean };
-          previousTransaction?: string;
-          storageRebate?: string;
-          content?: { type: string; fields: Record<string, unknown> };
-          bcs?: { bcsBytes: string; type: string };
-        };
-        error?: { code: string; message?: string };
-      };
-
-      if (result?.error) throw new Error(result.error.message ?? result.error.code);
-      if (!result?.data) throw new Error(`Object ${id} not found`);
-
-      const obj = result.data;
+      const result = await sui.core.getObject({ objectId: id, include });
+      const obj = result.object;
+      if (!obj) throw new Error(`Object ${id} not found`);
 
       if (opts.json) {
         console.log(JSON.stringify(obj, null, 2));
         return;
       }
 
-      const ownerStr = obj.owner
-        ? obj.owner.AddressOwner ?? obj.owner.ObjectOwner
-          ?? (obj.owner.Shared ? `Shared (v${obj.owner.Shared.initial_shared_version})` : null)
-          ?? (obj.owner.Immutable ? "Immutable" : "unknown")
-        : "unknown";
+      const owner = obj.owner;
+      const ownerStr = typeof owner === "string" ? owner
+        : owner?.AddressOwner ?? owner?.ObjectOwner
+          ?? (owner?.Shared ? `Shared (v${owner.Shared.initialSharedVersion})` : null)
+          ?? (owner?.Immutable === true ? "Immutable" : "unknown");
 
       console.log(`\n  object    ${obj.objectId}`);
       if (obj.type) console.log(`  type      ${obj.type}`);
@@ -979,19 +964,18 @@ client
       console.log(`  digest    ${obj.digest}`);
       console.log(`  owner     ${ownerStr}`);
       if (obj.previousTransaction) console.log(`  prev tx   ${obj.previousTransaction}`);
-      if (obj.storageRebate) console.log(`  rebate    ${obj.storageRebate} MIST`);
 
-      if (obj.content?.fields && !opts.bcs) {
-        console.log(`\n  content (${obj.content.type}):`);
-        for (const [key, val] of Object.entries(obj.content.fields)) {
+      if (obj.json && !opts.bcs) {
+        console.log(`\n  content:`);
+        for (const [key, val] of Object.entries(obj.json)) {
           const display = typeof val === "object" ? JSON.stringify(val) : String(val);
           const truncated = display.length > 80 ? display.slice(0, 77) + "..." : display;
           console.log(`    ${key}: ${truncated}`);
         }
       }
 
-      if (obj.bcs && opts.bcs) {
-        console.log(`\n  bcs (${obj.bcs.bcsBytes.length} chars base64, type: ${obj.bcs.type})`);
+      if (obj.objectBcs && opts.bcs) {
+        console.log(`\n  bcs: ${obj.objectBcs.length} bytes`);
       }
 
       console.log("");
@@ -1008,74 +992,90 @@ client
   .description("Get transaction block data by digest")
   .argument("<digest>", "transaction digest (base58)")
   .option("--json", "output raw JSON", false)
-  .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
+  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
   .action(async (digest: string, opts: { json: boolean; url: string }) => {
-    const { jsonRpc } = await import("./rpc.ts");
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
 
     try {
-      const result = (await jsonRpc("sui_getTransactionBlock", [digest, {
-        showInput: true,
-        showEffects: true,
-        showEvents: true,
-        showObjectChanges: true,
-        showBalanceChanges: true,
-      }], opts.url)) as {
-        digest: string;
-        checkpoint?: string;
-        timestampMs?: string;
-        transaction?: { data?: { sender?: string; transaction?: { kind?: string } }; txSignatures?: string[] };
-        effects?: { status?: { status: string }; gasUsed?: { computationCost: string; storageCost: string; storageRebate: string; nonRefundableStorageFee: string } };
-        events?: Array<{ type: string; sender: string; parsedJson?: Record<string, unknown> }>;
-        objectChanges?: Array<{ type: string; objectType?: string; objectId?: string; sender?: string }>;
-        balanceChanges?: Array<{ owner: { AddressOwner?: string }; coinType: string; amount: string }>;
-      };
+      const result = await sui.core.getTransaction({
+        digest,
+        include: { effects: true, events: true, transaction: true, balanceChanges: true },
+      });
 
-      if (!result) throw new Error(`Transaction ${digest} not found`);
+      const tx = result.Transaction ?? result.FailedTransaction;
+      if (!tx) throw new Error(`Transaction ${digest} not found`);
 
       if (opts.json) {
-        console.log(JSON.stringify(result, null, 2));
+        console.log(JSON.stringify(tx, null, 2));
         return;
       }
 
-      const status = result.effects?.status?.status ?? "unknown";
-      const gas = result.effects?.gasUsed;
-      const sender = result.transaction?.data?.sender ?? "unknown";
-      const ts = result.timestampMs ? new Date(Number(result.timestampMs)).toISOString() : null;
+      const status = tx.status?.success ? "success" : "failure";
+      const gas = tx.effects?.gasUsed;
 
-      console.log(`\n  digest      ${result.digest}`);
+      console.log(`\n  digest      ${tx.digest}`);
       console.log(`  status      ${status}`);
-      console.log(`  sender      ${sender}`);
-      if (result.checkpoint) console.log(`  checkpoint  ${result.checkpoint}`);
-      if (ts) console.log(`  timestamp   ${ts}`);
+      if (tx.epoch) console.log(`  epoch       ${tx.epoch}`);
       if (gas) {
         const total = BigInt(gas.computationCost) + BigInt(gas.storageCost) - BigInt(gas.storageRebate);
         console.log(`  gas         ${total} MIST (${gas.computationCost} compute, ${gas.storageCost} storage, -${gas.storageRebate} rebate)`);
       }
 
-      if (result.events?.length) {
-        console.log(`\n  events (${result.events.length}):`);
-        for (const ev of result.events) {
-          console.log(`    ${ev.type}`);
+      if (tx.events?.length) {
+        console.log(`\n  events (${tx.events.length}):`);
+        for (const ev of tx.events) {
+          console.log(`    ${(ev as { eventType?: string }).eventType ?? ev.type}`);
         }
       }
 
-      if (result.objectChanges?.length) {
-        console.log(`\n  object changes (${result.objectChanges.length}):`);
-        for (const oc of result.objectChanges) {
-          const id = oc.objectId ? oc.objectId.slice(0, 18) + "..." : "";
-          const typ = oc.objectType ?? "";
-          console.log(`    ${oc.type.padEnd(10)} ${id}  ${typ}`);
-        }
-      }
-
-      if (result.balanceChanges?.length) {
-        console.log(`\n  balance changes (${result.balanceChanges.length}):`);
-        for (const bc of result.balanceChanges) {
-          const owner = bc.owner.AddressOwner?.slice(0, 18) + "..." ?? "unknown";
+      if (tx.balanceChanges?.length) {
+        console.log(`\n  balance changes (${tx.balanceChanges.length}):`);
+        for (const bc of tx.balanceChanges) {
+          const addr = (bc as { address?: string }).address ?? "unknown";
+          const owner = addr.length > 20 ? addr.slice(0, 18) + "..." : addr;
           console.log(`    ${owner}  ${bc.amount} ${bc.coinType}`);
         }
       }
 
+      console.log("");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[jun] error: ${msg}`);
+      process.exit(1);
+    }
+  });
+
+client
+  .command("epoch")
+  .description("Get current epoch info and system state")
+  .option("--json", "output raw JSON", false)
+  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
+  .action(async (opts: { json: boolean; url: string }) => {
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
+
+    try {
+      const result = await sui.core.getCurrentSystemState();
+      const state = result.systemState;
+
+      if (opts.json) {
+        console.log(JSON.stringify(state, null, 2));
+        return;
+      }
+
+      const start = new Date(Number(state.epochStartTimestampMs)).toISOString();
+      const elapsed = Date.now() - Number(state.epochStartTimestampMs);
+      const remaining = Math.max(0, Number(state.parameters.epochDurationMs) - elapsed);
+      const remainingH = (remaining / 3_600_000).toFixed(1);
+      const durationH = (Number(state.parameters.epochDurationMs) / 3_600_000).toFixed(1);
+
+      console.log(`\n  epoch             ${state.epoch}`);
+      console.log(`  protocol          v${state.protocolVersion}`);
+      console.log(`  started           ${start}`);
+      console.log(`  duration          ${durationH}h (${remainingH}h remaining)`);
+      console.log(`  ref gas price     ${state.referenceGasPrice} MIST`);
+      console.log(`  safe mode         ${state.safeMode}`);
       console.log("");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1097,11 +1097,13 @@ ns
   .description("Resolve a SuiNS name to an address")
   .argument("<name>", "SuiNS name (e.g. example.sui)")
   .option("--json", "output raw JSON", false)
-  .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
+  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
   .action(async (name: string, opts: { json: boolean; url: string }) => {
-    const { jsonRpc } = await import("./rpc.ts");
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
     try {
-      const address = (await jsonRpc("suix_resolveNameServiceAddress", [name], opts.url)) as string | null;
+      const { response } = await sui.nameService.lookupName({ name });
+      const address = response.record?.targetAddress;
       if (!address) throw new Error(`Name "${name}" not found`);
       if (opts.json) { console.log(JSON.stringify({ name, address })); return; }
       console.log(`\n  ${name} \u2192 ${address}\n`);
@@ -1117,16 +1119,16 @@ ns
   .description("Resolve an address to its SuiNS name")
   .argument("<address>", "Sui address (0x...)")
   .option("--json", "output raw JSON", false)
-  .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
+  .option("--url <url>", "gRPC endpoint", "https://fullnode.mainnet.sui.io")
   .action(async (address: string, opts: { json: boolean; url: string }) => {
-    const { jsonRpc } = await import("./rpc.ts");
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(opts.url);
     try {
-      const result = (await jsonRpc("suix_resolveNameServiceNames", [address], opts.url)) as { data?: string[] };
-      if (!result?.data?.length) throw new Error(`No SuiNS name for ${address}`);
-      if (opts.json) { console.log(JSON.stringify({ address, names: result.data })); return; }
-      for (const name of result.data) {
-        console.log(`\n  ${address} \u2192 ${name}\n`);
-      }
+      const { response } = await sui.nameService.reverseLookupName({ address });
+      const name = response.record?.name;
+      if (!name) throw new Error(`No SuiNS name for ${address}`);
+      if (opts.json) { console.log(JSON.stringify({ address, name })); return; }
+      console.log(`\n  ${address} \u2192 ${name}\n`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[jun] error: ${msg}`);
