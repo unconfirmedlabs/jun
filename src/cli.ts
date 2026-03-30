@@ -1074,26 +1074,35 @@ const ns = program
   .description("SuiNS name service lookups");
 
 ns
-  .command("resolve")
-  .description("Resolve a SuiNS name to an address, or an address to a name")
-  .argument("<value>", "SuiNS name (e.g. example.sui) or address (0x...)")
+  .command("resolve-address")
+  .description("Resolve a SuiNS name to an address")
+  .argument("<name>", "SuiNS name (e.g. example.sui)")
   .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
-  .action(async (value: string, opts: { url: string }) => {
+  .action(async (name: string, opts: { url: string }) => {
     const { jsonRpc } = await import("./rpc.ts");
-
     try {
-      if (value.endsWith(".sui")) {
-        // Name → Address
-        const address = (await jsonRpc("suix_resolveNameServiceAddress", [value], opts.url)) as string | null;
-        if (!address) throw new Error(`Name "${value}" not found`);
-        console.log(`\n  ${value} \u2192 ${address}\n`);
-      } else {
-        // Address → Name
-        const result = (await jsonRpc("suix_resolveNameServiceNames", [value], opts.url)) as { data?: string[] };
-        if (!result?.data?.length) throw new Error(`No SuiNS name for ${value}`);
-        for (const name of result.data) {
-          console.log(`\n  ${value} \u2192 ${name}\n`);
-        }
+      const address = (await jsonRpc("suix_resolveNameServiceAddress", [name], opts.url)) as string | null;
+      if (!address) throw new Error(`Name "${name}" not found`);
+      console.log(`\n  ${name} \u2192 ${address}\n`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[jun] error: ${msg}`);
+      process.exit(1);
+    }
+  });
+
+ns
+  .command("resolve-name")
+  .description("Resolve an address to its SuiNS name")
+  .argument("<address>", "Sui address (0x...)")
+  .option("--url <url>", "JSON-RPC endpoint", "https://fullnode.mainnet.sui.io:443")
+  .action(async (address: string, opts: { url: string }) => {
+    const { jsonRpc } = await import("./rpc.ts");
+    try {
+      const result = (await jsonRpc("suix_resolveNameServiceNames", [address], opts.url)) as { data?: string[] };
+      if (!result?.data?.length) throw new Error(`No SuiNS name for ${address}`);
+      for (const name of result.data) {
+        console.log(`\n  ${address} \u2192 ${name}\n`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
