@@ -102,6 +102,54 @@ function shouldStop(stop: StopConditions, seq: string, checkpointTimestamp: numb
 }
 
 // ---------------------------------------------------------------------------
+// Epoch → checkpoint resolution
+// ---------------------------------------------------------------------------
+
+async function resolveEpochRange(
+  fromEpoch: string,
+  toEpoch: string | undefined,
+  grpcUrl: string,
+): Promise<{ from: bigint; to: bigint }> {
+  const { getSuiClient } = await import("./rpc.ts");
+  const sui = getSuiClient(grpcUrl);
+
+  const { response: fromResp } = await sui.ledgerService.getEpoch({
+    epoch: fromEpoch,
+    readMask: { paths: ["first_checkpoint", "last_checkpoint"] },
+  });
+  const from = fromResp.epoch.firstCheckpoint;
+  if (!from) throw new Error(`Could not resolve epoch ${fromEpoch}`);
+
+  if (!toEpoch || toEpoch === fromEpoch) {
+    const last = fromResp.epoch.lastCheckpoint;
+    if (!last) {
+      // Current epoch — get latest checkpoint as upper bound
+      const sysResult = await sui.core.getCurrentSystemState();
+      const currentEpoch = sysResult.systemState.epoch;
+      if (fromEpoch !== currentEpoch) throw new Error(`Epoch ${fromEpoch} has no last checkpoint`);
+      // Use a recent checkpoint (can't know the exact latest, so fetch it)
+      const { response: latestCp } = await sui.ledgerService.getCheckpoint({
+        checkpointId: { oneofKind: "sequenceNumber", sequenceNumber: "0" },
+        readMask: { paths: [] },
+      });
+      // Fallback: just use from + reasonable range
+      console.error(`[jun] epoch ${fromEpoch} is current — replaying from checkpoint ${from} (use --to to set end)`);
+      return { from: BigInt(from), to: BigInt(from) + 1000n };
+    }
+    return { from: BigInt(from), to: BigInt(last) };
+  }
+
+  const { response: toResp } = await sui.ledgerService.getEpoch({
+    epoch: toEpoch,
+    readMask: { paths: ["last_checkpoint"] },
+  });
+  const last = toResp.epoch.lastCheckpoint;
+  if (!last) throw new Error(`Epoch ${toEpoch} is not yet complete (no last checkpoint)`);
+
+  return { from: BigInt(from), to: BigInt(last) };
+}
+
+// ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
@@ -379,9 +427,11 @@ program
 program
   .command("fetch")
   .description("Fetch historical checkpoints by range")
-  .requiredOption("--from <checkpoint>", "start checkpoint (inclusive)")
+  .option("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
   .option("--count <n>", "number of checkpoints to fetch (alternative to --to)")
+  .option("--from-epoch <epoch>", "start from this epoch's first checkpoint")
+  .option("--to-epoch <epoch>", "end at this epoch's last checkpoint")
   .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
   .option("--include <types...>", "data to include: events, effects, balance-changes, objects, transactions (default: all)")
   .option("--filter <type>", "only show events matching this type substring")
@@ -389,9 +439,11 @@ program
   .option("--output <path>", "write output to file (.sqlite or .jsonl)")
   .option("--concurrency <n>", "concurrent checkpoint fetches", "16")
   .action(async (opts: {
-    from: string;
+    from?: string;
     to?: string;
     count?: string;
+    fromEpoch?: string;
+    toEpoch?: string;
     url: string;
     include?: string[];
     filter?: string;
@@ -399,16 +451,28 @@ program
     output?: string;
     concurrency: string;
   }) => {
-    const from = BigInt(opts.from);
     const concurrency = parseInt(opts.concurrency);
 
+    let from: bigint;
     let to: bigint;
-    if (opts.to) {
-      to = BigInt(opts.to);
-    } else if (opts.count) {
-      to = from + BigInt(opts.count) - 1n;
+
+    if (opts.fromEpoch) {
+      const range = await resolveEpochRange(opts.fromEpoch, opts.toEpoch, opts.url);
+      from = range.from;
+      to = range.to;
+      console.error(`[jun] epoch ${opts.fromEpoch}${opts.toEpoch ? `–${opts.toEpoch}` : ""} → checkpoints ${from}–${to}`);
+    } else if (opts.from) {
+      from = BigInt(opts.from);
+      if (opts.to) {
+        to = BigInt(opts.to);
+      } else if (opts.count) {
+        to = from + BigInt(opts.count) - 1n;
+      } else {
+        console.error("[jun] either --to, --count, or --from-epoch is required");
+        process.exit(1);
+      }
     } else {
-      console.error("[jun] either --to or --count is required");
+      console.error("[jun] either --from or --from-epoch is required");
       process.exit(1);
     }
 
@@ -584,9 +648,11 @@ program
 program
   .command("replay")
   .description("Replay historical checkpoints from the archive (genesis to present)")
-  .requiredOption("--from <checkpoint>", "start checkpoint (inclusive)")
+  .option("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
   .option("--count <n>", "number of checkpoints to replay (alternative to --to)")
+  .option("--from-epoch <epoch>", "start from this epoch's first checkpoint")
+  .option("--to-epoch <epoch>", "end at this epoch's last checkpoint")
   .option("--archive-url <url>", "checkpoint archive URL", cfg.archiveUrl)
   .option("--include <types...>", "data to include: events (default: all)")
   .option("--filter <type>", "only show events matching this type substring")
@@ -596,9 +662,11 @@ program
   .option("--verify", "cryptographically verify each checkpoint signature", false)
   .option("--verify-url <url>", "gRPC URL for fetching validator committees (for --verify)", cfg.grpcUrl)
   .action(async (opts: {
-    from: string;
+    from?: string;
     to?: string;
     count?: string;
+    fromEpoch?: string;
+    toEpoch?: string;
     archiveUrl: string;
     include?: string[];
     filter?: string;
@@ -608,16 +676,29 @@ program
     verify: boolean;
     verifyUrl: string;
   }) => {
-    const from = BigInt(opts.from);
     const concurrency = parseInt(opts.concurrency);
 
+    let from: bigint;
     let to: bigint;
-    if (opts.to) {
-      to = BigInt(opts.to);
-    } else if (opts.count) {
-      to = from + BigInt(opts.count) - 1n;
+
+    if (opts.fromEpoch) {
+      const grpcUrl = opts.verifyUrl; // reuse verify-url for epoch resolution
+      const range = await resolveEpochRange(opts.fromEpoch, opts.toEpoch, grpcUrl);
+      from = range.from;
+      to = range.to;
+      console.error(`[jun] epoch ${opts.fromEpoch}${opts.toEpoch ? `–${opts.toEpoch}` : ""} → checkpoints ${from}–${to}`);
+    } else if (opts.from) {
+      from = BigInt(opts.from);
+      if (opts.to) {
+        to = BigInt(opts.to);
+      } else if (opts.count) {
+        to = from + BigInt(opts.count) - 1n;
+      } else {
+        console.error("[jun] either --to, --count, or --from-epoch is required");
+        process.exit(1);
+      }
     } else {
-      console.error("[jun] either --to or --count is required");
+      console.error("[jun] either --from or --from-epoch is required");
       process.exit(1);
     }
 
