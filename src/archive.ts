@@ -187,108 +187,133 @@ export function createArchiveClient(options?: ArchiveClientOptions): ArchiveClie
 
   return {
     async fetchCheckpoint(seq: bigint): Promise<GrpcCheckpointResponse> {
-      const Checkpoint = await getCheckpointType();
-
-      // 1. Fetch compressed checkpoint (cache-aware)
       const compressed = await fetchCompressed(seq, archiveUrl);
-
-      // 2. Zstd decompress (Bun built-in)
-      const decompressed = zstdDecompressSync(Buffer.from(compressed));
-
-      // 3. Protobuf decode outer Checkpoint
-      const decoded = Checkpoint.decode(decompressed);
-      const cp = Checkpoint.toObject(decoded, { longs: String, enums: String, defaults: false }) as any;
-
-      // 4. BCS decode CheckpointSummary for timestamp + epoch
-      let timestampMs = 0;
-      const summaryBcsRaw = cp.summary?.bcs?.value;
-      if (summaryBcsRaw) {
-        const summaryBcs = new Uint8Array(summaryBcsRaw);
-        const summary = CheckpointSummary.parse(summaryBcs);
-        timestampMs = Number(summary.timestampMs);
-
-        // 4b. Cryptographic verification via kei
-        if (verify && cp.signature) {
-          const epochBigInt = BigInt(summary.epoch);
-          const prepared = await getCommittee(grpcUrl!, summary.epoch.toString());
-          keiVerify(summaryBcs, {
-            epoch: epochBigInt,
-            signature: Uint8Array.from(cp.signature.signature),
-            signersMap: Uint8Array.from(cp.signature.bitmap),
-          }, prepared);
-        }
-      }
-
-      // Convert to the same timestamp format as gRPC stream
-      const seconds = Math.floor(timestampMs / 1000).toString();
-      const nanos = (timestampMs % 1000) * 1_000_000;
-
-      // 5. BCS decode events + extract tx digests from effects
-      const transactions: GrpcCheckpointResponse["checkpoint"]["transactions"] = [];
-
-      for (const tx of cp.transactions ?? []) {
-        // Decode tx metadata from effects BCS (proto fields aren't populated in archive)
-        const effectsBcs = tx.effects?.bcs?.value as Uint8Array | undefined;
-        const txMeta = effectsBcs ? decodeTxEffects(new Uint8Array(effectsBcs)) : null;
-        const digest = tx.digest || txMeta?.digest || "";
-
-        // Decode sender from TransactionData BCS
-        const txDataBcs = tx.transaction?.bcs?.value as Uint8Array | undefined;
-        const sender = txDataBcs ? parseSender(new Uint8Array(txDataBcs)) : undefined;
-
-        // Decode events from BCS
-        const eventsBcs = tx.events?.bcs?.value as Uint8Array | undefined;
-        let events: GrpcEvent[] = [];
-
-        if (eventsBcs && eventsBcs.length > 0) {
-          const decoded = TransactionEvents.parse(new Uint8Array(eventsBcs));
-          events = decoded.data.map((ev: any) => {
-            const typeParams = (ev.type.typeParams ?? []).map((tp: any) => formatTypeTag(tp));
-            const typeSuffix = typeParams.length > 0 ? `<${typeParams.join(",")}>` : "";
-            return {
-              packageId: ev.packageId,
-              module: ev.transactionModule,
-              sender: ev.sender,
-              eventType: `${ev.type.address}::${ev.type.module}::${ev.type.name}${typeSuffix}`,
-              contents: {
-                name: `${ev.type.address}::${ev.type.module}::${ev.type.name}${typeSuffix}`,
-                value: new Uint8Array(ev.contents),
-              },
-            };
-          });
-        }
-
-        const txResult: any = {
-          digest,
-          transaction: sender ? { sender } : undefined,
-          events: events.length > 0 ? { events } : null,
-        };
-
-        // Attach effects metadata for SQLite writer
-        if (txMeta) {
-          txResult.effects = {
-            status: { success: txMeta.status === "success" },
-            gasUsed: {
-              computationCost: String(txMeta.gasComputation),
-              storageCost: String(txMeta.gasStorage),
-              storageRebate: String(txMeta.gasRebate),
-            },
-          };
-        }
-
-        transactions.push(txResult);
-      }
-
-      return {
-        cursor: seq.toString(),
-        checkpoint: {
-          sequenceNumber: cp.sequenceNumber ?? seq.toString(),
-          summary: { timestamp: { seconds, nanos } },
-          transactions,
-        },
-      };
+      return decodeCompressedCheckpoint(seq, compressed, verify ? { grpcUrl: grpcUrl! } : undefined);
     },
   };
+}
+
+// ─── Shared decode + cache-through ──────────────────────────────────────────
+
+/**
+ * Decode a compressed checkpoint (.binpb.zst) into a GrpcCheckpointResponse.
+ * Used by the archive client and the cache-through layer.
+ */
+export async function decodeCompressedCheckpoint(
+  seq: bigint,
+  compressed: Uint8Array,
+  verifyOpts?: { grpcUrl: string },
+): Promise<GrpcCheckpointResponse> {
+  const Checkpoint = await getCheckpointType();
+
+  // 1. Zstd decompress (Bun built-in)
+  const decompressed = zstdDecompressSync(Buffer.from(compressed));
+
+  // 2. Protobuf decode outer Checkpoint
+  const decoded = Checkpoint.decode(decompressed);
+  const cp = Checkpoint.toObject(decoded, { longs: String, enums: String, defaults: false }) as any;
+
+  // 3. BCS decode CheckpointSummary for timestamp + epoch
+  let timestampMs = 0;
+  const summaryBcsRaw = cp.summary?.bcs?.value;
+  if (summaryBcsRaw) {
+    const summaryBcs = new Uint8Array(summaryBcsRaw);
+    const summary = CheckpointSummary.parse(summaryBcs);
+    timestampMs = Number(summary.timestampMs);
+
+    // 3b. Cryptographic verification via kei
+    if (verifyOpts && cp.signature) {
+      const epochBigInt = BigInt(summary.epoch);
+      const prepared = await getCommittee(verifyOpts.grpcUrl, summary.epoch.toString());
+      keiVerify(summaryBcs, {
+        epoch: epochBigInt,
+        signature: Uint8Array.from(cp.signature.signature),
+        signersMap: Uint8Array.from(cp.signature.bitmap),
+      }, prepared);
+    }
+  }
+
+  // Convert to the same timestamp format as gRPC stream
+  const seconds = Math.floor(timestampMs / 1000).toString();
+  const nanos = (timestampMs % 1000) * 1_000_000;
+
+  // 4. BCS decode events + extract tx digests from effects
+  const transactions: GrpcCheckpointResponse["checkpoint"]["transactions"] = [];
+
+  for (const tx of cp.transactions ?? []) {
+    // Decode tx metadata from effects BCS (proto fields aren't populated in archive)
+    const effectsBcs = tx.effects?.bcs?.value as Uint8Array | undefined;
+    const txMeta = effectsBcs ? decodeTxEffects(new Uint8Array(effectsBcs)) : null;
+    const digest = tx.digest || txMeta?.digest || "";
+
+    // Decode sender from TransactionData BCS
+    const txDataBcs = tx.transaction?.bcs?.value as Uint8Array | undefined;
+    const sender = txDataBcs ? parseSender(new Uint8Array(txDataBcs)) : undefined;
+
+    // Decode events from BCS
+    const eventsBcs = tx.events?.bcs?.value as Uint8Array | undefined;
+    let events: GrpcEvent[] = [];
+
+    if (eventsBcs && eventsBcs.length > 0) {
+      const decoded = TransactionEvents.parse(new Uint8Array(eventsBcs));
+      events = decoded.data.map((ev: any) => {
+        const typeParams = (ev.type.typeParams ?? []).map((tp: any) => formatTypeTag(tp));
+        const typeSuffix = typeParams.length > 0 ? `<${typeParams.join(",")}>` : "";
+        return {
+          packageId: ev.packageId,
+          module: ev.transactionModule,
+          sender: ev.sender,
+          eventType: `${ev.type.address}::${ev.type.module}::${ev.type.name}${typeSuffix}`,
+          contents: {
+            name: `${ev.type.address}::${ev.type.module}::${ev.type.name}${typeSuffix}`,
+            value: new Uint8Array(ev.contents),
+          },
+        };
+      });
+    }
+
+    const txResult: any = {
+      digest,
+      transaction: sender ? { sender } : undefined,
+      events: events.length > 0 ? { events } : null,
+    };
+
+    // Attach effects metadata for SQLite writer
+    if (txMeta) {
+      txResult.effects = {
+        status: { success: txMeta.status === "success" },
+        gasUsed: {
+          computationCost: String(txMeta.gasComputation),
+          storageCost: String(txMeta.gasStorage),
+          storageRebate: String(txMeta.gasRebate),
+        },
+      };
+    }
+
+    transactions.push(txResult);
+  }
+
+  return {
+    cursor: seq.toString(),
+    checkpoint: {
+      sequenceNumber: cp.sequenceNumber ?? seq.toString(),
+      summary: { timestamp: { seconds, nanos } },
+      transactions,
+    },
+  };
+}
+
+/**
+ * Cache-through checkpoint fetch. Checks local cache first, falls back to the
+ * provided fetcher (typically a gRPC call). Use for all historical lookups.
+ */
+export async function cachedGetCheckpoint(
+  seq: bigint,
+  fallback: () => Promise<GrpcCheckpointResponse>,
+): Promise<GrpcCheckpointResponse> {
+  const cached = await cacheGet(seq);
+  if (cached) return decodeCompressedCheckpoint(seq, cached);
+  return fallback();
 }
 
 // ─── Raw checkpoint for verification ─────────────────────────────────────────

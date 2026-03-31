@@ -16,7 +16,7 @@ import { program } from "commander";
 import pMap from "p-map";
 import pRetry from "p-retry";
 import { createGrpcClient, type GrpcCheckpointResponse, type GrpcEvent } from "./grpc.ts";
-import { createArchiveClient } from "./archive.ts";
+import { createArchiveClient, cachedGetCheckpoint } from "./archive.ts";
 import { generateFieldDSL, formatCodegenResult } from "./codegen.ts";
 import { createSqliteWriter, type SqliteWriter } from "./output/sqlite.ts";
 import { loadConfig } from "./config.ts";
@@ -543,7 +543,7 @@ program
         if (stopped) throw new pRetry.AbortError("stopped");
 
         const response = await pRetry(
-          () => client.getCheckpoint(seq),
+          () => cachedGetCheckpoint(seq, () => client.getCheckpoint(seq)),
           {
             retries: 5,
             minTimeout: 1000,

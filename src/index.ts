@@ -7,6 +7,7 @@
 import { SQL } from "bun";
 import pMap from "p-map";
 import { createGrpcClient, type GrpcClient } from "./grpc.ts";
+import { cachedGetCheckpoint } from "./archive.ts";
 import { createProcessor, type EventHandler, type EventProcessor } from "./processor.ts";
 import { createPostgresOutput, type PostgresOutput } from "./output/postgres.ts";
 import { createStateManager, type StateManager } from "./state.ts";
@@ -60,13 +61,12 @@ function toTableName(handlerName: string): string {
 export function defineIndexer(config: IndexerConfig): Indexer {
   const { network, grpcUrl, database, events, backfillConcurrency = 10 } = config;
 
-  let grpcClient: GrpcClient | null = null;
-  let sql: any = null;
-  let state: StateManager | null = null;
-  let output: PostgresOutput | null = null;
-  let processor: EventProcessor | null = null;
   let shutdownRequested = false;
   let abortController = new AbortController();
+
+  // Initialized services (set by init(), cleaned up by shutdown())
+  let _sql: any = null;
+  let _grpcClient: GrpcClient | null = null;
 
   // Build handler table mapping
   const handlerTables: Record<string, { tableName: string; fields: EventHandler["fields"] }> = {};
@@ -79,13 +79,14 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
   /** Initialize all services */
   async function init() {
-    sql = new SQL(database);
-    state = await createStateManager(sql);
-    output = createPostgresOutput(sql, handlerTables);
+    _sql = new SQL(database);
+    const state = await createStateManager(_sql);
+    const output = createPostgresOutput(_sql, handlerTables);
     await output.migrate();
-    processor = createProcessor(events);
-    grpcClient = createGrpcClient({ url: grpcUrl });
+    const processor = createProcessor(events);
+    _grpcClient = createGrpcClient({ url: grpcUrl });
     console.log(`[jun] initialized — network=${network}, events=${Object.keys(events).join(", ")}`);
+    return { state, output, processor, grpcClient: _grpcClient };
   }
 
   // SIGINT/SIGTERM handlers
@@ -105,7 +106,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
   return {
     async live(): Promise<void> {
-      await init();
+      let { state, output, processor, grpcClient } = await init();
       setupSignalHandlers();
 
       const cursorKey = `live:${network}`;
@@ -115,8 +116,9 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         try {
           console.log(`[jun] connecting to ${grpcUrl}...`);
           // Recreate gRPC client on reconnect
-          if (grpcClient) grpcClient.close();
+          grpcClient.close();
           grpcClient = createGrpcClient({ url: grpcUrl });
+          _grpcClient = grpcClient;
 
           const stream = grpcClient.subscribeCheckpoints();
           reconnectDelay = 1000; // Reset on successful connection
@@ -125,14 +127,14 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             if (shutdownRequested) break;
 
             const seq = BigInt(response.cursor);
-            const decoded = processor!.process(response);
+            const decoded = processor.process(response);
 
             if (decoded.length > 0) {
-              await output!.write(decoded);
+              await output.write(decoded);
               console.log(`[live] checkpoint ${seq}: ${decoded.length} event(s)`);
             }
 
-            await state!.setCheckpointCursor(cursorKey, seq);
+            await state.setCheckpointCursor(cursorKey, seq);
           }
         } catch (err) {
           if (shutdownRequested) break;
@@ -150,7 +152,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     },
 
     async backfill(options: { from: bigint }): Promise<void> {
-      await init();
+      const { state, output, processor, grpcClient } = await init();
       setupSignalHandlers();
 
       const cursorKey = `backfill:${network}`;
@@ -158,12 +160,12 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
       // Get latest checkpoint to know where to stop
       console.log(`[jun] fetching latest checkpoint...`);
-      const latest = await getLatestCheckpoint(grpcClient!);
+      const latest = await getLatestCheckpoint(grpcClient);
       const to = BigInt(latest);
       console.log(`[jun] backfilling from ${from} to ${to} (${to - from + 1n} checkpoints)`);
 
       // Check if we have a saved cursor
-      const savedCursor = await state!.getCheckpointCursor(cursorKey);
+      const savedCursor = await state.getCheckpointCursor(cursorKey);
       const startFrom = savedCursor && savedCursor > from ? savedCursor + 1n : from;
 
       if (startFrom > to) {
@@ -201,7 +203,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         const newWatermark = next - 1n;
         if (newWatermark > watermark) {
           watermark = newWatermark;
-          await state!.setCheckpointCursor(cursorKey, watermark);
+          await state.setCheckpointCursor(cursorKey, watermark);
         }
       }
 
@@ -212,11 +214,11 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           if (shutdownRequested) return;
 
           try {
-            const response = await grpcClient!.getCheckpoint(seq);
-            const decoded = processor!.process(response);
+            const response = await cachedGetCheckpoint(seq, () => grpcClient.getCheckpoint(seq));
+            const decoded = processor.process(response);
 
             if (decoded.length > 0) {
-              await output!.write(decoded);
+              await output.write(decoded);
               totalEvents += decoded.length;
             }
 
@@ -254,13 +256,13 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
     async shutdown(): Promise<void> {
       shutdownRequested = true;
-      if (grpcClient) {
-        grpcClient.close();
-        grpcClient = null;
+      if (_grpcClient) {
+        _grpcClient.close();
+        _grpcClient = null;
       }
-      if (sql) {
-        await sql.close();
-        sql = null;
+      if (_sql) {
+        await _sql.close();
+        _sql = null;
       }
       console.log("[jun] shutdown complete");
     },
