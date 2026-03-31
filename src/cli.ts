@@ -2493,7 +2493,7 @@ program
 
 program
   .command("chat")
-  .description("Stream or replay checkpoints and open an AI chat to analyze the data live")
+  .description("Open an AI chat with Sui chain query tools, optionally streaming checkpoint data")
   .option("--live", "stream live checkpoints (grows in real-time)", false)
   .option("--url <url>", "gRPC endpoint for live streaming", cfg.grpcUrl)
   .option("--from-checkpoint <checkpoint>", "start checkpoint for replay")
@@ -2514,26 +2514,25 @@ program
     verify: boolean;
     verifyUrl: string;
   }) => {
-    if (!opts.live && !opts.fromCheckpoint) {
-      console.error("[jun] either --live or --from-checkpoint is required");
-      console.error("  jun chat --live                                    # stream live data");
-      console.error("  jun chat --from-checkpoint 259063382 --count 100   # replay historical");
-      process.exit(1);
-    }
-
-    const { createSqliteWriter } = await import("./output/sqlite.ts");
     const { tmpdir } = await import("os");
     const { join } = await import("path");
     const { spawn } = await import("child_process");
     const { unlinkSync, writeFileSync } = await import("fs");
 
-    const dbPath = join(tmpdir(), `jun-chat-${Date.now()}.sqlite`);
     const mcpConfigPath = join(tmpdir(), `jun-mcp-${Date.now()}.json`);
-    const sqliteWriter = createSqliteWriter({ path: dbPath, showEvents: true, showBalanceChanges: opts.live });
+    const junDir = join(import.meta.dir, "..");
+    const chainOnly = !opts.live && !opts.fromCheckpoint;
 
+    let dbPath: string | undefined;
+    let sqliteWriter: { close(): void } | undefined;
     let description: string;
 
-    if (opts.live) {
+    if (chainOnly) {
+      description = "Sui chain query tools";
+    } else if (opts.live) {
+      const { createSqliteWriter } = await import("./output/sqlite.ts");
+      dbPath = join(tmpdir(), `jun-chat-${Date.now()}.sqlite`);
+      sqliteWriter = createSqliteWriter({ path: dbPath, showEvents: true, showBalanceChanges: opts.live });
       // ── Live mode: stream in background, launch chat immediately ──
       const { createGrpcClient } = await import("./grpc.ts");
       const readMask = buildReadMask([]);
@@ -2575,8 +2574,11 @@ program
       await Bun.sleep(3000);
       console.error(`[jun] ${checkpointCount} checkpoints buffered, starting chat...`);
 
-    } else {
+    } else if (opts.fromCheckpoint) {
       // ── Replay mode: stream into DB in background, launch chat immediately ──
+      const { createSqliteWriter } = await import("./output/sqlite.ts");
+      dbPath = join(tmpdir(), `jun-chat-${Date.now()}.sqlite`);
+      sqliteWriter = createSqliteWriter({ path: dbPath, showEvents: true, showBalanceChanges: false });
       const { createArchiveClient } = await import("./archive.ts");
       const from = BigInt(opts.fromCheckpoint!);
       const to = opts.toCheckpoint ? BigInt(opts.toCheckpoint) : from + BigInt(opts.count) - 1n;
@@ -2638,31 +2640,36 @@ program
     }
 
     // Write temp MCP config
-    const junDir = join(import.meta.dir, "..");
+    const mcpArgs = [join(junDir, "src", "mcp.ts")];
+    if (dbPath) mcpArgs.push(dbPath);
     const mcpConfig = {
       mcpServers: {
-        jun: {
-          command: "bun",
-          args: [join(junDir, "src", "mcp.ts"), dbPath],
-        },
+        jun: { command: "bun", args: mcpArgs },
       },
     };
     writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig));
 
     // Build system prompt
-    const liveNote = opts.live
-      ? "The database is being written to in REAL-TIME by a live gRPC stream. New checkpoints arrive every ~250ms. Run queries multiple times to see fresh data."
-      : opts.fromCheckpoint
-        ? "The database is being populated from the archive in the background. New checkpoints are being added as they download. Run queries multiple times to see more data."
-        : "";
+    let systemPrompt: string;
+    if (chainOnly) {
+      systemPrompt = [
+        `You have access to Sui blockchain query tools via the "jun" MCP server.`,
+        `Available tools: sui_info, sui_object, sui_transaction, sui_balance, sui_owned_objects, sui_dynamic_fields, sui_epoch, sui_move_function, sui_package, sui_resolve_name.`,
+        `Start by calling "sui_info" to see the current chain state.`,
+      ].join("\n");
+    } else {
+      const liveNote = opts.live
+        ? "The database is being written to in REAL-TIME by a live gRPC stream. New checkpoints arrive every ~250ms. Run queries multiple times to see fresh data."
+        : "The database is being populated from the archive in the background. New checkpoints are being added as they download. Run queries multiple times to see more data.";
 
-    const systemPrompt = [
-      `You have access to a Sui blockchain SQLite database: ${description}.`,
-      liveNote,
-      `Use the "jun" MCP server tools to analyze the data.`,
-      `Start by calling the "summary" tool to get an overview, then use "query" for specific SQL queries.`,
-      `Tables: transactions (digest, checkpoint, timestamp, sender, status, gas_computation, gas_storage, gas_rebate), events (tx_digest, event_seq, event_type, package_id, module, sender, bcs), balance_changes (tx_digest, checkpoint, timestamp, owner, coin_type, amount).`,
-    ].filter(Boolean).join("\n");
+      systemPrompt = [
+        `You have access to a Sui blockchain SQLite database: ${description}.`,
+        liveNote,
+        `Use the "jun" MCP server tools to analyze the data.`,
+        `Start by calling the "summary" tool to get an overview, then use "query" for specific SQL queries.`,
+        `Tables: transactions (digest, checkpoint, timestamp, sender, status, gas_computation, gas_storage, gas_rebate), events (tx_digest, event_seq, event_type, package_id, module, sender, bcs), balance_changes (tx_digest, checkpoint, timestamp, owner, coin_type, amount).`,
+      ].join("\n");
+    }
 
     // Spawn claude
     console.error(`[jun] starting chat...`);
@@ -2676,8 +2683,8 @@ program
     });
 
     claude.on("close", () => {
-      sqliteWriter.close();
-      try { unlinkSync(dbPath); } catch {}
+      sqliteWriter?.close();
+      if (dbPath) try { unlinkSync(dbPath); } catch {}
       try { unlinkSync(mcpConfigPath); } catch {}
     });
   });
