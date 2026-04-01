@@ -21,6 +21,7 @@ import { createLogger } from "./logger.ts";
 import { createServer, createMetrics, type IndexerMetrics } from "./serve.ts";
 import { createCheckpointDecoderPool, defaultWorkerCount, type CheckpointDecoderPool } from "./checkpoint-decoder-pool.ts";
 import { createBroadcastManager, createNATSTarget, type BroadcastManager, type BroadcastTarget } from "./broadcast.ts";
+import type { HotReloadContext } from "./hot-reload.ts";
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -255,7 +256,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
   async function liveLoop(
     grpcClient: GrpcClient,
-    processor: EventProcessor,
+    getProcessor: () => EventProcessor,
     buffer: WriteBuffer,
     metrics: IndexerMetrics,
     broadcast: BroadcastManager,
@@ -283,7 +284,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           // Broadcast full checkpoint data to SSE + NATS clients
           broadcast.broadcast(response, "live");
 
-          const decoded = processor.process(response);
+          const decoded = getProcessor().process(response);
 
           await buffer.push(decoded, cursorKey, seq);
           metrics.setLiveCursor(seq);
@@ -307,7 +308,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
   }
 
   async function backfillLoop(
-    processor: EventProcessor,
+    getProcessor: () => EventProcessor,
     buffer: WriteBuffer,
     state: StateManager,
     throttle: AdaptiveThrottle,
@@ -390,7 +391,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             // Broadcast full checkpoint data to SSE + NATS clients
             broadcast.broadcast(response, "backfill");
 
-            const decoded = processor.process(response);
+            const decoded = getProcessor().process(response);
 
             if (decoded.length > 0) {
               totalEvents += decoded.length;
@@ -571,12 +572,27 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
     async run(options?: RunOptions): Promise<void> {
       const mode = options?.mode ?? "all";
-      const { sql, state, output, processor, grpcClient } = await init();
+      const { sql, state, output, processor: initialProcessor, grpcClient } = await init();
       setupSignalHandlers();
 
       log.info({ mode }, "run mode");
 
       const metrics = createMetrics();
+
+      // Mutable processor reference for hot reload
+      let currentProcessor = initialProcessor;
+      const getProcessor = () => currentProcessor;
+
+      // Hot reload context (passed to HTTP server for /admin/reload)
+      const hotReloadCtx: HotReloadContext = {
+        events: { ...events },
+        getProcessor,
+        setProcessor: (p) => { currentProcessor = p; },
+        output,
+        handlerTables: { ...handlerTables },
+        sql,
+        log,
+      };
 
       // Resolve start checkpoint
       let startSeq: bigint | null = null;
@@ -648,7 +664,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       // HTTP server (opt-in)
       let httpServer: { stop(): Promise<void> } | null = null;
       if (options?.serve) {
-        httpServer = createServer(options.serve, { sql, state, metrics, broadcast: broadcastManager, log });
+        httpServer = createServer(options.serve, { sql, state, metrics, broadcast: broadcastManager, hotReload: hotReloadCtx, log });
       }
 
       // Checkpoint decoder pool (workers for CPU-bound decompress + decode)
@@ -660,12 +676,12 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       const tasks: Promise<void>[] = [];
 
       if (mode === "all" || mode === "live-only") {
-        tasks.push(liveLoop(grpcClient, processor, liveBuffer, metrics, broadcastManager));
+        tasks.push(liveLoop(grpcClient, getProcessor, liveBuffer, metrics, broadcastManager));
       }
 
       if ((mode === "all" || mode === "backfill-only") && startSeq !== null) {
         tasks.push(
-          backfillLoop(processor, backfillBuffer, state, throttle, startSeq, metrics, broadcastManager, decoderPool, resolvedArchiveUrl),
+          backfillLoop(getProcessor, backfillBuffer, state, throttle, startSeq, metrics, broadcastManager, decoderPool, resolvedArchiveUrl),
         );
       } else if (mode === "backfill-only" && startSeq === null) {
         log.error("backfill requires startCheckpoint in config or a saved cursor");

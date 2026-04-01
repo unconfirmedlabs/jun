@@ -16,6 +16,7 @@ import type { Logger } from "./logger.ts";
 import type { StateManager } from "./state.ts";
 import type { FlushStats } from "./buffer.ts";
 import type { BroadcastManager, SSEStreamType, SSEClient } from "./broadcast.ts";
+import type { HotReloadContext } from "./hot-reload.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,6 +34,7 @@ export interface ServeContext {
   state: StateManager;
   metrics: IndexerMetrics;
   broadcast: BroadcastManager;
+  hotReload?: HotReloadContext;
   log: Logger;
 }
 
@@ -318,8 +320,47 @@ async function handleQuery(
 // Server
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Admin reload handler
+// ---------------------------------------------------------------------------
+
+async function handleReload(
+  req: Request,
+  hotReload: HotReloadContext | undefined,
+  log: Logger,
+): Promise<Response> {
+  if (!hotReload) {
+    return Response.json({ error: "hot reload not available (run mode only)" }, { status: 501 });
+  }
+
+  try {
+    const body = await req.text();
+    if (!body.trim()) {
+      return Response.json({ error: "request body must contain YAML config" }, { status: 400 });
+    }
+
+    const { parseIndexerConfig } = await import("./indexer-config.ts");
+    const { applyReload } = await import("./hot-reload.ts");
+
+    const parsed = parseIndexerConfig(body);
+    const result = await applyReload(hotReload, parsed.indexer.events);
+
+    log.info({ added: result.added, removed: result.removed, altered: result.altered }, "config reloaded");
+
+    return Response.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error({ err: message }, "reload failed");
+    return Response.json({ error: message }, { status: 400 });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Server
+// ---------------------------------------------------------------------------
+
 export function createServer(config: ServeConfig, ctx: ServeContext): IndexerServer {
-  const { sql, metrics, broadcast, log: parentLog } = ctx;
+  const { sql, metrics, broadcast, hotReload, log: parentLog } = ctx;
   const log = parentLog.child({ component: "serve" });
 
   const server = Bun.serve({
@@ -348,6 +389,9 @@ export function createServer(config: ServeConfig, ctx: ServeContext): IndexerSer
       }
       if (url.pathname === "/broadcast/events") {
         return handleSSEStream("broadcast/events", url, broadcast, log);
+      }
+      if (url.pathname === "/admin/reload" && req.method === "POST") {
+        return handleReload(req, hotReload, log);
       }
       return Response.json({ error: "not found" }, { status: 404 });
     },
