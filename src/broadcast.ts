@@ -113,9 +113,14 @@ export function createBroadcastManager(
 ): BroadcastManager {
   const broadcastLog = log.child({ component: "broadcast" });
   const sseClients = new Set<SSEClient>();
+  const MAX_SSE_CLIENTS = 100;
 
   function sendToSSE(client: SSEClient, data: string): boolean {
     try {
+      if (client.controller.desiredSize !== null && client.controller.desiredSize <= 0) {
+        sseClients.delete(client);
+        return false;
+      }
       client.controller.enqueue(data);
       return true;
     } catch {
@@ -144,7 +149,11 @@ export function createBroadcastManager(
       const checkpointMsg = `data: ${JSON.stringify(checkpointData)}\n\n`;
 
       for (const target of targets) {
-        target.publishCheckpoint(checkpointData);
+        try {
+          target.publishCheckpoint(checkpointData);
+        } catch (err) {
+          broadcastLog.warn({ err }, "broadcast target publishCheckpoint failed");
+        }
       }
 
       // Transaction + raw event broadcasts
@@ -167,7 +176,11 @@ export function createBroadcastManager(
         txMessages.push({ sender: txSender, formatted: `data: ${JSON.stringify(txData)}\n\n` });
 
         for (const target of targets) {
-          target.publishTransaction(txData);
+          try {
+            target.publishTransaction(txData);
+          } catch (err) {
+            broadcastLog.warn({ err }, "broadcast target publishTransaction failed");
+          }
         }
 
         // Raw events
@@ -193,7 +206,11 @@ export function createBroadcastManager(
           });
 
           for (const target of targets) {
-            target.publishRawEvent(evData);
+            try {
+              target.publishRawEvent(evData);
+            } catch (err) {
+              broadcastLog.warn({ err }, "broadcast target publishRawEvent failed");
+            }
           }
         }
       }
@@ -239,7 +256,11 @@ export function createBroadcastManager(
         messages.push({ handlerName: event.handlerName, formatted: `data: ${JSON.stringify(obj)}\n\n` });
 
         for (const target of targets) {
-          target.publishDecodedEvent(event, source);
+          try {
+            target.publishDecodedEvent(event, source);
+          } catch (err) {
+            broadcastLog.warn({ err }, "broadcast target publishDecodedEvent failed");
+          }
         }
       }
 
@@ -256,6 +277,9 @@ export function createBroadcastManager(
     },
 
     addSSEClient(client: SSEClient): () => void {
+      if (sseClients.size >= MAX_SSE_CLIENTS) {
+        throw new Error(`max SSE clients reached (${MAX_SSE_CLIENTS})`);
+      }
       sseClients.add(client);
       broadcastLog.debug({ stream: client.stream, clients: sseClients.size }, "SSE client connected");
       return () => {

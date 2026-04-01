@@ -301,7 +301,8 @@ async function handleQuery(
     const rows = await sql.begin(async (tx: any) => {
       await tx.unsafe(`SET TRANSACTION READ ONLY`);
       await tx.unsafe(`SET LOCAL statement_timeout = '${timeoutMs}ms'`);
-      return await tx.unsafe(rawSql.trim());
+      const stmt = rawSql.trim().replace(/;+\s*$/, "");
+      return tx.unsafe(`SELECT * FROM (${stmt}) AS _q LIMIT ${rowLimit + 1}`);
     });
 
     const result = Array.from(rows);
@@ -329,6 +330,14 @@ async function handleReload(
   hotReload: HotReloadContext | undefined,
   log: Logger,
 ): Promise<Response> {
+  const token = process.env.JUN_ADMIN_TOKEN;
+  if (token) {
+    const auth = req.headers.get("authorization");
+    if (auth !== `Bearer ${token}`) {
+      return Response.json({ error: "unauthorized" }, { status: 401 });
+    }
+  }
+
   if (!hotReload) {
     return Response.json({ error: "hot reload not available (run mode only)" }, { status: 501 });
   }

@@ -59,7 +59,7 @@ export async function createStateManager(sql: any): Promise<StateManager> {
         INSERT INTO indexer_checkpoints (key, checkpoint_seq, updated_at)
         VALUES (${key}, ${seq.toString()}, NOW())
         ON CONFLICT (key)
-        DO UPDATE SET checkpoint_seq = ${seq.toString()}, updated_at = NOW()
+        DO UPDATE SET checkpoint_seq = GREATEST(indexer_checkpoints.checkpoint_seq, ${seq.toString()}), updated_at = NOW()
       `;
     },
 

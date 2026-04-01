@@ -92,11 +92,7 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
 
         // Round-robin assignment
         const worker = workers[id % size]!;
-        worker.postMessage({
-          id,
-          seq: seq.toString(), // BigInt can't be cloned
-          compressed,
-        });
+        worker.postMessage({ id, seq: seq.toString(), compressed }, [compressed.buffer]);
       });
     },
 

@@ -37,7 +37,7 @@ export function createPostgresOutput(
   handlers: Record<string, { tableName: string; fields: FieldDefs }>,
 ): StorageBackend {
   // Pre-compute table configs
-  const tables = new Map<string, TableConfig>();
+  let tables = new Map<string, TableConfig>();
   for (const [handlerName, config] of Object.entries(handlers)) {
     const fieldNames = Object.keys(config.fields);
     const columns = ["tx_digest", "event_seq", "sender", "sui_timestamp", ...fieldNames];
@@ -48,7 +48,7 @@ export function createPostgresOutput(
     });
   }
 
-  return {
+  const backend = {
     name: "postgres",
 
     async migrate(): Promise<void> {
@@ -98,7 +98,23 @@ export function createPostgresOutput(
     async shutdown(): Promise<void> {
       // Postgres connection lifecycle managed by Bun.sql pool — no explicit close needed here
     },
+
+    reloadHandlers(newHandlers: Record<string, { tableName: string; fields: FieldDefs }>): void {
+      const newTables = new Map<string, TableConfig>();
+      for (const [handlerName, config] of Object.entries(newHandlers)) {
+        const fieldNames = Object.keys(config.fields);
+        const columns = ["tx_digest", "event_seq", "sender", "sui_timestamp", ...fieldNames];
+        newTables.set(handlerName, {
+          name: config.tableName,
+          fields: config.fields,
+          columns,
+        });
+      }
+      tables = newTables;
+    },
   };
+
+  return backend as StorageBackend;
 }
 
 /**

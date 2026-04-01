@@ -58,7 +58,7 @@ function fieldTypeToParquet(type: FieldType): any {
     case "address": case "string": return { type: "UTF8", optional: false };
     case "bool": return { type: "BOOLEAN", optional: false };
     case "u8": case "u16": case "u32": return { type: "INT32", optional: false };
-    case "u64": return { type: "INT64", optional: false };
+    case "u64": return { type: "UTF8", optional: false };
     case "u128": case "u256": return { type: "UTF8", optional: false }; // too large for INT64
     default: return { type: "UTF8", optional: false };
   }

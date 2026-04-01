@@ -19,6 +19,7 @@ const PROTO_DIR = path.join(import.meta.dir, "..", "proto");
 const READ_MASK_PATHS = [
   "transactions.events",
   "transactions.digest",
+  "transactions.transaction",
   "summary.timestamp",
 ];
 

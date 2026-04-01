@@ -135,6 +135,23 @@ export function parseIndexerConfig(yamlContent: string): ParsedIndexerConfig {
     backfillWorkers: config.backfillWorkers,
   };
 
+  // Validate indexer config fields
+  if (indexer.backfillConcurrency !== undefined) {
+    const val = Number(indexer.backfillConcurrency);
+    if (!Number.isInteger(val) || val < 1) {
+      throw new Error("Invalid config: backfillConcurrency must be an integer >= 1");
+    }
+  }
+  if (indexer.backfillWorkers !== undefined) {
+    const val = Number(indexer.backfillWorkers);
+    if (!Number.isInteger(val) || val < 1) {
+      throw new Error("Invalid config: backfillWorkers must be an integer >= 1");
+    }
+  }
+  if (config.network !== "mainnet" && config.network !== "testnet" && !indexer.archiveUrl) {
+    throw new Error(`Invalid config: archiveUrl is required for network "${config.network}" (only "mainnet" and "testnet" have default archive URLs)`);
+  }
+
   // Build RunOptions from YAML defaults
   const run: RunOptions = {};
 
