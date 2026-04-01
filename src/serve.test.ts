@@ -219,7 +219,7 @@ describe("SSE /events/stream", () => {
 
   test("SSE connection returns event-stream content type", async () => {
     const controller = new AbortController();
-    const res = await fetch(`${baseUrl}/events/stream`, { signal: controller.signal });
+    const res = await fetch(`${baseUrl}/stream/events`, { signal: controller.signal });
 
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("text/event-stream");
@@ -230,7 +230,7 @@ describe("SSE /events/stream", () => {
 
   test("SSE sends connected message on connect", async () => {
     const controller = new AbortController();
-    const res = await fetch(`${baseUrl}/events/stream`, { signal: controller.signal });
+    const res = await fetch(`${baseUrl}/stream/events`, { signal: controller.signal });
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
 
@@ -244,7 +244,7 @@ describe("SSE /events/stream", () => {
 
   test("SSE receives broadcast events", async () => {
     const controller = new AbortController();
-    const res = await fetch(`${baseUrl}/events/stream`, { signal: controller.signal });
+    const res = await fetch(`${baseUrl}/stream/events`, { signal: controller.signal });
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
 
@@ -275,7 +275,7 @@ describe("SSE /events/stream", () => {
 
   test("SSE filters by handler name", async () => {
     const controller = new AbortController();
-    const res = await fetch(`${baseUrl}/events/stream?handler=TargetEvent`, { signal: controller.signal });
+    const res = await fetch(`${baseUrl}/stream/events?handler=TargetEvent`, { signal: controller.signal });
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
 
@@ -299,7 +299,7 @@ describe("SSE /events/stream", () => {
 
   test("SSE filters by source", async () => {
     const controller = new AbortController();
-    const res = await fetch(`${baseUrl}/events/stream?source=live`, { signal: controller.signal });
+    const res = await fetch(`${baseUrl}/stream/events?source=live`, { signal: controller.signal });
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
 
@@ -325,20 +325,105 @@ describe("SSE /events/stream", () => {
   });
 
   test("SSE invalid source returns 400", async () => {
-    const res = await fetch(`${baseUrl}/events/stream?source=invalid`);
+    const res = await fetch(`${baseUrl}/stream/events?source=invalid`);
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain("source must be");
   });
 
   test("broadcastEvents is no-op with zero clients", () => {
-    // Create fresh metrics with no SSE clients
     const freshMetrics = createMetrics();
-    // Should not throw
     freshMetrics.broadcastEvents([
       { handlerName: "E", checkpointSeq: 1n, txDigest: "tx", eventSeq: 0, sender: "0x1", timestamp: new Date(), data: {} },
     ], "live");
     expect(freshMetrics.sseClientCount()).toBe(0);
+  });
+
+  test("/stream/checkpoints receives checkpoint summaries", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/stream/checkpoints`, { signal: controller.signal });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    expect(res.status).toBe(200);
+    await reader.read(); // connected message
+
+    metrics.broadcastCheckpoint({
+      cursor: "500",
+      checkpoint: {
+        sequenceNumber: "500",
+        summary: { timestamp: { seconds: "1711929600", nanos: 0 } },
+        transactions: [{ digest: "tx1", events: null }, { digest: "tx2", events: null }],
+      },
+    }, "live");
+
+    const { value } = await reader.read();
+    const text = decoder.decode(value);
+
+    expect(text).toContain('"seq":"500"');
+    expect(text).toContain('"txCount":2');
+    expect(text).toContain('"source":"live"');
+
+    controller.abort();
+  });
+
+  test("/stream/transactions receives transaction summaries", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/stream/transactions`, { signal: controller.signal });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    await reader.read(); // connected message
+
+    metrics.broadcastCheckpoint({
+      cursor: "600",
+      checkpoint: {
+        sequenceNumber: "600",
+        summary: { timestamp: { seconds: "1711929600", nanos: 0 } },
+        transactions: [
+          { digest: "tx_abc", events: { events: [{ packageId: "", module: "", sender: "0x1", eventType: "E", contents: { name: "E", value: new Uint8Array() } }] } },
+          { digest: "tx_def", events: null },
+        ],
+      },
+    }, "live");
+
+    const { value } = await reader.read();
+    const text = decoder.decode(value);
+
+    expect(text).toContain('"digest":"tx_abc"');
+    expect(text).toContain('"eventCount":1');
+    expect(text).toContain('"digest":"tx_def"');
+
+    controller.abort();
+  });
+
+  test("/stream/checkpoints filters by source", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/stream/checkpoints?source=live`, { signal: controller.signal });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    await reader.read(); // connected message
+
+    // Backfill checkpoint — should be filtered
+    metrics.broadcastCheckpoint({
+      cursor: "100",
+      checkpoint: { sequenceNumber: "100", summary: null, transactions: [] },
+    }, "backfill");
+
+    // Live checkpoint — should arrive
+    metrics.broadcastCheckpoint({
+      cursor: "200",
+      checkpoint: { sequenceNumber: "200", summary: null, transactions: [] },
+    }, "live");
+
+    const { value } = await reader.read();
+    const text = decoder.decode(value);
+
+    expect(text).toContain('"seq":"200"');
+    expect(text).not.toContain('"seq":"100"');
+
+    controller.abort();
   });
 });
 

@@ -275,6 +275,10 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           if (shutdownRequested) break;
 
           const seq = BigInt(response.cursor);
+
+          // Broadcast checkpoint + transaction data to SSE clients (before processing)
+          metrics.broadcastCheckpoint(response, "live");
+
           const decoded = processor.process(response);
 
           await buffer.push(decoded, cursorKey, seq);
@@ -377,6 +381,10 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             // Fetch compressed bytes on main thread (I/O), decode in worker (CPU)
             const compressed = await fetchCompressed(seq, resolvedArchiveUrl);
             const response = await decoderPool.decode(seq, compressed);
+
+            // Broadcast checkpoint + transaction data to SSE clients
+            metrics.broadcastCheckpoint(response, "backfill");
+
             const decoded = processor.process(response);
 
             if (decoded.length > 0) {
