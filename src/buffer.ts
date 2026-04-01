@@ -11,7 +11,7 @@
 import pRetry from "p-retry";
 import type { Logger } from "./logger.ts";
 import type { DecodedEvent } from "./processor.ts";
-import type { PostgresOutput } from "./output/postgres.ts";
+import type { StorageBackend } from "./output/storage.ts";
 import type { StateManager } from "./state.ts";
 
 // ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ export interface WriteBuffer {
 // ---------------------------------------------------------------------------
 
 export function createWriteBuffer(
-  output: PostgresOutput,
+  output: StorageBackend,
   state: StateManager,
   config: WriteBufferConfig,
   log: Logger,

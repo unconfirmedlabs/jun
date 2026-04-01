@@ -7,21 +7,10 @@
 import type { DecodedEvent } from "../processor.ts";
 import type { FieldDefs } from "../schema.ts";
 import { generateDDL } from "../schema.ts";
+import type { StorageBackend } from "./storage.ts";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export interface PostgresOutput {
-  /** Ensure all event tables exist. Called once on startup. */
-  migrate(): Promise<void>;
-
-  /** Write a batch of decoded events to Postgres. */
-  write(events: DecodedEvent[]): Promise<void>;
-
-  /** Write events for a single handler. Used by WriteBuffer for parallel per-table inserts. */
-  writeHandler(handlerName: string, events: DecodedEvent[]): Promise<void>;
-}
+// Re-export StorageBackend as PostgresOutput for backward compatibility
+export type PostgresOutput = StorageBackend;
 
 interface TableConfig {
   name: string;
@@ -45,7 +34,7 @@ interface TableConfig {
 export function createPostgresOutput(
   sql: any,
   handlers: Record<string, { tableName: string; fields: FieldDefs }>,
-): PostgresOutput {
+): StorageBackend {
   // Pre-compute table configs
   const tables = new Map<string, TableConfig>();
   for (const [handlerName, config] of Object.entries(handlers)) {
@@ -59,6 +48,8 @@ export function createPostgresOutput(
   }
 
   return {
+    name: "postgres",
+
     async migrate(): Promise<void> {
       for (const [, config] of Object.entries(handlers)) {
         const ddl = generateDDL(config.tableName, config.fields);
@@ -101,6 +92,10 @@ export function createPostgresOutput(
       for (const [handlerName, handlerEvents] of grouped) {
         await this.writeHandler(handlerName, handlerEvents);
       }
+    },
+
+    async shutdown(): Promise<void> {
+      // Postgres connection lifecycle managed by Bun.sql pool — no explicit close needed here
     },
   };
 }
