@@ -1,8 +1,28 @@
 {
   "name": "jun",
+  "version": "0.1.0",
+  "description": "Sui event indexer for Bun. Native gRPC streaming, BCS decoding, Postgres output.",
   "module": "index.ts",
   "type": "module",
-  "private": true,
+  "exports": {
+    ".": "./index.ts",
+    "./grpc": "./src/grpc.ts",
+    "./checkpoints": "./src/checkpoints.ts",
+    "./events": "./src/events.ts",
+    "./schema": "./src/schema.ts",
+    "./pipeline": "./src/pipeline.ts",
+    "./output/postgres": "./src/output/postgres.ts",
+    "./output/sqlite": "./src/output/sqlite.ts",
+    "./cursor": "./src/cursor.ts",
+    "./verify": "./src/verify.ts",
+    "./codegen": "./src/codegen.ts",
+    "./mcp": "./src/mcp.ts",
+    "./serve": "./src/serve.ts",
+    "./indexer-config": "./src/indexer-config.ts",
+    "./views": "./src/views.ts",
+    "./signing": "./src/signing.ts",
+    "./logger": "./src/logger.ts"
+  },
   "bin": {
     "jun": "./src/cli.ts"
   },
@@ -11,7 +31,8 @@
     "test": "bun test"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/js-yaml": "^4.0.9"
   },
   "peerDependencies": {
     "typescript": "^5"
@@ -26,8 +47,11 @@
     "@noble/hashes": "^1.7.0",
     "@unconfirmed/kei": "0.0.9",
     "commander": "^14.0.3",
+    "js-yaml": "^4.1.1",
     "p-map": "^7.0.4",
     "p-retry": "^8.0.0",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.1.3",
     "protobufjs": "^8.0.0"
   }
 }

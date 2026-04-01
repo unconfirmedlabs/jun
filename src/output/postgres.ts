@@ -18,6 +18,9 @@ export interface PostgresOutput {
 
   /** Write a batch of decoded events to Postgres. */
   write(events: DecodedEvent[]): Promise<void>;
+
+  /** Write events for a single handler. Used by WriteBuffer for parallel per-table inserts. */
+  writeHandler(handlerName: string, events: DecodedEvent[]): Promise<void>;
 }
 
 interface TableConfig {
@@ -63,6 +66,23 @@ export function createPostgresOutput(
       }
     },
 
+    async writeHandler(handlerName: string, events: DecodedEvent[]): Promise<void> {
+      if (events.length === 0) return;
+
+      const table = tables.get(handlerName);
+      if (!table) return;
+
+      const rows = events.map((ev) => ({
+        tx_digest: ev.txDigest,
+        event_seq: ev.eventSeq,
+        sender: ev.sender,
+        sui_timestamp: ev.timestamp,
+        ...ev.data,
+      }));
+
+      await insertBatch(sql, table, rows);
+    },
+
     async write(events: DecodedEvent[]): Promise<void> {
       if (events.length === 0) return;
 
@@ -77,26 +97,9 @@ export function createPostgresOutput(
         }
       }
 
-      // Batch insert per handler
+      // Batch insert per handler (sequential for backward compatibility)
       for (const [handlerName, handlerEvents] of grouped) {
-        const table = tables.get(handlerName);
-        if (!table) continue;
-
-        const rows = handlerEvents.map((ev) => ({
-          tx_digest: ev.txDigest,
-          event_seq: ev.eventSeq,
-          sender: ev.sender,
-          sui_timestamp: ev.timestamp,
-          ...ev.data,
-        }));
-
-        // Bun.sql batch insert pattern:
-        //   sql`INSERT INTO table ${sql(rows, ...columns)}`
-        // We use sql.unsafe for the ON CONFLICT clause since tagged templates
-        // don't support it directly after the batch insert helper.
-        //
-        // Build the insert with individual parameterized values for safety.
-        await insertBatch(sql, table, rows);
+        await this.writeHandler(handlerName, handlerEvents);
       }
     },
   };

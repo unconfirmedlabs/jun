@@ -1,0 +1,43 @@
+network: testnet
+grpcUrl: slc1.rpc.testnet.sui.mirai.cloud:443
+database: $DATABASE_URL
+startCheckpoint: 316756645
+
+# Runtime defaults (override with CLI flags)
+mode: all
+repairGaps: false
+
+events:
+  RecordPressed:
+    type: "0x10ad578f5b202fd137546f2e7bc12c319dfef98871feeb429506c4b3d62bf702::pressing::RecordPressedEvent"
+    fields:
+      pressing_id: address
+      release_id: address
+      edition: u16
+      record_id: address
+      record_number: u64
+      quantity: u64
+      pressed_by: address
+      paid_value: u64
+      timestamp_ms: u64
+
+# Materialized views — pre-computed aggregations, refreshed on a timer
+views:
+  daily_presses:
+    sql: |
+      SELECT date_trunc('day', sui_timestamp) AS day,
+             release_id,
+             count(*) AS presses,
+             sum(quantity) AS total_quantity
+      FROM record_pressed
+      GROUP BY 1, 2
+    refresh: 60s
+
+  top_pressers:
+    sql: |
+      SELECT pressed_by, sum(quantity) AS total_pressed
+      FROM record_pressed
+      GROUP BY 1
+      ORDER BY 2 DESC
+      LIMIT 100
+    refresh: 5m

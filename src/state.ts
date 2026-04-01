@@ -16,6 +16,9 @@ export interface StateManager {
 
   /** Set the checkpoint cursor for a key. Upserts. */
   setCheckpointCursor(key: string, seq: bigint): Promise<void>;
+
+  /** Record checkpoint sequences as processed (for gap detection). Bulk insert, idempotent. */
+  recordProcessedCheckpoints(seqs: bigint[]): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -26,12 +29,19 @@ export interface StateManager {
  * Initialize state management. Auto-creates the `indexer_checkpoints` table.
  */
 export async function createStateManager(sql: any): Promise<StateManager> {
-  // Auto-create the state table
+  // Auto-create the state tables
   await sql`
     CREATE TABLE IF NOT EXISTS indexer_checkpoints (
       key TEXT PRIMARY KEY,
       checkpoint_seq NUMERIC NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS processed_checkpoints (
+      checkpoint_seq NUMERIC PRIMARY KEY,
+      processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `;
 
@@ -51,6 +61,25 @@ export async function createStateManager(sql: any): Promise<StateManager> {
         ON CONFLICT (key)
         DO UPDATE SET checkpoint_seq = ${seq.toString()}, updated_at = NOW()
       `;
+    },
+
+    async recordProcessedCheckpoints(seqs: bigint[]): Promise<void> {
+      if (seqs.length === 0) return;
+
+      // Build parameterized bulk insert
+      const values: unknown[] = [];
+      const rowClauses: string[] = [];
+      for (const seq of seqs) {
+        values.push(seq.toString());
+        rowClauses.push(`($${values.length}::NUMERIC)`);
+      }
+
+      await sql.unsafe(
+        `INSERT INTO processed_checkpoints (checkpoint_seq)
+         VALUES ${rowClauses.join(", ")}
+         ON CONFLICT DO NOTHING`,
+        values,
+      );
     },
   };
 }

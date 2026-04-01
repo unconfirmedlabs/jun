@@ -24,6 +24,8 @@ export interface EventHandler {
 export interface DecodedEvent {
   /** Handler name (key from the events config) */
   handlerName: string;
+  /** Checkpoint sequence number */
+  checkpointSeq: bigint;
   /** Transaction digest */
   txDigest: string;
   /** Event sequence number within the transaction */
@@ -119,6 +121,7 @@ export function createProcessor(handlers: Record<string, EventHandler>): EventPr
       const cp = response.checkpoint;
       if (!cp?.transactions) return events;
 
+      const checkpointSeq = BigInt(response.cursor);
       const timestamp = parseTimestamp(cp.summary?.timestamp);
 
       for (const tx of cp.transactions) {
@@ -142,6 +145,7 @@ export function createProcessor(handlers: Record<string, EventHandler>): EventPr
 
             events.push({
               handlerName: handler.name,
+              checkpointSeq,
               txDigest: tx.digest,
               eventSeq,
               sender: ev.sender,

@@ -2689,4 +2689,52 @@ program
     });
   });
 
+// ---------------------------------------------------------------------------
+// run — Run indexer from YAML config file
+// ---------------------------------------------------------------------------
+
+program
+  .command("run <config>")
+  .description("Run indexer from a YAML config file")
+  .option("--mode <mode>", "override run mode (all, live-only, backfill-only)")
+  .option("--repair-gaps", "enable gap detection and repair")
+  .option("--no-repair-gaps", "disable gap detection and repair")
+  .option("--serve <port>", "start HTTP server on port")
+  .option("--no-serve", "disable HTTP server even if set in config")
+  .action(async (configFile: string, opts: {
+    mode?: string;
+    repairGaps?: boolean;
+    serve?: string;
+    noServe?: boolean;
+  }) => {
+    try {
+      const { resolve } = await import("path");
+      const { SQL } = await import("bun");
+      const { loadIndexerConfig, mergeRunOptions } = await import("./indexer-config.ts");
+      const { defineIndexer } = await import("./index.ts");
+      const { createViewManager } = await import("./views.ts");
+      const { createLogger } = await import("./logger.ts");
+
+      const configPath = resolve(configFile);
+      const { indexer: indexerConfig, run: yamlRunOpts, views } = loadIndexerConfig(configPath);
+      const runOpts = mergeRunOptions(yamlRunOpts, opts);
+
+      // Set up materialized views (separate sql connection)
+      let viewManager: { stop(): void } | null = null;
+      if (views && Object.keys(views).length > 0) {
+        const log = createLogger();
+        const viewSql = new SQL(indexerConfig.database);
+        viewManager = await createViewManager(viewSql, views, log);
+        viewManager.start();
+      }
+
+      const indexer = defineIndexer(indexerConfig);
+      await indexer.run(runOpts);
+
+      viewManager?.stop();
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
 program.parse();

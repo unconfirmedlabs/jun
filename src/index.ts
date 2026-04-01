@@ -2,15 +2,23 @@
  * Jun — Sui Event Indexer for Bun
  *
  * Main entry point. Exports `defineIndexer()` which creates an indexer
- * with `live()` and `backfill()` modes.
+ * with `live()`, `backfill()`, and `run()` modes.
+ *
+ * `run()` combines live streaming and historical backfill concurrently,
+ * mediated by WriteBuffers that batch events and flush to Postgres.
  */
 import { SQL } from "bun";
 import pMap from "p-map";
 import { createGrpcClient, type GrpcClient } from "./grpc.ts";
-import { cachedGetCheckpoint } from "./archive.ts";
+import { createArchiveClient, cachedGetCheckpoint, type ArchiveClient } from "./archive.ts";
 import { createProcessor, type EventHandler, type EventProcessor } from "./processor.ts";
 import { createPostgresOutput, type PostgresOutput } from "./output/postgres.ts";
 import { createStateManager, type StateManager } from "./state.ts";
+import { createWriteBuffer, type WriteBuffer } from "./buffer.ts";
+import { createAdaptiveThrottle, type AdaptiveThrottle } from "./throttle.ts";
+import { createGapDetector } from "./gaps.ts";
+import { createLogger } from "./logger.ts";
+import { createServer, createMetrics, type IndexerMetrics } from "./serve.ts";
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -18,6 +26,8 @@ import { createStateManager, type StateManager } from "./state.ts";
 
 export type { FieldDefs, FieldType } from "./schema.ts";
 export type { EventHandler } from "./processor.ts";
+export type { FlushStats, WriteBufferConfig, WriteBuffer } from "./buffer.ts";
+export type { ThrottleConfig, AdaptiveThrottle } from "./throttle.ts";
 
 export interface IndexerConfig {
   /** Sui network name (for logging/cursor keys) */
@@ -30,6 +40,28 @@ export interface IndexerConfig {
   events: Record<string, EventHandler>;
   /** Backfill concurrency (default: 10) */
   backfillConcurrency?: number;
+  /**
+   * Starting checkpoint for backfill. Accepts:
+   * - bigint: raw checkpoint sequence number
+   * - "epoch:N": resolves first checkpoint of epoch N
+   * - "timestamp:ISO": resolves checkpoint at/after the given timestamp
+   * - "package:0x...": resolves publish checkpoint for the package
+   * - numeric string: parsed as bigint
+   */
+  startCheckpoint?: bigint | string;
+  /** Archive URL override (default: resolved from config.ts based on network) */
+  archiveUrl?: string;
+}
+
+export type RunMode = "all" | "live-only" | "backfill-only";
+
+export interface RunOptions {
+  /** Which loops to run (default: "all") */
+  mode?: RunMode;
+  /** Enable periodic gap detection and repair (default: false) */
+  repairGaps?: boolean;
+  /** Start an HTTP server for health, status, and query endpoints */
+  serve?: { port: number; hostname?: string };
 }
 
 export interface Indexer {
@@ -37,6 +69,8 @@ export interface Indexer {
   live(): Promise<void>;
   /** Backfill from a starting checkpoint to the latest. Exits when done. */
   backfill(options: { from: bigint }): Promise<void>;
+  /** Run live + backfill concurrently with buffered writes. */
+  run(options?: RunOptions): Promise<void>;
   /** Graceful shutdown */
   shutdown(): Promise<void>;
 }
@@ -47,7 +81,6 @@ export interface Indexer {
 
 /** Convert handler name to snake_case table name */
 function toTableName(handlerName: string): string {
-  // Convert camelCase/PascalCase to snake_case
   return handlerName
     .replace(/([A-Z])/g, "_$1")
     .toLowerCase()
@@ -55,11 +88,116 @@ function toTableName(handlerName: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Start checkpoint resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a startCheckpoint spec to a concrete checkpoint sequence number.
+ * Supports: bigint, "epoch:N", "timestamp:ISO", "package:0x...", numeric string.
+ */
+async function resolveStartCheckpoint(
+  spec: bigint | string,
+  grpcUrl: string,
+): Promise<bigint> {
+  // Raw bigint
+  if (typeof spec === "bigint") return spec;
+
+  const str = String(spec);
+
+  // Epoch resolution
+  if (str.startsWith("epoch:")) {
+    const epoch = str.slice(6);
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(grpcUrl);
+    const { response } = await sui.ledgerService.getEpoch({
+      epoch,
+      readMask: { paths: ["first_checkpoint"] },
+    });
+    const first = response.epoch?.firstCheckpoint;
+    if (!first) throw new Error(`Could not resolve epoch ${epoch}`);
+    return BigInt(first);
+  }
+
+  // Timestamp resolution (binary search)
+  if (str.startsWith("timestamp:")) {
+    const targetMs = new Date(str.slice(10)).getTime();
+    if (isNaN(targetMs)) throw new Error(`Invalid timestamp: ${str.slice(10)}`);
+
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(grpcUrl);
+
+    // Get latest checkpoint as upper bound
+    const { response: latestResp } = await sui.ledgerService.getLatestCheckpoint({
+      readMask: { paths: ["sequence_number", "summary"] },
+    });
+    let high = BigInt(latestResp.checkpoint?.sequenceNumber ?? "0");
+    let low = 0n;
+
+    // Binary search for the first checkpoint at or after the target timestamp
+    while (low < high) {
+      const mid = low + (high - low) / 2n;
+      const { response: cpResp } = await sui.ledgerService.getCheckpoint({
+        checkpointId: { oneofKind: "sequenceNumber", sequenceNumber: mid.toString() },
+        readMask: { paths: ["summary.timestamp"] },
+      });
+      const ts = cpResp.checkpoint?.summary?.timestamp;
+      const cpMs = ts ? Number(BigInt(ts.seconds) * 1000n + BigInt(Math.floor(ts.nanos / 1_000_000))) : 0;
+
+      if (cpMs < targetMs) {
+        low = mid + 1n;
+      } else {
+        high = mid;
+      }
+    }
+
+    return low;
+  }
+
+  // Package resolution
+  if (str.startsWith("package:")) {
+    const packageId = str.slice(8);
+    const { getSuiClient } = await import("./rpc.ts");
+    const sui = getSuiClient(grpcUrl);
+
+    // Get the package object to find its publish transaction
+    const obj = await sui.core.getObject({ objectId: packageId });
+    const prevTx = (obj as any).data?.previousTransaction;
+    if (!prevTx) throw new Error(`Could not find publish transaction for package ${packageId}`);
+
+    // Get the transaction to find its checkpoint
+    const tx = await sui.core.getTransactionBlock({
+      digest: prevTx,
+      options: { showEffects: true },
+    });
+    const cpSeq = (tx as any).checkpoint;
+    if (!cpSeq) throw new Error(`Could not resolve checkpoint for publish tx ${prevTx}`);
+    return BigInt(cpSeq);
+  }
+
+  // Numeric string fallback
+  try {
+    return BigInt(str);
+  } catch {
+    throw new Error(`Invalid startCheckpoint: "${str}". Expected bigint, epoch:N, timestamp:ISO, or package:0x...`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // defineIndexer
 // ---------------------------------------------------------------------------
 
 export function defineIndexer(config: IndexerConfig): Indexer {
-  const { network, grpcUrl, database, events, backfillConcurrency = 10 } = config;
+  const {
+    network,
+    grpcUrl,
+    database,
+    events,
+    backfillConcurrency = 10,
+    startCheckpoint: startCheckpointSpec,
+    archiveUrl,
+  } = config;
+
+  const log = createLogger();
 
   let shutdownRequested = false;
   let abortController = new AbortController();
@@ -85,18 +223,18 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     await output.migrate();
     const processor = createProcessor(events);
     _grpcClient = createGrpcClient({ url: grpcUrl });
-    console.log(`[jun] initialized — network=${network}, events=${Object.keys(events).join(", ")}`);
-    return { state, output, processor, grpcClient: _grpcClient };
+    log.info({ network, events: Object.keys(events) }, "initialized");
+    return { sql: _sql, state, output, processor, grpcClient: _grpcClient };
   }
 
   // SIGINT/SIGTERM handlers
   function setupSignalHandlers() {
     const handler = () => {
       if (shutdownRequested) {
-        console.log("[jun] force shutdown");
+        log.warn("force shutdown");
         process.exit(1);
       }
-      console.log("\n[jun] shutting down gracefully...");
+      log.info("shutting down gracefully...");
       shutdownRequested = true;
       abortController.abort();
     };
@@ -104,24 +242,193 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     process.on("SIGTERM", handler);
   }
 
+  // -------------------------------------------------------------------------
+  // Internal loops for run() mode
+  // -------------------------------------------------------------------------
+
+  async function liveLoop(
+    grpcClient: GrpcClient,
+    processor: EventProcessor,
+    buffer: WriteBuffer,
+    metrics: IndexerMetrics,
+  ): Promise<void> {
+    const liveLog = log.child({ component: "live" });
+    const cursorKey = `live:${network}`;
+    let reconnectDelay = 1000;
+    let client = grpcClient;
+
+    while (!shutdownRequested) {
+      try {
+        liveLog.info({ url: grpcUrl }, "connecting");
+        client.close();
+        client = createGrpcClient({ url: grpcUrl });
+        _grpcClient = client;
+
+        const stream = client.subscribeCheckpoints();
+        reconnectDelay = 1000;
+
+        for await (const response of stream) {
+          if (shutdownRequested) break;
+
+          const seq = BigInt(response.cursor);
+          const decoded = processor.process(response);
+
+          await buffer.push(decoded, cursorKey, seq);
+          metrics.setLiveCursor(seq);
+          metrics.recordLiveCheckpoint();
+
+          if (decoded.length > 0) {
+            liveLog.info({ checkpoint: seq.toString(), events: decoded.length }, "events decoded");
+          } else {
+            liveLog.debug({ checkpoint: seq.toString() }, "no matching events");
+          }
+        }
+      } catch (err) {
+        if (shutdownRequested) break;
+
+        liveLog.error({ err, reconnectIn: reconnectDelay / 1000 }, "stream error");
+
+        await sleep(reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+      }
+    }
+  }
+
+  async function backfillLoop(
+    archiveClient: ArchiveClient,
+    processor: EventProcessor,
+    buffer: WriteBuffer,
+    state: StateManager,
+    throttle: AdaptiveThrottle,
+    startSeq: bigint,
+    metrics: IndexerMetrics,
+  ): Promise<void> {
+    const bfLog = log.child({ component: "backfill" });
+    const cursorKey = `backfill:${network}`;
+
+    // Determine the upper bound
+    bfLog.info("fetching latest checkpoint...");
+    const latest = await getLatestCheckpoint(createGrpcClient({ url: grpcUrl }));
+    const to = BigInt(latest);
+
+    // Check saved cursor for resume
+    const savedCursor = await state.getCheckpointCursor(cursorKey);
+    const startFrom = savedCursor && savedCursor > startSeq ? savedCursor + 1n : startSeq;
+
+    if (startFrom > to) {
+      bfLog.info({ cursor: savedCursor?.toString() }, "already complete");
+      return;
+    }
+
+    if (savedCursor) {
+      bfLog.info({ from: startFrom.toString(), savedCursor: savedCursor.toString() }, "resuming");
+    }
+
+    const totalCheckpoints = to - startFrom + 1n;
+    bfLog.info({ from: startFrom.toString(), to: to.toString(), total: totalCheckpoints.toString() }, "starting");
+
+    let processed = 0;
+    let totalEvents = 0;
+    const startTime = performance.now();
+
+    // Watermark tracking for safe cursor advancement
+    const completed = new Set<bigint>();
+    let watermark = startFrom - 1n;
+
+    function advanceWatermark(): bigint {
+      let next = watermark + 1n;
+      while (completed.has(next)) {
+        completed.delete(next);
+        next++;
+      }
+      watermark = next - 1n;
+      return watermark;
+    }
+
+    // Process in sliding windows
+    const windowSize = 1000n;
+    let windowStart = startFrom;
+
+    while (windowStart <= to && !shutdownRequested) {
+      await throttle.waitIfPaused();
+
+      const windowEnd = windowStart + windowSize - 1n < to ? windowStart + windowSize - 1n : to;
+      const batch: bigint[] = [];
+      for (let i = windowStart; i <= windowEnd; i++) {
+        batch.push(i);
+      }
+
+      bfLog.debug({ window: `${windowStart}..${windowEnd}`, concurrency: throttle.getConcurrency() }, "processing window");
+
+      await pMap(
+        batch,
+        async (seq) => {
+          if (shutdownRequested) return;
+
+          try {
+            const response = await archiveClient.fetchCheckpoint(seq);
+            const decoded = processor.process(response);
+
+            if (decoded.length > 0) {
+              totalEvents += decoded.length;
+            }
+
+            completed.add(seq);
+            const wm = advanceWatermark();
+
+            // Push events with watermark as cursor (safe resume point)
+            await buffer.push(decoded, cursorKey, wm);
+            metrics.setBackfillCursor(wm);
+            metrics.recordBackfillCheckpoint();
+
+            processed++;
+
+            if (processed % 100 === 0) {
+              const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+              const rate = (processed / (parseFloat(elapsed) || 1)).toFixed(0);
+              const total = Number(to - startFrom + 1n);
+              const pct = ((processed / total) * 100).toFixed(1);
+              bfLog.info({ processed, total, pct, rate: `${rate}/s`, events: totalEvents, elapsed }, "progress");
+            }
+          } catch (err) {
+            bfLog.error({ checkpoint: seq.toString(), err }, "error processing checkpoint");
+          }
+        },
+        { concurrency: throttle.getConcurrency(), signal: abortController.signal },
+      ).catch((err) => {
+        if (err.name === "AbortError") return;
+        throw err;
+      });
+
+      windowStart = windowEnd + 1n;
+    }
+
+    const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+    bfLog.info({ processed, events: totalEvents, elapsed }, "complete");
+  }
+
+  // -------------------------------------------------------------------------
+  // Public API
+  // -------------------------------------------------------------------------
+
   return {
     async live(): Promise<void> {
+      const liveLog = log.child({ component: "live" });
       let { state, output, processor, grpcClient } = await init();
       setupSignalHandlers();
 
       const cursorKey = `live:${network}`;
-      let reconnectDelay = 1000; // Start at 1s, exponential backoff
+      let reconnectDelay = 1000;
 
       while (!shutdownRequested) {
         try {
-          console.log(`[jun] connecting to ${grpcUrl}...`);
-          // Recreate gRPC client on reconnect
+          liveLog.info({ url: grpcUrl }, "connecting");
           grpcClient.close();
           grpcClient = createGrpcClient({ url: grpcUrl });
           _grpcClient = grpcClient;
 
           const stream = grpcClient.subscribeCheckpoints();
-          reconnectDelay = 1000; // Reset on successful connection
+          reconnectDelay = 1000;
 
           for await (const response of stream) {
             if (shutdownRequested) break;
@@ -131,7 +438,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
             if (decoded.length > 0) {
               await output.write(decoded);
-              console.log(`[live] checkpoint ${seq}: ${decoded.length} event(s)`);
+              liveLog.info({ checkpoint: seq.toString(), events: decoded.length }, "events decoded");
             }
 
             await state.setCheckpointCursor(cursorKey, seq);
@@ -139,12 +446,10 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         } catch (err) {
           if (shutdownRequested) break;
 
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(`[jun] stream error: ${msg}`);
-          console.log(`[jun] reconnecting in ${reconnectDelay / 1000}s...`);
+          liveLog.error({ err, reconnectIn: reconnectDelay / 1000 }, "stream error");
 
           await sleep(reconnectDelay);
-          reconnectDelay = Math.min(reconnectDelay * 2, 30000); // Cap at 30s
+          reconnectDelay = Math.min(reconnectDelay * 2, 30000);
         }
       }
 
@@ -152,33 +457,31 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     },
 
     async backfill(options: { from: bigint }): Promise<void> {
+      const bfLog = log.child({ component: "backfill" });
       const { state, output, processor, grpcClient } = await init();
       setupSignalHandlers();
 
       const cursorKey = `backfill:${network}`;
       const from = options.from;
 
-      // Get latest checkpoint to know where to stop
-      console.log(`[jun] fetching latest checkpoint...`);
+      bfLog.info("fetching latest checkpoint...");
       const latest = await getLatestCheckpoint(grpcClient);
       const to = BigInt(latest);
-      console.log(`[jun] backfilling from ${from} to ${to} (${to - from + 1n} checkpoints)`);
+      bfLog.info({ from: from.toString(), to: to.toString(), total: (to - from + 1n).toString() }, "starting");
 
-      // Check if we have a saved cursor
       const savedCursor = await state.getCheckpointCursor(cursorKey);
       const startFrom = savedCursor && savedCursor > from ? savedCursor + 1n : from;
 
       if (startFrom > to) {
-        console.log(`[jun] backfill already complete (cursor at ${savedCursor})`);
+        bfLog.info({ cursor: savedCursor?.toString() }, "already complete");
         await this.shutdown();
         return;
       }
 
       if (savedCursor) {
-        console.log(`[jun] resuming from checkpoint ${startFrom} (previously at ${savedCursor})`);
+        bfLog.info({ from: startFrom.toString(), savedCursor: savedCursor.toString() }, "resuming");
       }
 
-      // Build checkpoint sequence
       const checkpoints: bigint[] = [];
       for (let i = startFrom; i <= to; i++) {
         checkpoints.push(i);
@@ -188,9 +491,6 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       let totalEvents = 0;
       const startTime = performance.now();
 
-      // Track completed checkpoints for safe cursor advancement.
-      // With concurrent processing, we can only advance the cursor to the
-      // highest contiguous completed checkpoint to avoid gaps on resume.
       const completed = new Set<bigint>();
       let watermark = startFrom - 1n;
 
@@ -207,7 +507,6 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         }
       }
 
-      // Process in batches with concurrency
       await pMap(
         checkpoints,
         async (seq) => {
@@ -226,31 +525,135 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             await advanceWatermark();
             processed++;
 
-            // Progress log every 100 checkpoints
             if (processed % 100 === 0) {
               const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
               const rate = (processed / (parseFloat(elapsed) || 1)).toFixed(0);
-              console.log(
-                `[backfill] ${processed}/${checkpoints.length} checkpoints (${rate}/s, ${totalEvents} events, ${elapsed}s)`,
-              );
+              bfLog.info({ processed, total: checkpoints.length, rate: `${rate}/s`, events: totalEvents, elapsed }, "progress");
             }
           } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            console.error(`[backfill] error at checkpoint ${seq}: ${msg}`);
-            // Don't throw — skip and continue. The watermark won't advance past gaps.
+            bfLog.error({ checkpoint: seq.toString(), err }, "error processing checkpoint");
           }
         },
         { concurrency: backfillConcurrency, signal: abortController.signal },
       ).catch((err) => {
-        if (err.name === "AbortError") return; // Expected on shutdown
+        if (err.name === "AbortError") return;
         throw err;
       });
 
       const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
-      console.log(
-        `[jun] backfill complete — ${processed} checkpoints, ${totalEvents} events in ${elapsed}s`,
-      );
+      bfLog.info({ processed, events: totalEvents, elapsed }, "complete");
 
+      await this.shutdown();
+    },
+
+    async run(options?: RunOptions): Promise<void> {
+      const mode = options?.mode ?? "all";
+      const { sql, state, output, processor, grpcClient } = await init();
+      setupSignalHandlers();
+
+      log.info({ mode }, "run mode");
+
+      const metrics = createMetrics();
+
+      // Resolve start checkpoint
+      let startSeq: bigint | null = null;
+      if (startCheckpointSpec !== undefined) {
+        log.info("resolving start checkpoint...");
+        startSeq = await resolveStartCheckpoint(startCheckpointSpec, grpcUrl);
+        log.info({ startCheckpoint: startSeq.toString() }, "resolved");
+      } else if (mode !== "live-only") {
+        const saved = await state.getCheckpointCursor(`backfill:${network}`);
+        if (saved) {
+          startSeq = saved + 1n;
+          log.info({ cursor: startSeq.toString() }, "resuming backfill from saved cursor");
+        }
+      }
+
+      // Create archive client for backfill
+      const resolvedArchiveUrl = archiveUrl ?? getDefaultArchiveUrl(network);
+      const archive = createArchiveClient({ archiveUrl: resolvedArchiveUrl });
+
+      // Create write buffers with different tuning
+      const liveBufferLog = log.child({ component: "live:buffer" });
+      const liveBuffer = createWriteBuffer(output, state, {
+        label: "live",
+        intervalMs: 200,
+        maxEvents: 50,
+        onFlush: (stats) => {
+          metrics.recordLiveFlush(stats);
+          if (stats.eventsWritten > 0) {
+            liveBufferLog.info(
+              { events: stats.eventsWritten, durationMs: Math.round(stats.flushDurationMs) },
+              "flushed",
+            );
+          }
+        },
+      }, liveBufferLog);
+
+      const throttleLog = log.child({ component: "throttle" });
+      const throttle = createAdaptiveThrottle({
+        initialConcurrency: backfillConcurrency,
+      }, throttleLog);
+
+      const bfBufferLog = log.child({ component: "backfill:buffer" });
+      const backfillBuffer = createWriteBuffer(output, state, {
+        label: "backfill",
+        intervalMs: 1000,
+        maxEvents: 500,
+        onFlush: (stats) => {
+          throttle.recordLatency(stats.flushDurationMs);
+          metrics.recordBackfillFlush(stats);
+          metrics.recordThrottleState(throttle.getConcurrency(), throttle.isPaused());
+          if (stats.eventsWritten > 0) {
+            bfBufferLog.info(
+              { events: stats.eventsWritten, durationMs: Math.round(stats.flushDurationMs), concurrency: throttle.getConcurrency() },
+              "flushed",
+            );
+          }
+        },
+      }, bfBufferLog);
+
+      // Start buffer timers
+      liveBuffer.start();
+      backfillBuffer.start();
+
+      // HTTP server (opt-in)
+      let httpServer: { stop(): Promise<void> } | null = null;
+      if (options?.serve) {
+        httpServer = createServer(options.serve, { sql, state, metrics, log });
+      }
+
+      // Build concurrent tasks
+      const tasks: Promise<void>[] = [];
+
+      if (mode === "all" || mode === "live-only") {
+        tasks.push(liveLoop(grpcClient, processor, liveBuffer, metrics));
+      }
+
+      if ((mode === "all" || mode === "backfill-only") && startSeq !== null) {
+        tasks.push(
+          backfillLoop(archive, processor, backfillBuffer, state, throttle, startSeq, metrics),
+        );
+      } else if (mode === "backfill-only" && startSeq === null) {
+        log.error("backfill requires startCheckpoint in config or a saved cursor");
+      }
+
+      // Gap repair
+      let stopGapRepair: (() => void) | null = null;
+      if (options?.repairGaps && startSeq !== null) {
+        const gapLog = log.child({ component: "gaps" });
+        const gapDetector = createGapDetector(sql, state, network, gapLog);
+        stopGapRepair = gapDetector.startPeriodicRepair(processor, backfillBuffer, archive);
+      }
+
+      // Run concurrently
+      await Promise.all(tasks);
+
+      // Cleanup
+      if (stopGapRepair) stopGapRepair();
+      if (httpServer) await httpServer.stop();
+      await liveBuffer.stop();
+      await backfillBuffer.stop();
       await this.shutdown();
     },
 
@@ -264,7 +667,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         await _sql.close();
         _sql = null;
       }
-      console.log("[jun] shutdown complete");
+      log.info("shutdown complete");
     },
   };
 }
@@ -279,11 +682,21 @@ function sleep(ms: number): Promise<void> {
 
 /** Get the latest checkpoint sequence number via gRPC */
 async function getLatestCheckpoint(client: GrpcClient): Promise<string> {
-  // Subscribe briefly to get the first checkpoint (which is the latest)
   const stream = client.subscribeCheckpoints();
   for await (const response of stream) {
-    // break triggers the async iterator's return(), which cancels the gRPC call
     return response.cursor;
   }
   throw new Error("Failed to get latest checkpoint");
+}
+
+/** Default archive URLs by network name */
+function getDefaultArchiveUrl(network: string): string {
+  switch (network) {
+    case "mainnet":
+      return "https://checkpoints.mainnet.sui.io";
+    case "testnet":
+      return "https://checkpoints.testnet.sui.io";
+    default:
+      return "https://checkpoints.mainnet.sui.io";
+  }
 }
