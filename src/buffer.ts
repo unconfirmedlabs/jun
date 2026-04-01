@@ -11,7 +11,9 @@
 import pRetry from "p-retry";
 import type { Logger } from "./logger.ts";
 import type { DecodedEvent } from "./processor.ts";
+import type { BalanceChange } from "./balance-processor.ts";
 import type { StorageBackend } from "./output/storage.ts";
+import type { BalanceWriter } from "./output/balance-writer.ts";
 import type { StateManager } from "./state.ts";
 
 // ---------------------------------------------------------------------------
@@ -46,6 +48,8 @@ export interface WriteBufferConfig {
 export interface WriteBuffer {
   /** Enqueue events with associated cursor info. Applies backpressure when buffer is full. */
   push(events: DecodedEvent[], cursorKey: string, seq: bigint): Promise<void>;
+  /** Enqueue balance changes. Flushed alongside events in the same flush cycle. */
+  pushBalances(changes: BalanceChange[]): void;
   /** Force a flush of the current buffer. */
   flush(): Promise<void>;
   /** Start the interval timer. Must be called once. */
@@ -63,10 +67,12 @@ export function createWriteBuffer(
   state: StateManager,
   config: WriteBufferConfig,
   log: Logger,
+  balanceWriter?: BalanceWriter | null,
 ): WriteBuffer {
   const { label, intervalMs, maxEvents, retries = 3, onFlush, onEvents } = config;
 
   let buffer: DecodedEvent[] = [];
+  let balanceBuffer: BalanceChange[] = [];
   let cursors = new Map<string, bigint>();
   let processedSeqs = new Set<bigint>();
   let flushing: Promise<void> | null = null;
@@ -75,17 +81,19 @@ export function createWriteBuffer(
 
   /** Execute a flush: snapshot buffer, write to Postgres, update cursors. */
   async function doFlush(): Promise<void> {
-    if (buffer.length === 0 && cursors.size === 0 && processedSeqs.size === 0) return;
+    if (buffer.length === 0 && balanceBuffer.length === 0 && cursors.size === 0 && processedSeqs.size === 0) return;
 
     // Snapshot and clear
     const batch = buffer;
+    const balanceBatch = balanceBuffer;
     const cursorSnapshot = new Map(cursors);
     const seqSnapshot = new Set(processedSeqs);
     buffer = [];
+    balanceBuffer = [];
     cursors = new Map();
     processedSeqs = new Set();
 
-    log.debug({ events: batch.length, checkpoints: seqSnapshot.size }, "flushing");
+    log.debug({ events: batch.length, balances: balanceBatch.length, checkpoints: seqSnapshot.size }, "flushing");
 
     const flushPromise = (async () => {
       try {
@@ -104,13 +112,18 @@ export function createWriteBuffer(
               }
             }
 
-            // Parallel inserts across tables
+            // Parallel inserts across event tables
             if (grouped.size > 0) {
               await Promise.all(
                 Array.from(grouped.entries()).map(([handlerName, events]) =>
                   output.writeHandler(handlerName, events),
                 ),
               );
+            }
+
+            // Write balance changes (ledger + running totals)
+            if (balanceWriter && balanceBatch.length > 0) {
+              await balanceWriter.write(balanceBatch);
             }
 
             // Update cursors (only after all inserts succeed)
@@ -152,8 +165,9 @@ export function createWriteBuffer(
           { retries, minTimeout: 1000 },
         );
       } catch (err) {
-        // Restore batch to front of buffer so data is not lost
+        // Restore all batches to front of buffers so data is not lost
         buffer = batch.concat(buffer);
+        balanceBuffer = balanceBatch.concat(balanceBuffer);
         for (const [key, seq] of cursorSnapshot) {
           const prev = cursors.get(key);
           if (prev === undefined || seq > prev) cursors.set(key, seq);
@@ -190,13 +204,19 @@ export function createWriteBuffer(
 
       log.trace({ events: events.length, cursor: seq.toString(), bufferSize: buffer.length }, "push");
 
-      // Threshold-based flush with backpressure
-      if (buffer.length >= maxEvents) {
+      // Threshold-based flush with backpressure (count events + balance changes together)
+      if (buffer.length + balanceBuffer.length >= maxEvents) {
         if (flushing) {
           log.debug({ bufferSize: buffer.length }, "backpressure — awaiting in-flight flush");
           await flushing;
         }
         await doFlush();
+      }
+    },
+
+    pushBalances(changes: BalanceChange[]): void {
+      if (changes.length > 0) {
+        balanceBuffer.push(...changes);
       }
     },
 

@@ -41,6 +41,8 @@ export interface HotReloadContext {
   handlerTables: Record<string, { tableName: string; fields: FieldDefs }>;
   /** SQL instance for ALTER TABLE */
   sql: any;
+  /** Remote config URL for reload without body */
+  configUrl?: string;
   log: Logger;
 }
 

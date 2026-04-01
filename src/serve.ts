@@ -350,14 +350,24 @@ async function handleReload(
     }
 
     const body = await req.text();
-    if (!body.trim()) {
-      return Response.json({ error: "request body must contain YAML config" }, { status: 400 });
+
+    let yamlContent: string;
+    if (body.trim()) {
+      // Body provided — use it directly
+      yamlContent = body;
+    } else if (hotReload.configUrl) {
+      // No body — re-fetch from configured remote URL
+      const { fetchRemoteConfig } = await import("./remote-config.ts");
+      yamlContent = await fetchRemoteConfig(hotReload.configUrl);
+      log.info({ url: hotReload.configUrl }, "fetched remote config");
+    } else {
+      return Response.json({ error: "request body must contain YAML config (or set configUrl for remote fetch)" }, { status: 400 });
     }
 
     const { parseIndexerConfig } = await import("./indexer-config.ts");
     const { applyReload } = await import("./hot-reload.ts");
 
-    const parsed = parseIndexerConfig(body);
+    const parsed = parseIndexerConfig(yamlContent);
     const result = await applyReload(hotReload, parsed.indexer.events);
 
     log.info({ added: result.added, removed: result.removed, altered: result.altered }, "config reloaded");

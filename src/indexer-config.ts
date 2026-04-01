@@ -37,10 +37,15 @@ export interface BroadcastConfig {
   nats?: NATSConfig;
 }
 
+export interface BalancesConfig {
+  coinTypes: string[] | "*";
+}
+
 export interface ParsedIndexerConfig {
   indexer: IndexerConfig;
   run: RunOptions;
   views?: Record<string, ViewDef>;
+  balances?: BalancesConfig;
   broadcast?: BroadcastConfig;
 }
 
@@ -211,7 +216,25 @@ export function parseIndexerConfig(yamlContent: string): ParsedIndexerConfig {
     }
   }
 
-  return { indexer, run, views, broadcast };
+  // Parse balances config
+  let balances: BalancesConfig | undefined;
+  if (config.balances) {
+    const ct = config.balances.coinTypes;
+    if (ct === "*") {
+      balances = { coinTypes: "*" };
+    } else if (Array.isArray(ct) && ct.length > 0) {
+      balances = { coinTypes: ct };
+    } else if (ct !== undefined) {
+      throw new Error('Invalid config: balances.coinTypes must be "*" or a non-empty array of coin type strings');
+    }
+  }
+
+  // Set balances on indexer config if present
+  if (balances) {
+    indexer.balances = balances;
+  }
+
+  return { indexer, run, views, balances, broadcast };
 }
 
 /**

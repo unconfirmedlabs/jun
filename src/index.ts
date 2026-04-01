@@ -23,6 +23,8 @@ import { createServer, createMetrics, type IndexerMetrics } from "./serve.ts";
 import { createCheckpointDecoderPool, defaultWorkerCount, type CheckpointDecoderPool } from "./checkpoint-decoder-pool.ts";
 import { createBroadcastManager, createNATSTarget, type BroadcastManager, type BroadcastTarget } from "./broadcast.ts";
 import type { HotReloadContext } from "./hot-reload.ts";
+import { createBalanceProcessor, type BalanceProcessor } from "./balance-processor.ts";
+import { createBalanceWriter, type BalanceWriter } from "./output/balance-writer.ts";
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -57,6 +59,8 @@ export interface IndexerConfig {
   archiveUrl?: string;
   /** Number of worker threads for backfill decoding (default: auto-detect based on CPU cores) */
   backfillWorkers?: number;
+  /** Balance change indexing config. Tracks coin holders with running totals. */
+  balances?: { coinTypes: string[] | "*" };
 }
 
 export type RunMode = "all" | "live-only" | "backfill-only";
@@ -70,6 +74,8 @@ export interface RunOptions {
   serve?: { port: number; hostname?: string };
   /** Additional broadcast targets (e.g. NATS). SSE is always available when serve is enabled. */
   broadcastTargets?: BroadcastTarget[];
+  /** Remote config URL for /admin/reload without body */
+  configUrl?: string;
 }
 
 export interface Indexer {
@@ -204,6 +210,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     startCheckpoint: startCheckpointSpec,
     archiveUrl,
     backfillWorkers,
+    balances: balancesConfig,
   } = config;
 
   const log = createLogger();
@@ -261,6 +268,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     buffer: WriteBuffer,
     metrics: IndexerMetrics,
     broadcast: BroadcastManager,
+    balanceProc: BalanceProcessor | null,
   ): Promise<void> {
     const liveLog = log.child({ component: "live" });
     const cursorKey = `live:${network}`;
@@ -286,6 +294,12 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           broadcast.broadcast(response, "live");
 
           const decoded = getProcessor().process(response);
+
+          // Extract balance changes if enabled
+          if (balanceProc) {
+            const changes = balanceProc.extract(response);
+            buffer.pushBalances(changes);
+          }
 
           await buffer.push(decoded, cursorKey, seq);
           metrics.setLiveCursor(seq);
@@ -318,6 +332,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     broadcast: BroadcastManager,
     decoderPool: CheckpointDecoderPool,
     resolvedArchiveUrl: string,
+    balanceProc: BalanceProcessor | null,
   ): Promise<void> {
     const bfLog = log.child({ component: "backfill" });
     const cursorKey = `backfill:${network}`;
@@ -413,6 +428,12 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             // Store in pending map, then drain contiguously into buffer.
             // This ensures checkpoints reach the buffer in order even though
             // workers complete out of order.
+            // Extract balance changes if enabled
+            if (balanceProc) {
+              const changes = balanceProc.extract(response);
+              buffer.pushBalances(changes);
+            }
+
             pending.set(seq, decoded);
             await drainContiguous();
 
@@ -602,6 +623,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         output,
         handlerTables: { ...handlerTables },
         sql,
+        configUrl: options?.configUrl,
         log,
       };
 
@@ -626,6 +648,16 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       // Broadcast manager (SSE built-in + optional NATS via broadcastTargets)
       const broadcastManager = createBroadcastManager(options?.broadcastTargets ?? [], log);
 
+      // Balance indexing (optional)
+      let balanceProc: BalanceProcessor | null = null;
+      let balWriter: BalanceWriter | null = null;
+      if (balancesConfig) {
+        balanceProc = createBalanceProcessor(balancesConfig.coinTypes);
+        balWriter = createBalanceWriter(sql);
+        await balWriter.migrate();
+        log.info({ coinTypes: balancesConfig.coinTypes }, "balance indexing enabled");
+      }
+
       // Create write buffers with different tuning
       const liveBufferLog = log.child({ component: "live:buffer" });
       const liveBuffer = createWriteBuffer(output, state, {
@@ -642,7 +674,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           }
         },
         onEvents: (events) => broadcastManager.broadcastDecodedEvents(events, "live"),
-      }, liveBufferLog);
+      }, liveBufferLog, balWriter);
 
       const throttleLog = log.child({ component: "throttle" });
       const throttle = createAdaptiveThrottle({
@@ -666,7 +698,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           }
         },
         onEvents: (events) => broadcastManager.broadcastDecodedEvents(events, "backfill"),
-      }, bfBufferLog);
+      }, bfBufferLog, balWriter);
 
       // Start buffer timers
       liveBuffer.start();
@@ -687,12 +719,12 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       const tasks: Promise<void>[] = [];
 
       if (mode === "all" || mode === "live-only") {
-        tasks.push(liveLoop(grpcClient, getProcessor, liveBuffer, metrics, broadcastManager));
+        tasks.push(liveLoop(grpcClient, getProcessor, liveBuffer, metrics, broadcastManager, balanceProc));
       }
 
       if ((mode === "all" || mode === "backfill-only") && startSeq !== null) {
         tasks.push(
-          backfillLoop(getProcessor, backfillBuffer, state, throttle, startSeq, metrics, broadcastManager, decoderPool, resolvedArchiveUrl),
+          backfillLoop(getProcessor, backfillBuffer, state, throttle, startSeq, metrics, broadcastManager, decoderPool, resolvedArchiveUrl, balanceProc),
         );
       } else if (mode === "backfill-only" && startSeq === null) {
         log.error("backfill requires startCheckpoint in config or a saved cursor");

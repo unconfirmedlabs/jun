@@ -20,6 +20,7 @@ const READ_MASK_PATHS = [
   "transactions.events",
   "transactions.digest",
   "transactions.transaction",
+  "transactions.balance_changes",
   "summary.timestamp",
 ];
 
@@ -77,12 +78,20 @@ export interface GrpcEvent {
   };
 }
 
+/** A balance change from a gRPC checkpoint response */
+export interface GrpcBalanceChange {
+  address: string;
+  coinType: string;
+  amount: string;
+}
+
 /** A transaction from a gRPC checkpoint response */
 export interface GrpcTransaction {
   digest: string;
   events: {
     events: GrpcEvent[];
   } | null;
+  balanceChanges?: GrpcBalanceChange[];
 }
 
 /** An OpenSignatureBody from a gRPC DatatypeDescriptor field */

@@ -2694,15 +2694,17 @@ program
 // ---------------------------------------------------------------------------
 
 program
-  .command("run <config>")
-  .description("Run indexer from a YAML config file")
+  .command("run [config]")
+  .description("Run indexer from a YAML config file or remote S3 URL")
+  .option("--config-url <url>", "fetch config from S3 (s3://bucket/key) or HTTPS URL")
   .option("--mode <mode>", "override run mode (all, live-only, backfill-only)")
   .option("--repair-gaps", "enable gap detection and repair")
   .option("--no-repair-gaps", "disable gap detection and repair")
   .option("--serve <port>", "start HTTP server on port")
   .option("--no-serve", "disable HTTP server even if set in config")
   .option("--workers <count>", "number of decoder worker threads (default: auto)")
-  .action(async (configFile: string, opts: {
+  .action(async (configFile: string | undefined, opts: {
+    configUrl?: string;
     mode?: string;
     repairGaps?: boolean;
     serve?: string;
@@ -2712,18 +2714,32 @@ program
     try {
       const { resolve } = await import("path");
       const { SQL } = await import("bun");
-      const { loadIndexerConfig, mergeRunOptions } = await import("./indexer-config.ts");
+      const { loadIndexerConfig, mergeRunOptions, parseIndexerConfig } = await import("./indexer-config.ts");
       const { defineIndexer } = await import("./index.ts");
       const { createViewManager } = await import("./views.ts");
       const { createLogger } = await import("./logger.ts");
       const { createNATSTarget } = await import("./broadcast.ts");
+      const { fetchRemoteConfig } = await import("./remote-config.ts");
 
-      const configPath = resolve(configFile);
-      const { indexer: indexerConfig, run: yamlRunOpts, views, broadcast: broadcastConfig } = loadIndexerConfig(configPath);
+      // Load config from file or remote URL
+      let parsed;
+      const configUrl = opts.configUrl ?? process.env.JUN_CONFIG_URL;
+      if (configUrl) {
+        const yamlContent = await fetchRemoteConfig(configUrl);
+        parsed = parseIndexerConfig(yamlContent);
+      } else if (configFile) {
+        parsed = loadIndexerConfig(resolve(configFile));
+      } else {
+        console.error("[jun] error: provide a config file or --config-url");
+        process.exit(1);
+      }
+
+      const { indexer: indexerConfig, run: yamlRunOpts, views, broadcast: broadcastConfig } = parsed;
       if (opts.workers) {
         indexerConfig.backfillWorkers = parseInt(opts.workers, 10);
       }
       const runOpts = mergeRunOptions(yamlRunOpts, opts);
+      if (configUrl) runOpts.configUrl = configUrl;
 
       // Set up materialized views (separate sql connection)
       let viewManager: { stop(): void } | null = null;
