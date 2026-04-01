@@ -2716,9 +2716,10 @@ program
       const { defineIndexer } = await import("./index.ts");
       const { createViewManager } = await import("./views.ts");
       const { createLogger } = await import("./logger.ts");
+      const { createNATSTarget } = await import("./broadcast.ts");
 
       const configPath = resolve(configFile);
-      const { indexer: indexerConfig, run: yamlRunOpts, views } = loadIndexerConfig(configPath);
+      const { indexer: indexerConfig, run: yamlRunOpts, views, broadcast: broadcastConfig } = loadIndexerConfig(configPath);
       if (opts.workers) {
         indexerConfig.backfillWorkers = parseInt(opts.workers, 10);
       }
@@ -2733,9 +2734,22 @@ program
         viewManager.start();
       }
 
+      // Set up NATS broadcast target if configured
+      let natsTarget: { shutdown(): Promise<void> } | null = null;
+      if (broadcastConfig?.nats) {
+        const log = createLogger();
+        const target = await createNATSTarget(broadcastConfig.nats, log);
+        natsTarget = target;
+        // Pass NATS target to indexer via a broadcast targets array on the config
+        // Note: The indexer's run() creates the BroadcastManager internally.
+        // For NATS, we need to expose broadcast targets on RunOptions.
+        runOpts.broadcastTargets = [target];
+      }
+
       const indexer = defineIndexer(indexerConfig);
       await indexer.run(runOpts);
 
+      natsTarget?.shutdown();
       viewManager?.stop();
     } catch (err) {
       cliError(err);

@@ -15,8 +15,7 @@
 import type { Logger } from "./logger.ts";
 import type { StateManager } from "./state.ts";
 import type { FlushStats } from "./buffer.ts";
-import type { DecodedEvent } from "./processor.ts";
-import type { GrpcCheckpointResponse, GrpcTransaction } from "./grpc.ts";
+import type { BroadcastManager, SSEStreamType, SSEClient } from "./broadcast.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,6 +32,7 @@ export interface ServeContext {
   sql: any;
   state: StateManager;
   metrics: IndexerMetrics;
+  broadcast: BroadcastManager;
   log: Logger;
 }
 
@@ -76,29 +76,8 @@ export interface IndexerMetrics {
   recordLiveFlush(stats: FlushStats): void;
   recordBackfillFlush(stats: FlushStats): void;
   recordThrottleState(concurrency: number, paused: boolean): void;
-  /** Broadcast a checkpoint to SSE clients on /stream/checkpoints. */
-  broadcastCheckpoint(response: GrpcCheckpointResponse, source: "live" | "backfill"): void;
-  /** Broadcast decoded events to SSE clients on /stream/events. Called after successful Postgres write. */
-  broadcastEvents(events: DecodedEvent[], source: "live" | "backfill"): void;
-  /** Register an SSE client. Returns a cleanup function. */
-  addSSEClient(client: SSEClient): () => void;
-  /** Number of connected SSE clients. */
-  sseClientCount(): number;
   snapshot(): MetricsSnapshot;
   prometheus(): string;
-}
-
-export type SSEStreamType = "checkpoints" | "transactions" | "events";
-
-export interface SSEClient {
-  controller: ReadableStreamDefaultController<string>;
-  stream: SSEStreamType;
-  /** Filter: handler name (events only) */
-  handler?: string;
-  /** Filter: "live" | "backfill" */
-  source?: string;
-  /** Filter: sender address (transactions only) */
-  sender?: string;
 }
 
 export function createMetrics(): IndexerMetrics {
@@ -121,9 +100,6 @@ export function createMetrics(): IndexerMetrics {
   let backfillLastFlushDurationMs = 0;
   let liveBufferSize = 0;
   let backfillBufferSize = 0;
-
-  // SSE client tracking
-  const sseClients = new Set<SSEClient>();
 
   function toFlushSnapshot(stats: FlushStats): FlushSnapshot {
     return {
@@ -157,99 +133,6 @@ export function createMetrics(): IndexerMetrics {
     recordThrottleState(concurrency, paused) {
       throttleConcurrency = concurrency;
       throttlePaused = paused;
-    },
-    broadcastCheckpoint(response: GrpcCheckpointResponse, source: "live" | "backfill"): void {
-      if (sseClients.size === 0) return;
-
-      const cp = response.checkpoint;
-      const ts = cp.summary?.timestamp;
-      const timestamp = ts
-        ? new Date(Number(BigInt(ts.seconds) * 1000n + BigInt(Math.floor(ts.nanos / 1_000_000)))).toISOString()
-        : null;
-
-      // Checkpoint summary
-      const checkpointMsg = `data: ${JSON.stringify({
-        seq: response.cursor,
-        timestamp,
-        txCount: cp.transactions.length,
-        source,
-      })}\n\n`;
-
-      // Transaction summaries
-      const txMessages: { sender: string | null; formatted: string }[] = [];
-      for (const tx of cp.transactions) {
-        const eventCount = tx.events?.events?.length ?? 0;
-        const txSender = (tx as any).transaction?.sender ?? null;
-        txMessages.push({
-          sender: txSender,
-          formatted: `data: ${JSON.stringify({
-            checkpoint: response.cursor,
-            digest: tx.digest,
-            sender: txSender,
-            eventCount,
-            timestamp,
-            source,
-          })}\n\n`,
-        });
-      }
-
-      for (const client of sseClients) {
-        try {
-          if (client.source && client.source !== source) continue;
-
-          if (client.stream === "checkpoints") {
-            client.controller.enqueue(checkpointMsg);
-          } else if (client.stream === "transactions") {
-            for (const msg of txMessages) {
-              if (client.sender && client.sender !== msg.sender) continue;
-              client.controller.enqueue(msg.formatted);
-            }
-          }
-        } catch {
-          sseClients.delete(client);
-        }
-      }
-    },
-    broadcastEvents(events: DecodedEvent[], source: "live" | "backfill"): void {
-      if (sseClients.size === 0) return;
-
-      // Serialize each event once, reuse across clients
-      const messages: { handlerName: string; formatted: string }[] = [];
-      for (const event of events) {
-        messages.push({
-          handlerName: event.handlerName,
-          formatted: `data: ${JSON.stringify({
-            handlerName: event.handlerName,
-            checkpointSeq: event.checkpointSeq.toString(),
-            txDigest: event.txDigest,
-            eventSeq: event.eventSeq,
-            sender: event.sender,
-            timestamp: event.timestamp.toISOString(),
-            source,
-            data: event.data,
-          })}\n\n`,
-        });
-      }
-
-      for (const client of sseClients) {
-        try {
-          if (client.stream !== "events") continue;
-          if (client.source && client.source !== source) continue;
-          for (const msg of messages) {
-            if (client.handler && client.handler !== msg.handlerName) continue;
-            client.controller.enqueue(msg.formatted);
-          }
-        } catch {
-          sseClients.delete(client);
-        }
-      }
-    },
-    addSSEClient(client: SSEClient): () => void {
-      sseClients.add(client);
-      return () => sseClients.delete(client);
-    },
-    sseClientCount(): number {
-      return sseClients.size;
     },
     snapshot(): MetricsSnapshot {
       return {
@@ -327,12 +210,13 @@ export function createMetrics(): IndexerMetrics {
 function handleSSEStream(
   streamType: SSEStreamType,
   url: URL,
-  metrics: IndexerMetrics,
+  broadcast: BroadcastManager,
   log: Logger,
 ): Response {
   const source = url.searchParams.get("source") ?? undefined;
   const handler = url.searchParams.get("handler") ?? undefined;
   const sender = url.searchParams.get("sender") ?? undefined;
+  const eventType = url.searchParams.get("type") ?? undefined;
 
   if (source && source !== "live" && source !== "backfill") {
     return Response.json({ error: 'source must be "live" or "backfill"' }, { status: 400 });
@@ -342,19 +226,23 @@ function handleSSEStream(
 
   const readable = new ReadableStream<string>({
     start(controller) {
-      const client: SSEClient = { controller, stream: streamType, handler, source, sender };
-      cleanup = metrics.addSSEClient(client);
+      const client: SSEClient = { controller, stream: streamType, handler, source, sender, eventType };
+      cleanup = broadcast.addSSEClient(client);
 
       const filters: Record<string, string | null> = { source: source ?? null };
       if (streamType === "events") filters.handler = handler ?? null;
       if (streamType === "transactions") filters.sender = sender ?? null;
+      if (streamType === "broadcast/events") {
+        filters.type = eventType ?? null;
+        filters.sender = sender ?? null;
+      }
 
       controller.enqueue(`data: ${JSON.stringify({ type: "connected", stream: streamType, ...filters })}\n\n`);
-      log.debug({ stream: streamType, ...filters, clients: metrics.sseClientCount() }, "SSE client connected");
+      log.debug({ stream: streamType, ...filters, clients: broadcast.sseClientCount() }, "SSE client connected");
     },
     cancel() {
       cleanup?.();
-      log.debug({ stream: streamType, clients: metrics.sseClientCount() }, "SSE client disconnected");
+      log.debug({ stream: streamType, clients: broadcast.sseClientCount() }, "SSE client disconnected");
     },
   });
 
@@ -431,7 +319,7 @@ async function handleQuery(
 // ---------------------------------------------------------------------------
 
 export function createServer(config: ServeConfig, ctx: ServeContext): IndexerServer {
-  const { sql, metrics, log: parentLog } = ctx;
+  const { sql, metrics, broadcast, log: parentLog } = ctx;
   const log = parentLog.child({ component: "serve" });
 
   const server = Bun.serve({
@@ -450,13 +338,16 @@ export function createServer(config: ServeConfig, ctx: ServeContext): IndexerSer
         return handleQuery(url, sql, log);
       }
       if (url.pathname === "/stream/checkpoints") {
-        return handleSSEStream("checkpoints", url, metrics, log);
+        return handleSSEStream("checkpoints", url, broadcast, log);
       }
       if (url.pathname === "/stream/transactions") {
-        return handleSSEStream("transactions", url, metrics, log);
+        return handleSSEStream("transactions", url, broadcast, log);
       }
       if (url.pathname === "/stream/events") {
-        return handleSSEStream("events", url, metrics, log);
+        return handleSSEStream("events", url, broadcast, log);
+      }
+      if (url.pathname === "/broadcast/events") {
+        return handleSSEStream("broadcast/events", url, broadcast, log);
       }
       return Response.json({ error: "not found" }, { status: 404 });
     },

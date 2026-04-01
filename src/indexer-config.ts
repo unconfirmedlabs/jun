@@ -26,15 +26,22 @@
 import yaml from "js-yaml";
 import type { IndexerConfig, RunOptions, RunMode } from "./index.ts";
 import type { ViewDef } from "./views.ts";
+import type { NATSConfig } from "./broadcast.ts";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
+export interface BroadcastConfig {
+  sse?: boolean;
+  nats?: NATSConfig;
+}
+
 export interface ParsedIndexerConfig {
   indexer: IndexerConfig;
   run: RunOptions;
   views?: Record<string, ViewDef>;
+  broadcast?: BroadcastConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +176,25 @@ export function parseIndexerConfig(yamlContent: string): ParsedIndexerConfig {
     }
   }
 
-  return { indexer, run, views };
+  // Parse broadcast config
+  let broadcast: BroadcastConfig | undefined;
+  if (config.broadcast && typeof config.broadcast === "object") {
+    broadcast = {};
+    if (config.broadcast.sse !== undefined) {
+      broadcast.sse = Boolean(config.broadcast.sse);
+    }
+    if (config.broadcast.nats) {
+      if (!config.broadcast.nats.url) {
+        throw new Error("Invalid config: broadcast.nats requires a url");
+      }
+      broadcast.nats = {
+        url: config.broadcast.nats.url,
+        prefix: config.broadcast.nats.prefix,
+      };
+    }
+  }
+
+  return { indexer, run, views, broadcast };
 }
 
 /**

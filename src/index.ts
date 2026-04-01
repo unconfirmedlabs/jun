@@ -20,6 +20,7 @@ import { createGapDetector } from "./gaps.ts";
 import { createLogger } from "./logger.ts";
 import { createServer, createMetrics, type IndexerMetrics } from "./serve.ts";
 import { createCheckpointDecoderPool, defaultWorkerCount, type CheckpointDecoderPool } from "./checkpoint-decoder-pool.ts";
+import { createBroadcastManager, createNATSTarget, type BroadcastManager, type BroadcastTarget } from "./broadcast.ts";
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -65,6 +66,8 @@ export interface RunOptions {
   repairGaps?: boolean;
   /** Start an HTTP server for health, status, and query endpoints */
   serve?: { port: number; hostname?: string };
+  /** Additional broadcast targets (e.g. NATS). SSE is always available when serve is enabled. */
+  broadcastTargets?: BroadcastTarget[];
 }
 
 export interface Indexer {
@@ -255,6 +258,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     processor: EventProcessor,
     buffer: WriteBuffer,
     metrics: IndexerMetrics,
+    broadcast: BroadcastManager,
   ): Promise<void> {
     const liveLog = log.child({ component: "live" });
     const cursorKey = `live:${network}`;
@@ -276,8 +280,8 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
           const seq = BigInt(response.cursor);
 
-          // Broadcast checkpoint + transaction data to SSE clients (before processing)
-          metrics.broadcastCheckpoint(response, "live");
+          // Broadcast full checkpoint data to SSE + NATS clients
+          broadcast.broadcast(response, "live");
 
           const decoded = processor.process(response);
 
@@ -309,6 +313,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     throttle: AdaptiveThrottle,
     startSeq: bigint,
     metrics: IndexerMetrics,
+    broadcast: BroadcastManager,
     decoderPool: CheckpointDecoderPool,
     resolvedArchiveUrl: string,
   ): Promise<void> {
@@ -382,8 +387,8 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             const compressed = await fetchCompressed(seq, resolvedArchiveUrl);
             const response = await decoderPool.decode(seq, compressed);
 
-            // Broadcast checkpoint + transaction data to SSE clients
-            metrics.broadcastCheckpoint(response, "backfill");
+            // Broadcast full checkpoint data to SSE + NATS clients
+            broadcast.broadcast(response, "backfill");
 
             const decoded = processor.process(response);
 
@@ -591,6 +596,9 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       const resolvedArchiveUrl = archiveUrl ?? getDefaultArchiveUrl(network);
       const archive = createArchiveClient({ archiveUrl: resolvedArchiveUrl });
 
+      // Broadcast manager (SSE built-in + optional NATS via broadcastTargets)
+      const broadcastManager = createBroadcastManager(options?.broadcastTargets ?? [], log);
+
       // Create write buffers with different tuning
       const liveBufferLog = log.child({ component: "live:buffer" });
       const liveBuffer = createWriteBuffer(output, state, {
@@ -606,7 +614,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             );
           }
         },
-        onEvents: (events) => metrics.broadcastEvents(events, "live"),
+        onEvents: (events) => broadcastManager.broadcastDecodedEvents(events, "live"),
       }, liveBufferLog);
 
       const throttleLog = log.child({ component: "throttle" });
@@ -630,7 +638,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             );
           }
         },
-        onEvents: (events) => metrics.broadcastEvents(events, "backfill"),
+        onEvents: (events) => broadcastManager.broadcastDecodedEvents(events, "backfill"),
       }, bfBufferLog);
 
       // Start buffer timers
@@ -640,7 +648,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       // HTTP server (opt-in)
       let httpServer: { stop(): Promise<void> } | null = null;
       if (options?.serve) {
-        httpServer = createServer(options.serve, { sql, state, metrics, log });
+        httpServer = createServer(options.serve, { sql, state, metrics, broadcast: broadcastManager, log });
       }
 
       // Checkpoint decoder pool (workers for CPU-bound decompress + decode)
@@ -652,12 +660,12 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       const tasks: Promise<void>[] = [];
 
       if (mode === "all" || mode === "live-only") {
-        tasks.push(liveLoop(grpcClient, processor, liveBuffer, metrics));
+        tasks.push(liveLoop(grpcClient, processor, liveBuffer, metrics, broadcastManager));
       }
 
       if ((mode === "all" || mode === "backfill-only") && startSeq !== null) {
         tasks.push(
-          backfillLoop(processor, backfillBuffer, state, throttle, startSeq, metrics, decoderPool, resolvedArchiveUrl),
+          backfillLoop(processor, backfillBuffer, state, throttle, startSeq, metrics, broadcastManager, decoderPool, resolvedArchiveUrl),
         );
       } else if (mode === "backfill-only" && startSeq === null) {
         log.error("backfill requires startCheckpoint in config or a saved cursor");
@@ -677,6 +685,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       // Cleanup
       if (stopGapRepair) stopGapRepair();
       decoderPool.shutdown();
+      await broadcastManager.shutdown();
       if (httpServer) await httpServer.stop();
       await liveBuffer.stop();
       await backfillBuffer.stop();

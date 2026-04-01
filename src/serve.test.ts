@@ -1,6 +1,7 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import pino from "pino";
 import { createServer, createMetrics, type IndexerServer, type IndexerMetrics } from "./serve.ts";
+import { createBroadcastManager, type BroadcastManager } from "./broadcast.ts";
 import type { StateManager } from "./state.ts";
 import type { FlushStats } from "./buffer.ts";
 
@@ -52,13 +53,15 @@ function makeFlushStats(overrides?: Partial<FlushStats>): FlushStats {
 describe("createServer", () => {
   let server: IndexerServer;
   let metrics: IndexerMetrics;
+  let broadcast: BroadcastManager;
   let baseUrl: string;
 
   beforeAll(() => {
     metrics = createMetrics();
+    broadcast = createBroadcastManager([], testLog);
     const sql = createMockSql();
     const state = createMockState();
-    server = createServer({ port: 0 }, { sql, state, metrics, log: testLog });
+    server = createServer({ port: 0 }, { sql, state, metrics, broadcast, log: testLog });
     baseUrl = `http://127.0.0.1:${server.port}`;
   });
 
@@ -178,9 +181,10 @@ describe("createServer with SQL errors", () => {
 
   beforeAll(() => {
     const metrics = createMetrics();
+    const broadcast = createBroadcastManager([], testLog);
     const sql = createMockSql();
     const state = createMockState();
-    server = createServer({ port: 0 }, { sql, state, metrics, log: testLog });
+    server = createServer({ port: 0 }, { sql, state, metrics, broadcast, log: testLog });
     baseUrl = `http://127.0.0.1:${server.port}`;
   });
 
@@ -200,16 +204,17 @@ describe("createServer with SQL errors", () => {
 // SSE tests
 // ---------------------------------------------------------------------------
 
-describe("SSE /events/stream", () => {
+describe("SSE streams", () => {
   let server: IndexerServer;
-  let metrics: IndexerMetrics;
+  let broadcast: BroadcastManager;
   let baseUrl: string;
 
   beforeAll(() => {
-    metrics = createMetrics();
+    const metrics = createMetrics();
+    broadcast = createBroadcastManager([], testLog);
     const sql = createMockSql();
     const state = createMockState();
-    server = createServer({ port: 0 }, { sql, state, metrics, log: testLog });
+    server = createServer({ port: 0 }, { sql, state, metrics, broadcast, log: testLog });
     baseUrl = `http://127.0.0.1:${server.port}`;
   });
 
@@ -252,7 +257,7 @@ describe("SSE /events/stream", () => {
     await reader.read();
 
     // Broadcast an event
-    metrics.broadcastEvents([{
+    broadcast.broadcastDecodedEvents([{
       handlerName: "TestHandler",
       checkpointSeq: 100n,
       txDigest: "tx_abc",
@@ -282,7 +287,7 @@ describe("SSE /events/stream", () => {
     await reader.read(); // connected message
 
     // Broadcast two events — one matching, one not
-    metrics.broadcastEvents([
+    broadcast.broadcastDecodedEvents([
       { handlerName: "OtherEvent", checkpointSeq: 1n, txDigest: "tx1", eventSeq: 0, sender: "0x1", timestamp: new Date(), data: {} },
       { handlerName: "TargetEvent", checkpointSeq: 2n, txDigest: "tx2", eventSeq: 0, sender: "0x2", timestamp: new Date(), data: {} },
     ], "live");
@@ -306,12 +311,12 @@ describe("SSE /events/stream", () => {
     await reader.read(); // connected message
 
     // Broadcast from backfill — should be filtered out
-    metrics.broadcastEvents([
+    broadcast.broadcastDecodedEvents([
       { handlerName: "E", checkpointSeq: 1n, txDigest: "bf_tx", eventSeq: 0, sender: "0x1", timestamp: new Date(), data: {} },
     ], "backfill");
 
     // Broadcast from live — should arrive
-    metrics.broadcastEvents([
+    broadcast.broadcastDecodedEvents([
       { handlerName: "E", checkpointSeq: 2n, txDigest: "live_tx", eventSeq: 0, sender: "0x2", timestamp: new Date(), data: {} },
     ], "live");
 
@@ -331,12 +336,13 @@ describe("SSE /events/stream", () => {
     expect(body.error).toContain("source must be");
   });
 
-  test("broadcastEvents is no-op with zero clients", () => {
-    const freshMetrics = createMetrics();
-    freshMetrics.broadcastEvents([
+  test("broadcast is no-op with zero clients and targets", () => {
+    const freshBroadcast = createBroadcastManager([], testLog);
+    // Should not throw
+    freshBroadcast.broadcastDecodedEvents([
       { handlerName: "E", checkpointSeq: 1n, txDigest: "tx", eventSeq: 0, sender: "0x1", timestamp: new Date(), data: {} },
     ], "live");
-    expect(freshMetrics.sseClientCount()).toBe(0);
+    expect(freshBroadcast.sseClientCount()).toBe(0);
   });
 
   test("/stream/checkpoints receives checkpoint summaries", async () => {
@@ -348,7 +354,7 @@ describe("SSE /events/stream", () => {
     expect(res.status).toBe(200);
     await reader.read(); // connected message
 
-    metrics.broadcastCheckpoint({
+    broadcast.broadcast({
       cursor: "500",
       checkpoint: {
         sequenceNumber: "500",
@@ -375,7 +381,7 @@ describe("SSE /events/stream", () => {
 
     await reader.read(); // connected message
 
-    metrics.broadcastCheckpoint({
+    broadcast.broadcast({
       cursor: "600",
       checkpoint: {
         sequenceNumber: "600",
@@ -406,13 +412,13 @@ describe("SSE /events/stream", () => {
     await reader.read(); // connected message
 
     // Backfill checkpoint — should be filtered
-    metrics.broadcastCheckpoint({
+    broadcast.broadcast({
       cursor: "100",
       checkpoint: { sequenceNumber: "100", summary: null, transactions: [] },
     }, "backfill");
 
     // Live checkpoint — should arrive
-    metrics.broadcastCheckpoint({
+    broadcast.broadcast({
       cursor: "200",
       checkpoint: { sequenceNumber: "200", summary: null, transactions: [] },
     }, "live");

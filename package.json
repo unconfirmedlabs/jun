@@ -19,6 +19,7 @@
     "./mcp": "./src/mcp.ts",
     "./serve": "./src/serve.ts",
     "./indexer-config": "./src/indexer-config.ts",
+    "./broadcast": "./src/broadcast.ts",
     "./views": "./src/views.ts",
     "./signing": "./src/signing.ts",
     "./logger": "./src/logger.ts"
@@ -48,6 +49,7 @@
     "@unconfirmed/kei": "0.0.9",
     "commander": "^14.0.3",
     "js-yaml": "^4.1.1",
+    "nats": "^2.29.3",
     "p-map": "^7.0.4",
     "p-retry": "^8.0.0",
     "pino": "^10.3.1",
