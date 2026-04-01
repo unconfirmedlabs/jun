@@ -207,6 +207,42 @@ GET /metrics             → Prometheus text format
 
 Query parameters for `/query`: `?sql=...&limit=1000&timeout=5000`
 
+### SSE event streaming
+
+```
+GET /events/stream                         → all events from live + backfill
+GET /events/stream?handler=RecordPressed   → filter by handler name
+GET /events/stream?source=live             → only live events (not backfill)
+GET /events/stream?handler=X&source=live   → both filters
+```
+
+Events stream as they're confirmed in Postgres (after successful write, not before). Zero overhead when no clients are connected.
+
+```bash
+# Stream all events
+curl -N http://localhost:8080/events/stream
+
+# Filter to specific handler
+curl -N "http://localhost:8080/events/stream?handler=RecordPressed"
+```
+
+```
+data: {"type":"connected","handler":null,"source":null}
+
+data: {"handlerName":"RecordPressed","checkpointSeq":"318756892","txDigest":"8bFJ...","sender":"0x...","source":"live","data":{"pressing_id":"0x...","quantity":"5"}}
+
+data: {"handlerName":"RecordPressed","checkpointSeq":"318756893","txDigest":"9cGK...","sender":"0x...","source":"live","data":{"pressing_id":"0x...","quantity":"1"}}
+```
+
+In JavaScript/browsers, consume with `EventSource`:
+```typescript
+const es = new EventSource("http://localhost:8080/events/stream?handler=RecordPressed");
+es.onmessage = (e) => {
+  const event = JSON.parse(e.data);
+  console.log(event.handlerName, event.data);
+};
+```
+
 Prometheus metrics include: `jun_uptime_seconds`, `jun_live_cursor`, `jun_backfill_cursor`, `jun_checkpoints_processed_total`, `jun_events_flushed_total`, `jun_flushes_total`, `jun_flush_duration_seconds`, `jun_buffer_size`, `jun_backfill_concurrency`, `jun_backfill_paused`.
 
 ## SDK

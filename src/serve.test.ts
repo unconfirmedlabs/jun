@@ -197,6 +197,152 @@ describe("createServer with SQL errors", () => {
 });
 
 // ---------------------------------------------------------------------------
+// SSE tests
+// ---------------------------------------------------------------------------
+
+describe("SSE /events/stream", () => {
+  let server: IndexerServer;
+  let metrics: IndexerMetrics;
+  let baseUrl: string;
+
+  beforeAll(() => {
+    metrics = createMetrics();
+    const sql = createMockSql();
+    const state = createMockState();
+    server = createServer({ port: 0 }, { sql, state, metrics, log: testLog });
+    baseUrl = `http://127.0.0.1:${server.port}`;
+  });
+
+  afterAll(async () => {
+    await server.stop();
+  });
+
+  test("SSE connection returns event-stream content type", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/events/stream`, { signal: controller.signal });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    expect(res.headers.get("cache-control")).toBe("no-cache");
+
+    controller.abort();
+  });
+
+  test("SSE sends connected message on connect", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/events/stream`, { signal: controller.signal });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    const { value } = await reader.read();
+    const text = decoder.decode(value);
+
+    expect(text).toContain('"type":"connected"');
+
+    controller.abort();
+  });
+
+  test("SSE receives broadcast events", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/events/stream`, { signal: controller.signal });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    // Read the connected message first
+    await reader.read();
+
+    // Broadcast an event
+    metrics.broadcastEvents([{
+      handlerName: "TestHandler",
+      checkpointSeq: 100n,
+      txDigest: "tx_abc",
+      eventSeq: 0,
+      sender: "0xsender",
+      timestamp: new Date("2026-04-01T00:00:00Z"),
+      data: { amount: "42" },
+    }], "live");
+
+    const { value } = await reader.read();
+    const text = decoder.decode(value);
+
+    expect(text).toContain('"handlerName":"TestHandler"');
+    expect(text).toContain('"txDigest":"tx_abc"');
+    expect(text).toContain('"source":"live"');
+    expect(text).toContain('"amount":"42"');
+
+    controller.abort();
+  });
+
+  test("SSE filters by handler name", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/events/stream?handler=TargetEvent`, { signal: controller.signal });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    await reader.read(); // connected message
+
+    // Broadcast two events — one matching, one not
+    metrics.broadcastEvents([
+      { handlerName: "OtherEvent", checkpointSeq: 1n, txDigest: "tx1", eventSeq: 0, sender: "0x1", timestamp: new Date(), data: {} },
+      { handlerName: "TargetEvent", checkpointSeq: 2n, txDigest: "tx2", eventSeq: 0, sender: "0x2", timestamp: new Date(), data: {} },
+    ], "live");
+
+    const { value } = await reader.read();
+    const text = decoder.decode(value);
+
+    // Should only contain the target event
+    expect(text).toContain("TargetEvent");
+    expect(text).not.toContain("OtherEvent");
+
+    controller.abort();
+  });
+
+  test("SSE filters by source", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/events/stream?source=live`, { signal: controller.signal });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    await reader.read(); // connected message
+
+    // Broadcast from backfill — should be filtered out
+    metrics.broadcastEvents([
+      { handlerName: "E", checkpointSeq: 1n, txDigest: "bf_tx", eventSeq: 0, sender: "0x1", timestamp: new Date(), data: {} },
+    ], "backfill");
+
+    // Broadcast from live — should arrive
+    metrics.broadcastEvents([
+      { handlerName: "E", checkpointSeq: 2n, txDigest: "live_tx", eventSeq: 0, sender: "0x2", timestamp: new Date(), data: {} },
+    ], "live");
+
+    const { value } = await reader.read();
+    const text = decoder.decode(value);
+
+    expect(text).toContain("live_tx");
+    expect(text).not.toContain("bf_tx");
+
+    controller.abort();
+  });
+
+  test("SSE invalid source returns 400", async () => {
+    const res = await fetch(`${baseUrl}/events/stream?source=invalid`);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("source must be");
+  });
+
+  test("broadcastEvents is no-op with zero clients", () => {
+    // Create fresh metrics with no SSE clients
+    const freshMetrics = createMetrics();
+    // Should not throw
+    freshMetrics.broadcastEvents([
+      { handlerName: "E", checkpointSeq: 1n, txDigest: "tx", eventSeq: 0, sender: "0x1", timestamp: new Date(), data: {} },
+    ], "live");
+    expect(freshMetrics.sseClientCount()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Metrics unit tests
 // ---------------------------------------------------------------------------
 

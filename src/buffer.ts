@@ -39,6 +39,8 @@ export interface WriteBufferConfig {
   retries?: number;
   /** Callback invoked after each successful flush */
   onFlush?: (stats: FlushStats) => void;
+  /** Callback invoked with decoded events after successful Postgres write. Used for SSE streaming. */
+  onEvents?: (events: DecodedEvent[]) => void;
 }
 
 export interface WriteBuffer {
@@ -62,7 +64,7 @@ export function createWriteBuffer(
   config: WriteBufferConfig,
   log: Logger,
 ): WriteBuffer {
-  const { label, intervalMs, maxEvents, retries = 3, onFlush } = config;
+  const { label, intervalMs, maxEvents, retries = 3, onFlush, onEvents } = config;
 
   let buffer: DecodedEvent[] = [];
   let cursors = new Map<string, bigint>();
@@ -142,6 +144,11 @@ export function createWriteBuffer(
         );
 
         onFlush?.(stats);
+
+        // Broadcast events after successful Postgres write (for SSE streaming)
+        if (onEvents && batch.length > 0) {
+          onEvents(batch);
+        }
       },
       { retries, minTimeout: 1000 },
     );

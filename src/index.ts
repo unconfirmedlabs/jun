@@ -588,6 +588,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             );
           }
         },
+        onEvents: (events) => metrics.broadcastEvents(events, "live"),
       }, liveBufferLog);
 
       const throttleLog = log.child({ component: "throttle" });
@@ -611,6 +612,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             );
           }
         },
+        onEvents: (events) => metrics.broadcastEvents(events, "backfill"),
       }, bfBufferLog);
 
       // Start buffer timers

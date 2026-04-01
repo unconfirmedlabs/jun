@@ -15,6 +15,7 @@
 import type { Logger } from "./logger.ts";
 import type { StateManager } from "./state.ts";
 import type { FlushStats } from "./buffer.ts";
+import type { DecodedEvent } from "./processor.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,8 +75,20 @@ export interface IndexerMetrics {
   recordLiveFlush(stats: FlushStats): void;
   recordBackfillFlush(stats: FlushStats): void;
   recordThrottleState(concurrency: number, paused: boolean): void;
+  /** Broadcast decoded events to connected SSE clients. Called after successful Postgres write. */
+  broadcastEvents(events: DecodedEvent[], source: "live" | "backfill"): void;
+  /** Register an SSE client. Returns a cleanup function. */
+  addSSEClient(client: SSEClient): () => void;
+  /** Number of connected SSE clients. */
+  sseClientCount(): number;
   snapshot(): MetricsSnapshot;
   prometheus(): string;
+}
+
+export interface SSEClient {
+  controller: ReadableStreamDefaultController<string>;
+  handler?: string;
+  source?: string;
 }
 
 export function createMetrics(): IndexerMetrics {
@@ -98,6 +111,9 @@ export function createMetrics(): IndexerMetrics {
   let backfillLastFlushDurationMs = 0;
   let liveBufferSize = 0;
   let backfillBufferSize = 0;
+
+  // SSE client tracking
+  const sseClients = new Set<SSEClient>();
 
   function toFlushSnapshot(stats: FlushStats): FlushSnapshot {
     return {
@@ -131,6 +147,45 @@ export function createMetrics(): IndexerMetrics {
     recordThrottleState(concurrency, paused) {
       throttleConcurrency = concurrency;
       throttlePaused = paused;
+    },
+    broadcastEvents(events: DecodedEvent[], source: "live" | "backfill"): void {
+      if (sseClients.size === 0) return; // Zero overhead when no clients
+
+      // Serialize each event once, reuse across clients
+      const messages: { handlerName: string; formatted: string }[] = [];
+      for (const event of events) {
+        const obj = {
+          handlerName: event.handlerName,
+          checkpointSeq: event.checkpointSeq.toString(),
+          txDigest: event.txDigest,
+          eventSeq: event.eventSeq,
+          sender: event.sender,
+          timestamp: event.timestamp.toISOString(),
+          source,
+          data: event.data,
+        };
+        messages.push({ handlerName: event.handlerName, formatted: `data: ${JSON.stringify(obj)}\n\n` });
+      }
+
+      for (const client of sseClients) {
+        try {
+          for (const msg of messages) {
+            if (client.handler && client.handler !== msg.handlerName) continue;
+            if (client.source && client.source !== source) continue;
+            client.controller.enqueue(msg.formatted);
+          }
+        } catch {
+          // Client disconnected — remove it
+          sseClients.delete(client);
+        }
+      }
+    },
+    addSSEClient(client: SSEClient): () => void {
+      sseClients.add(client);
+      return () => sseClients.delete(client);
+    },
+    sseClientCount(): number {
+      return sseClients.size;
     },
     snapshot(): MetricsSnapshot {
       return {
@@ -199,6 +254,43 @@ export function createMetrics(): IndexerMetrics {
       return lines.join("\n");
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// SSE handler
+// ---------------------------------------------------------------------------
+
+function handleSSEStream(url: URL, metrics: IndexerMetrics, log: Logger): Response {
+  const handler = url.searchParams.get("handler") ?? undefined;
+  const source = url.searchParams.get("source") ?? undefined;
+
+  if (source && source !== "live" && source !== "backfill") {
+    return Response.json({ error: 'source must be "live" or "backfill"' }, { status: 400 });
+  }
+
+  let cleanup: (() => void) | null = null;
+
+  const stream = new ReadableStream<string>({
+    start(controller) {
+      const client: SSEClient = { controller, handler, source };
+      cleanup = metrics.addSSEClient(client);
+
+      controller.enqueue(`data: ${JSON.stringify({ type: "connected", handler: handler ?? null, source: source ?? null })}\n\n`);
+      log.debug({ handler, source, clients: metrics.sseClientCount() }, "SSE client connected");
+    },
+    cancel() {
+      cleanup?.();
+      log.debug({ clients: metrics.sseClientCount() }, "SSE client disconnected");
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      "connection": "keep-alive",
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +374,9 @@ export function createServer(config: ServeConfig, ctx: ServeContext): IndexerSer
       const url = new URL(req.url);
       if (url.pathname === "/query") {
         return handleQuery(url, sql, log);
+      }
+      if (url.pathname === "/events/stream") {
+        return handleSSEStream(url, metrics, log);
       }
       return Response.json({ error: "not found" }, { status: 404 });
     },
