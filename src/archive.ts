@@ -104,12 +104,12 @@ export async function getCheckpointType(): Promise<protobuf.Type> {
 // ─── Cached archive fetch ────────────────────────────────────────────────────
 
 /** Fetch compressed checkpoint bytes with local cache. */
-export async function fetchCompressed(seq: bigint, archiveUrl: string): Promise<Uint8Array> {
+export async function fetchCompressed(seq: bigint, archiveUrl: string, signal?: AbortSignal): Promise<Uint8Array> {
   const cached = await cacheGet(seq);
   if (cached) return cached;
 
   const url = `${archiveUrl}/${seq}.binpb.zst`;
-  const resp = await fetch(url);
+  const resp = await fetch(url, signal ? { signal } : undefined);
   if (!resp.ok) {
     throw new Error(`Archive fetch failed: ${resp.status} ${resp.statusText} for checkpoint ${seq}`);
   }

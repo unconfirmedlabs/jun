@@ -391,12 +391,14 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           try {
             // Fetch compressed bytes on main thread (I/O), decode in worker (CPU)
             const response = await pRetry(async () => {
-              const fetchPromise = fetchCompressed(seq, resolvedArchiveUrl);
-              const timeoutPromise = new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error("archive fetch timeout")), 30_000),
-              );
-              const compressed = await Promise.race([fetchPromise, timeoutPromise]);
-              return decoderPool.decode(seq, compressed);
+              const ac = new AbortController();
+              const timeout = setTimeout(() => ac.abort(), 30_000);
+              try {
+                const compressed = await fetchCompressed(seq, resolvedArchiveUrl, ac.signal);
+                return await decoderPool.decode(seq, compressed);
+              } finally {
+                clearTimeout(timeout);
+              }
             }, { retries: 3, minTimeout: 1000 });
 
             // Broadcast full checkpoint data to SSE + NATS clients
