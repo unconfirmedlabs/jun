@@ -2701,11 +2701,13 @@ program
   .option("--no-repair-gaps", "disable gap detection and repair")
   .option("--serve <port>", "start HTTP server on port")
   .option("--no-serve", "disable HTTP server even if set in config")
+  .option("--workers <count>", "number of decoder worker threads (default: auto)")
   .action(async (configFile: string, opts: {
     mode?: string;
     repairGaps?: boolean;
     serve?: string;
     noServe?: boolean;
+    workers?: string;
   }) => {
     try {
       const { resolve } = await import("path");
@@ -2717,6 +2719,9 @@ program
 
       const configPath = resolve(configFile);
       const { indexer: indexerConfig, run: yamlRunOpts, views } = loadIndexerConfig(configPath);
+      if (opts.workers) {
+        indexerConfig.backfillWorkers = parseInt(opts.workers, 10);
+      }
       const runOpts = mergeRunOptions(yamlRunOpts, opts);
 
       // Set up materialized views (separate sql connection)

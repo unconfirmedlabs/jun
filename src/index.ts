@@ -10,7 +10,7 @@
 import { SQL } from "bun";
 import pMap from "p-map";
 import { createGrpcClient, type GrpcClient } from "./grpc.ts";
-import { createArchiveClient, cachedGetCheckpoint, type ArchiveClient } from "./archive.ts";
+import { createArchiveClient, cachedGetCheckpoint, fetchCompressed, type ArchiveClient } from "./archive.ts";
 import { createProcessor, type EventHandler, type EventProcessor } from "./processor.ts";
 import { createPostgresOutput, type PostgresOutput } from "./output/postgres.ts";
 import { createStateManager, type StateManager } from "./state.ts";
@@ -19,6 +19,7 @@ import { createAdaptiveThrottle, type AdaptiveThrottle } from "./throttle.ts";
 import { createGapDetector } from "./gaps.ts";
 import { createLogger } from "./logger.ts";
 import { createServer, createMetrics, type IndexerMetrics } from "./serve.ts";
+import { createCheckpointDecoderPool, defaultWorkerCount, type CheckpointDecoderPool } from "./checkpoint-decoder-pool.ts";
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -51,6 +52,8 @@ export interface IndexerConfig {
   startCheckpoint?: bigint | string;
   /** Archive URL override (default: resolved from config.ts based on network) */
   archiveUrl?: string;
+  /** Number of worker threads for backfill decoding (default: auto-detect based on CPU cores) */
+  backfillWorkers?: number;
 }
 
 export type RunMode = "all" | "live-only" | "backfill-only";
@@ -195,6 +198,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     backfillConcurrency = 10,
     startCheckpoint: startCheckpointSpec,
     archiveUrl,
+    backfillWorkers,
   } = config;
 
   const log = createLogger();
@@ -295,13 +299,14 @@ export function defineIndexer(config: IndexerConfig): Indexer {
   }
 
   async function backfillLoop(
-    archiveClient: ArchiveClient,
     processor: EventProcessor,
     buffer: WriteBuffer,
     state: StateManager,
     throttle: AdaptiveThrottle,
     startSeq: bigint,
     metrics: IndexerMetrics,
+    decoderPool: CheckpointDecoderPool,
+    resolvedArchiveUrl: string,
   ): Promise<void> {
     const bfLog = log.child({ component: "backfill" });
     const cursorKey = `backfill:${network}`;
@@ -345,12 +350,15 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       return watermark;
     }
 
-    // Process in sliding windows
-    const windowSize = 1000n;
+    // Process in sliding windows (100 per window to yield frequently for HTTP)
+    const windowSize = 100n;
     let windowStart = startFrom;
 
     while (windowStart <= to && !shutdownRequested) {
       await throttle.waitIfPaused();
+
+      // Yield to event loop — lets HTTP handlers and live stream process
+      await new Promise((r) => setTimeout(r, 0));
 
       const windowEnd = windowStart + windowSize - 1n < to ? windowStart + windowSize - 1n : to;
       const batch: bigint[] = [];
@@ -366,7 +374,9 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           if (shutdownRequested) return;
 
           try {
-            const response = await archiveClient.fetchCheckpoint(seq);
+            // Fetch compressed bytes on main thread (I/O), decode in worker (CPU)
+            const compressed = await fetchCompressed(seq, resolvedArchiveUrl);
+            const response = await decoderPool.decode(seq, compressed);
             const decoded = processor.process(response);
 
             if (decoded.length > 0) {
@@ -625,6 +635,11 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         httpServer = createServer(options.serve, { sql, state, metrics, log });
       }
 
+      // Checkpoint decoder pool (workers for CPU-bound decompress + decode)
+      const workerCount = backfillWorkers ?? defaultWorkerCount();
+      const decoderPool = createCheckpointDecoderPool(workerCount);
+      log.info({ workers: workerCount }, "checkpoint decoder pool started");
+
       // Build concurrent tasks
       const tasks: Promise<void>[] = [];
 
@@ -634,7 +649,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
       if ((mode === "all" || mode === "backfill-only") && startSeq !== null) {
         tasks.push(
-          backfillLoop(archive, processor, backfillBuffer, state, throttle, startSeq, metrics),
+          backfillLoop(processor, backfillBuffer, state, throttle, startSeq, metrics, decoderPool, resolvedArchiveUrl),
         );
       } else if (mode === "backfill-only" && startSeq === null) {
         log.error("backfill requires startCheckpoint in config or a saved cursor");
@@ -653,6 +668,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
       // Cleanup
       if (stopGapRepair) stopGapRepair();
+      decoderPool.shutdown();
       if (httpServer) await httpServer.stop();
       await liveBuffer.stop();
       await backfillBuffer.stop();

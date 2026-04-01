@@ -125,6 +125,7 @@ export function parseIndexerConfig(yamlContent: string): ParsedIndexerConfig {
     startCheckpoint,
     backfillConcurrency: config.backfillConcurrency,
     archiveUrl: config.archiveUrl,
+    backfillWorkers: config.backfillWorkers,
   };
 
   // Build RunOptions from YAML defaults

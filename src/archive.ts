@@ -104,7 +104,7 @@ export async function getCheckpointType(): Promise<protobuf.Type> {
 // ─── Cached archive fetch ────────────────────────────────────────────────────
 
 /** Fetch compressed checkpoint bytes with local cache. */
-async function fetchCompressed(seq: bigint, archiveUrl: string): Promise<Uint8Array> {
+export async function fetchCompressed(seq: bigint, archiveUrl: string): Promise<Uint8Array> {
   const cached = await cacheGet(seq);
   if (cached) return cached;
 

@@ -22,6 +22,7 @@ export {
   createArchiveClient,
   cachedGetCheckpoint,
   decodeCompressedCheckpoint,
+  fetchCompressed,
   fetchRawCheckpoint,
   getCommittee,
   getCheckpointType,
