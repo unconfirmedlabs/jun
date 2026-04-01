@@ -13,6 +13,7 @@
 import type { EventHandler, EventProcessor } from "./processor.ts";
 import { createProcessor } from "./processor.ts";
 import type { StorageBackend } from "./output/storage.ts";
+import { validateIdentifier } from "./output/storage.ts";
 import type { FieldDefs } from "./schema.ts";
 import type { Logger } from "./logger.ts";
 
@@ -118,7 +119,9 @@ async function alterTable(
     if (!oldFields[name]) {
       const sqlType = fieldTypeToSql(type);
       const nullable = type.startsWith("option<") ? "" : " DEFAULT NULL";
-      await sql.unsafe(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS ${name} ${sqlType}${nullable}`);
+      validateIdentifier(tableName);
+    validateIdentifier(name);
+    await sql.unsafe(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS ${name} ${sqlType}${nullable}`);
       addedColumns.push(name);
       log.info({ table: tableName, column: name, type: sqlType }, "column added");
     }

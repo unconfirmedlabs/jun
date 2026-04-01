@@ -114,7 +114,10 @@ function writeState(statePath: string, cursor: bigint): void {
     cursor: cursor.toString(),
     updatedAt: new Date().toISOString(),
   };
-  fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+  // Atomic write: write to temp file then rename (prevents corruption on crash)
+  const tmpPath = statePath + ".tmp";
+  fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2));
+  fs.renameSync(tmpPath, statePath);
 }
 
 // ---------------------------------------------------------------------------
@@ -177,24 +180,27 @@ export function createParquetStorageBackend(
         const chunkFile = path.join(dir, `chunk-${Date.now()}.parquet`);
 
         const writer = await parquet.ParquetWriter.openFile(schema, chunkFile);
-        for (const ev of partEvents) {
-          const row: Record<string, any> = {
-            tx_digest: ev.txDigest,
-            event_seq: ev.eventSeq,
-            sender: ev.sender,
-            sui_timestamp: ev.timestamp.toISOString(),
-          };
-          for (const [key, val] of Object.entries(ev.data)) {
-            // Convert BigInt to number for INT64, stringify for others
-            if (typeof val === "bigint") {
-              row[key] = Number(val);
-            } else {
-              row[key] = val;
+        try {
+          for (const ev of partEvents) {
+            const row: Record<string, any> = {
+              tx_digest: ev.txDigest,
+              event_seq: ev.eventSeq,
+              sender: ev.sender,
+              sui_timestamp: ev.timestamp.toISOString(),
+            };
+            for (const [key, val] of Object.entries(ev.data)) {
+              // BigInt: u64 fits in Number, u128/u256 stored as UTF8 string (see schema mapping)
+              if (typeof val === "bigint") {
+                row[key] = val <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(val) : val.toString();
+              } else {
+                row[key] = val;
+              }
             }
+            await writer.appendRow(row);
           }
-          await writer.appendRow(row);
+        } finally {
+          await writer.close();
         }
-        await writer.close();
 
         parquetLog.debug({ handler: handlerName, partition, events: partEvents.length, file: chunkFile }, "chunk written");
 

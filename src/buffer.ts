@@ -147,7 +147,11 @@ export function createWriteBuffer(
 
         // Broadcast events after successful Postgres write (for SSE streaming)
         if (onEvents && batch.length > 0) {
-          onEvents(batch);
+          try {
+            onEvents(batch);
+          } catch (err) {
+            log.error({ err }, "onEvents callback failed");
+          }
         }
       },
       { retries, minTimeout: 1000 },

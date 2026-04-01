@@ -692,7 +692,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       if (options?.repairGaps && startSeq !== null) {
         const gapLog = log.child({ component: "gaps" });
         const gapDetector = createGapDetector(sql, state, network, gapLog);
-        stopGapRepair = gapDetector.startPeriodicRepair(processor, backfillBuffer, archive);
+        stopGapRepair = gapDetector.startPeriodicRepair(getProcessor, backfillBuffer, archive);
       }
 
       // Run concurrently

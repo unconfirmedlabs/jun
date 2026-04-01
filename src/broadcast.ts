@@ -291,7 +291,11 @@ export async function createNATSTarget(config: NATSConfig, log: Logger): Promise
   const prefix = config.prefix ?? "jun";
   const sc = StringCodec();
 
-  const nc = await connect({ servers: config.url });
+  const nc = await connect({
+    servers: config.url,
+    maxReconnectAttempts: -1,  // unlimited reconnection
+    reconnectTimeWait: 2000,   // 2s between reconnects
+  });
   natsLog.info({ url: config.url, prefix }, "connected");
 
   return {

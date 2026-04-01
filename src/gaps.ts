@@ -30,7 +30,7 @@ export interface GapDetector {
 
   /** Start periodic gap detection + repair loop. Returns a stop function. */
   startPeriodicRepair(
-    processor: EventProcessor,
+    getProcessor: (() => EventProcessor) | EventProcessor,
     buffer: WriteBuffer,
     archiveClient: ArchiveClient,
   ): () => void;
@@ -108,10 +108,14 @@ export function createGapDetector(
     },
 
     startPeriodicRepair(
-      processor: EventProcessor,
+      getProcessor: (() => EventProcessor) | EventProcessor,
       buffer: WriteBuffer,
       archiveClient: ArchiveClient,
     ): () => void {
+      // Support both direct processor and getter function (for hot reload)
+      const resolveProcessor = typeof getProcessor === "function" && !("process" in getProcessor)
+        ? getProcessor as () => EventProcessor
+        : () => getProcessor as EventProcessor;
       let stopped = false;
 
       const run = async () => {
@@ -146,7 +150,7 @@ export function createGapDetector(
           log.info({ count: gaps.length, from: from.toString(), to: to.toString() }, "gaps found");
           const repaired = await this.repairGaps(
             gaps,
-            processor,
+            resolveProcessor(),
             buffer,
             archiveClient,
             `gaps:${network}`,

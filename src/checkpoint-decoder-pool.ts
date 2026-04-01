@@ -49,6 +49,7 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
   const workers: Worker[] = [];
   const pending = new Map<number, PendingJob>();
   let nextId = 0;
+  const MAX_ID = 2_000_000_000; // Safe integer wraparound well below 2^53
 
   // Initialize workers
   for (let i = 0; i < size; i++) {
@@ -68,9 +69,13 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
     };
 
     worker.onerror = (event) => {
-      // Reject all pending jobs for this worker
-      // (we can't know which specific job failed)
-      console.error(`[worker-pool] worker ${i} error:`, event.message);
+      // Reject all pending jobs assigned to this worker (round-robin: id % size === i)
+      for (const [id, job] of pending) {
+        if (id % size === i) {
+          job.reject(new Error(`Worker ${i} crashed: ${event.message}`));
+          pending.delete(id);
+        }
+      }
     };
 
     workers.push(worker);
@@ -81,7 +86,8 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
 
     decode(seq: bigint, compressed: Uint8Array): Promise<GrpcCheckpointResponse> {
       return new Promise((resolve, reject) => {
-        const id = nextId++;
+        const id = nextId;
+        nextId = nextId >= MAX_ID ? 0 : nextId + 1;
         pending.set(id, { resolve, reject });
 
         // Round-robin assignment

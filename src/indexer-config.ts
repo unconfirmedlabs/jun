@@ -201,11 +201,8 @@ export function parseIndexerConfig(yamlContent: string): ParsedIndexerConfig {
  * Load and parse a YAML config file from disk.
  */
 export function loadIndexerConfig(filePath: string): ParsedIndexerConfig {
-  const content = Bun.file(filePath).text();
-  // Bun.file().text() returns a Promise, but we need sync for CLI usage
-  // Use readFileSync instead
-  const fs = require("fs");
-  const yamlContent = fs.readFileSync(filePath, "utf-8");
+  const { readFileSync } = require("fs");
+  const yamlContent = readFileSync(filePath, "utf-8");
   return parseIndexerConfig(yamlContent);
 }
 

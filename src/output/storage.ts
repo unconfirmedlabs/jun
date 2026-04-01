@@ -8,6 +8,14 @@
 import type { DecodedEvent } from "../processor.ts";
 import type { FieldDefs } from "../schema.ts";
 
+/** Validate a SQL identifier (table name, column name, view name). Prevents SQL injection. */
+export function validateIdentifier(name: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(name)) {
+    throw new Error(`Invalid SQL identifier: "${name}". Must be alphanumeric + underscores.`);
+  }
+  return name;
+}
+
 export interface StorageBackend {
   /** Backend name for logging. */
   readonly name: string;

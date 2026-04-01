@@ -334,6 +334,12 @@ async function handleReload(
   }
 
   try {
+    // Limit request body to 1MB to prevent DoS
+    const contentLength = parseInt(req.headers.get("content-length") ?? "0", 10);
+    if (contentLength > 1_000_000) {
+      return Response.json({ error: "request body too large (max 1MB)" }, { status: 413 });
+    }
+
     const body = await req.text();
     if (!body.trim()) {
       return Response.json({ error: "request body must contain YAML config" }, { status: 400 });

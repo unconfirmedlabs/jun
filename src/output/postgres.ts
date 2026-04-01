@@ -8,6 +8,7 @@ import type { DecodedEvent } from "../processor.ts";
 import type { FieldDefs } from "../schema.ts";
 import { generateDDL } from "../schema.ts";
 import type { StorageBackend } from "./storage.ts";
+import { validateIdentifier } from "./storage.ts";
 
 // Re-export StorageBackend as PostgresOutput for backward compatibility
 export type PostgresOutput = StorageBackend;
@@ -113,7 +114,9 @@ async function insertBatch(
 ): Promise<void> {
   if (rows.length === 0) return;
 
-  const { name, columns } = table;
+  const { name: tableName, columns } = table;
+  validateIdentifier(tableName);
+  columns.forEach(validateIdentifier);
   const colList = columns.join(", ");
 
   // Build parameterized VALUES clause
@@ -131,7 +134,7 @@ async function insertBatch(
   }
 
   const query = `
-    INSERT INTO ${name} (${colList})
+    INSERT INTO ${tableName} (${colList})
     VALUES ${rowClauses.join(", ")}
     ON CONFLICT (tx_digest, event_seq) DO NOTHING
   `;

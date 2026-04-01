@@ -2,7 +2,7 @@ import { test, expect, describe, mock, beforeEach } from "bun:test";
 import pino from "pino";
 import { createWriteBuffer, type FlushStats } from "./buffer.ts";
 import type { DecodedEvent } from "./processor.ts";
-import type { PostgresOutput } from "./output/postgres.ts";
+import type { StorageBackend } from "./output/storage.ts";
 import type { StateManager } from "./state.ts";
 
 const testLog = pino({ level: "silent" });
@@ -23,15 +23,17 @@ function makeEvent(handlerName: string, seq: bigint, eventSeq = 0): DecodedEvent
   };
 }
 
-function createMockOutput(): PostgresOutput & { calls: { handler: string; count: number }[] } {
+function createMockOutput(): StorageBackend & { calls: { handler: string; count: number }[] } {
   const calls: { handler: string; count: number }[] = [];
   return {
+    name: "test",
     calls,
     async migrate() {},
     async write() {},
     async writeHandler(handlerName: string, events: DecodedEvent[]) {
       calls.push({ handler: handlerName, count: events.length });
     },
+    async shutdown() {},
   };
 }
 
@@ -271,9 +273,11 @@ describe("WriteBuffer", () => {
 
   test("retry then succeed: writeHandler fails twice then succeeds", async () => {
     let attempts = 0;
-    const output: PostgresOutput = {
+    const output: StorageBackend = {
+      name: "test",
       async migrate() {},
       async write() {},
+      async shutdown() {},
       async writeHandler() {
         attempts++;
         if (attempts <= 2) throw new Error("connection lost");
@@ -301,9 +305,11 @@ describe("WriteBuffer", () => {
   });
 
   test("retry exhaustion crashes when all retries fail", async () => {
-    const output: PostgresOutput = {
+    const output: StorageBackend = {
+      name: "test",
       async migrate() {},
       async write() {},
+      async shutdown() {},
       async writeHandler() {
         throw new Error("permanent failure");
       },
@@ -447,9 +453,11 @@ describe("WriteBuffer", () => {
     let flushResolve: () => void;
     const flushGate = new Promise<void>((r) => { flushResolve = r; });
 
-    const output: PostgresOutput = {
+    const output: StorageBackend = {
+      name: "test",
       async migrate() {},
       async write() {},
+      async shutdown() {},
       async writeHandler() {
         // Block until gate opens
         await flushGate;

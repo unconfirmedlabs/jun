@@ -17,6 +17,7 @@
  * ```
  */
 import type { Logger } from "./logger.ts";
+import { validateIdentifier } from "./output/storage.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,6 +75,7 @@ export async function createViewManager(
 
   // Create materialized views on startup
   for (const [name, def] of Object.entries(views)) {
+    validateIdentifier(name);
     const intervalMs = parseDuration(def.refresh);
     viewLog.info({ view: name, refresh: def.refresh, intervalMs }, "creating");
 
