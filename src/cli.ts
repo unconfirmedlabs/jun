@@ -393,7 +393,7 @@ program
               tx: e.txDigest,
             }));
           }
-          writer.write(JSON.stringify(record));
+          jsonWriter!.write(JSON.stringify(record));
         } else {
           console.log(`── checkpoint ${seq} ── ${ts} ── ${txCount} tx(s) ──`);
 

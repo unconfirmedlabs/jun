@@ -347,18 +347,22 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     let totalEvents = 0;
     const startTime = performance.now();
 
-    // Watermark tracking for safe cursor advancement
-    const completed = new Set<bigint>();
+    // Pending map: holds decoded results until they can be drained contiguously.
+    // Workers complete out of order, but we only push to the buffer in order.
+    const pending = new Map<bigint, DecodedEvent[]>();
     let watermark = startFrom - 1n;
 
-    function advanceWatermark(): bigint {
-      let next = watermark + 1n;
-      while (completed.has(next)) {
-        completed.delete(next);
-        next++;
+    /** Drain contiguous ready checkpoints from pending into the buffer, in order. */
+    async function drainContiguous(): Promise<void> {
+      while (pending.has(watermark + 1n)) {
+        const next = watermark + 1n;
+        const events = pending.get(next)!;
+        pending.delete(next);
+        await buffer.push(events, cursorKey, next);
+        metrics.setBackfillCursor(next);
+        metrics.recordBackfillCheckpoint();
+        watermark = next;
       }
-      watermark = next - 1n;
-      return watermark;
     }
 
     // Process in sliding windows (100 per window to yield frequently for HTTP)
@@ -387,7 +391,11 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           try {
             // Fetch compressed bytes on main thread (I/O), decode in worker (CPU)
             const response = await pRetry(async () => {
-              const compressed = await fetchCompressed(seq, resolvedArchiveUrl);
+              const fetchPromise = fetchCompressed(seq, resolvedArchiveUrl);
+              const timeoutPromise = new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error("archive fetch timeout")), 30_000),
+              );
+              const compressed = await Promise.race([fetchPromise, timeoutPromise]);
               return decoderPool.decode(seq, compressed);
             }, { retries: 3, minTimeout: 1000 });
 
@@ -400,13 +408,11 @@ export function defineIndexer(config: IndexerConfig): Indexer {
               totalEvents += decoded.length;
             }
 
-            completed.add(seq);
-            const wm = advanceWatermark();
-
-            // Push events with watermark as cursor (safe resume point)
-            await buffer.push(decoded, cursorKey, wm);
-            metrics.setBackfillCursor(wm);
-            metrics.recordBackfillCheckpoint();
+            // Store in pending map, then drain contiguously into buffer.
+            // This ensures checkpoints reach the buffer in order even though
+            // workers complete out of order.
+            pending.set(seq, decoded);
+            await drainContiguous();
 
             processed++;
 
