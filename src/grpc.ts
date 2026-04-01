@@ -39,7 +39,7 @@ function loadProto() {
     path.join(PROTO_DIR, "sui/rpc/v2/subscription_service.proto"),
     PROTO_LOAD_OPTIONS,
   );
-  const subProto = grpc.loadPackageDefinition(subDef) as any;
+  const subscriptionProto = grpc.loadPackageDefinition(subDef) as any;
 
   // Ledger service (same proto dir, shares types)
   const ledgerDef = protoLoader.loadSync(
@@ -56,7 +56,7 @@ function loadProto() {
   const moveProto = grpc.loadPackageDefinition(moveDef) as any;
 
   return {
-    SubscriptionService: subProto.sui.rpc.v2.SubscriptionService,
+    SubscriptionService: subscriptionProto.sui.rpc.v2.SubscriptionService,
     LedgerService: ledgerProto.sui.rpc.v2.LedgerService,
     MovePackageService: moveProto.sui.rpc.v2.MovePackageService,
   };
@@ -209,9 +209,9 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
 
           call.on("data", (response: GrpcCheckpointResponse) => {
             if (waiting) {
-              const w = waiting;
+              const waiter = waiting;
               waiting = null;
-              w.resolve({ value: response, done: false });
+              waiter.resolve({ value: response, done: false });
             } else {
               buffer.push(response);
               if (buffer.length >= MAX_BUFFER) {
@@ -224,25 +224,25 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
             done = true;
             if (err.code === grpc.status.CANCELLED) {
               if (waiting) {
-                const w = waiting;
+                const waiter = waiting;
                 waiting = null;
-                w.resolve({ value: undefined as any, done: true });
+                waiter.resolve({ value: undefined as any, done: true });
               }
               return;
             }
             if (waiting) {
-              const w = waiting;
+              const waiter = waiting;
               waiting = null;
-              w.reject(err);
+              waiter.reject(err);
             }
           });
 
           call.on("end", () => {
             done = true;
             if (waiting) {
-              const w = waiting;
+              const waiter = waiting;
               waiting = null;
-              w.resolve({ value: undefined as any, done: true });
+              waiter.resolve({ value: undefined as any, done: true });
             }
           });
 

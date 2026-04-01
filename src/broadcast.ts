@@ -184,30 +184,30 @@ export function createBroadcastManager(
         }
 
         // Raw events
-        for (const ev of events) {
-          const evData: RawEventBroadcast = {
+        for (const event of events) {
+          const eventData: RawEventBroadcast = {
             checkpoint: response.cursor,
             txDigest: tx.digest,
-            eventType: ev.eventType,
-            sender: ev.sender,
-            packageId: ev.packageId,
-            module: ev.module,
-            bcs: ev.contents?.value ? toBase64(
-              ev.contents.value instanceof Uint8Array ? ev.contents.value : new Uint8Array(ev.contents.value),
+            eventType: event.eventType,
+            sender: event.sender,
+            packageId: event.packageId,
+            module: event.module,
+            bcs: event.contents?.value ? toBase64(
+              event.contents.value instanceof Uint8Array ? event.contents.value : new Uint8Array(event.contents.value),
             ) : "",
             timestamp,
             source,
           };
 
           eventMessages.push({
-            eventType: ev.eventType,
-            sender: ev.sender,
-            formatted: `data: ${JSON.stringify(evData)}\n\n`,
+            eventType: event.eventType,
+            sender: event.sender,
+            formatted: `data: ${JSON.stringify(eventData)}\n\n`,
           });
 
           for (const target of targets) {
             try {
-              target.publishRawEvent(evData);
+              target.publishRawEvent(eventData);
             } catch (err) {
               broadcastLog.warn({ err }, "broadcast target publishRawEvent failed");
             }

@@ -156,48 +156,48 @@ export function createMetrics(): IndexerMetrics {
       const uptimeSec = (Date.now() - startedAt) / 1000;
       const lines: string[] = [];
 
-      const g = (name: string, help: string, value: number | string) => {
+      const gauge = (name: string, help: string, value: number | string) => {
         lines.push(`# HELP ${name} ${help}`);
         lines.push(`# TYPE ${name} gauge`);
         lines.push(`${name} ${value}`);
       };
 
-      const c = (name: string, help: string, value: number) => {
+      const counter = (name: string, help: string, value: number) => {
         lines.push(`# HELP ${name} ${help}`);
         lines.push(`# TYPE ${name} counter`);
         lines.push(`${name} ${value}`);
       };
 
       // Uptime
-      g("jun_uptime_seconds", "Seconds since indexer started", uptimeSec.toFixed(1));
+      gauge("jun_uptime_seconds", "Seconds since indexer started", uptimeSec.toFixed(1));
 
       // Cursors
-      g("jun_live_cursor", "Latest live checkpoint sequence", liveCursor?.toString() ?? "0");
-      g("jun_backfill_cursor", "Latest backfill checkpoint sequence", backfillCursor?.toString() ?? "0");
+      gauge("jun_live_cursor", "Latest live checkpoint sequence", liveCursor?.toString() ?? "0");
+      gauge("jun_backfill_cursor", "Latest backfill checkpoint sequence", backfillCursor?.toString() ?? "0");
 
       // Checkpoint counters
-      c("jun_checkpoints_processed_total{mode=\"live\"}", "Total checkpoints processed by live loop", liveCheckpoints);
-      c("jun_checkpoints_processed_total{mode=\"backfill\"}", "Total checkpoints processed by backfill loop", backfillCheckpoints);
+      counter("jun_checkpoints_processed_total{mode=\"live\"}", "Total checkpoints processed by live loop", liveCheckpoints);
+      counter("jun_checkpoints_processed_total{mode=\"backfill\"}", "Total checkpoints processed by backfill loop", backfillCheckpoints);
 
       // Event counters
-      c("jun_events_flushed_total{buffer=\"live\"}", "Total events flushed to Postgres by live buffer", liveEventsTotal);
-      c("jun_events_flushed_total{buffer=\"backfill\"}", "Total events flushed to Postgres by backfill buffer", backfillEventsTotal);
+      counter("jun_events_flushed_total{buffer=\"live\"}", "Total events flushed to Postgres by live buffer", liveEventsTotal);
+      counter("jun_events_flushed_total{buffer=\"backfill\"}", "Total events flushed to Postgres by backfill buffer", backfillEventsTotal);
 
       // Flush counters
-      c("jun_flushes_total{buffer=\"live\"}", "Total buffer flushes by live buffer", liveFlushes);
-      c("jun_flushes_total{buffer=\"backfill\"}", "Total buffer flushes by backfill buffer", backfillFlushes);
+      counter("jun_flushes_total{buffer=\"live\"}", "Total buffer flushes by live buffer", liveFlushes);
+      counter("jun_flushes_total{buffer=\"backfill\"}", "Total buffer flushes by backfill buffer", backfillFlushes);
 
       // Flush latency (last value)
-      g("jun_flush_duration_seconds{buffer=\"live\"}", "Last flush duration in seconds for live buffer", (liveLastFlushDurationMs / 1000).toFixed(4));
-      g("jun_flush_duration_seconds{buffer=\"backfill\"}", "Last flush duration in seconds for backfill buffer", (backfillLastFlushDurationMs / 1000).toFixed(4));
+      gauge("jun_flush_duration_seconds{buffer=\"live\"}", "Last flush duration in seconds for live buffer", (liveLastFlushDurationMs / 1000).toFixed(4));
+      gauge("jun_flush_duration_seconds{buffer=\"backfill\"}", "Last flush duration in seconds for backfill buffer", (backfillLastFlushDurationMs / 1000).toFixed(4));
 
       // Buffer depth
-      g("jun_buffer_size{buffer=\"live\"}", "Current events in live buffer", liveBufferSize);
-      g("jun_buffer_size{buffer=\"backfill\"}", "Current events in backfill buffer", backfillBufferSize);
+      gauge("jun_buffer_size{buffer=\"live\"}", "Current events in live buffer", liveBufferSize);
+      gauge("jun_buffer_size{buffer=\"backfill\"}", "Current events in backfill buffer", backfillBufferSize);
 
       // Throttle
-      g("jun_backfill_concurrency", "Current adaptive backfill concurrency", throttleConcurrency);
-      g("jun_backfill_paused", "Whether backfill is paused (1=paused, 0=running)", throttlePaused ? 1 : 0);
+      gauge("jun_backfill_concurrency", "Current adaptive backfill concurrency", throttleConcurrency);
+      gauge("jun_backfill_paused", "Whether backfill is paused (1=paused, 0=running)", throttlePaused ? 1 : 0);
 
       lines.push("");
       return lines.join("\n");
@@ -298,11 +298,11 @@ async function handleQuery(
   const timeoutMs = Math.min(Math.max(100, timeoutParam), 30000);
 
   try {
-    const rows = await sql.begin(async (tx: any) => {
-      await tx.unsafe(`SET TRANSACTION READ ONLY`);
-      await tx.unsafe(`SET LOCAL statement_timeout = '${timeoutMs}ms'`);
+    const rows = await sql.begin(async (transaction: any) => {
+      await transaction.unsafe(`SET TRANSACTION READ ONLY`);
+      await transaction.unsafe(`SET LOCAL statement_timeout = '${timeoutMs}ms'`);
       const stmt = rawSql.trim().replace(/;+\s*$/, "");
-      return tx.unsafe(`SELECT * FROM (${stmt}) AS _q LIMIT ${rowLimit + 1}`);
+      return transaction.unsafe(`SELECT * FROM (${stmt}) AS _q LIMIT ${rowLimit + 1}`);
     });
 
     const result = Array.from(rows);

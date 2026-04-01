@@ -164,11 +164,11 @@ export function createParquetStorageBackend(
 
         // Group by partition
         const partitions = new Map<string, DecodedEvent[]>();
-        for (const ev of events) {
-          const partition = formatDatePartition(ev.timestamp, partitionBy);
+        for (const event of events) {
+          const partition = formatDatePartition(event.timestamp, partitionBy);
           const list = partitions.get(partition);
-          if (list) list.push(ev);
-          else partitions.set(partition, [ev]);
+          if (list) list.push(event);
+          else partitions.set(partition, [event]);
         }
 
         const tableName = toTableName(handlerName);
@@ -181,14 +181,14 @@ export function createParquetStorageBackend(
 
           const writer = await parquet.ParquetWriter.openFile(schema, chunkFile);
           try {
-            for (const ev of partEvents) {
+            for (const event of partEvents) {
               const row: Record<string, any> = {
-                tx_digest: ev.txDigest,
-                event_seq: ev.eventSeq,
-                sender: ev.sender,
-                sui_timestamp: ev.timestamp.toISOString(),
+                tx_digest: event.txDigest,
+                event_seq: event.eventSeq,
+                sender: event.sender,
+                sui_timestamp: event.timestamp.toISOString(),
               };
-              for (const [key, val] of Object.entries(ev.data)) {
+              for (const [key, val] of Object.entries(event.data)) {
                 // BigInt: u64 fits in Number, u128/u256 stored as UTF8 string (see schema mapping)
                 if (typeof val === "bigint") {
                   row[key] = val <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(val) : val.toString();
@@ -270,9 +270,9 @@ export function createParquetStorageBackend(
       accumulatedCount += events.length;
 
       // Track max checkpoint seq for state file
-      for (const ev of events) {
-        if (ev.checkpointSeq > maxCheckpointSeq) {
-          maxCheckpointSeq = ev.checkpointSeq;
+      for (const event of events) {
+        if (event.checkpointSeq > maxCheckpointSeq) {
+          maxCheckpointSeq = event.checkpointSeq;
         }
       }
 

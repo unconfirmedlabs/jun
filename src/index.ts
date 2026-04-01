@@ -268,7 +268,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     buffer: WriteBuffer,
     metrics: IndexerMetrics,
     broadcast: BroadcastManager,
-    balanceProc: BalanceProcessor | null,
+    balanceProcessor: BalanceProcessor | null,
   ): Promise<void> {
     const liveLog = log.child({ component: "live" });
     const cursorKey = `live:${network}`;
@@ -296,8 +296,8 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           const decoded = getProcessor().process(response);
 
           // Extract balance changes if enabled
-          if (balanceProc) {
-            const changes = balanceProc.extract(response);
+          if (balanceProcessor) {
+            const changes = balanceProcessor.extract(response);
             buffer.pushBalances(changes);
           }
 
@@ -332,13 +332,13 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     broadcast: BroadcastManager,
     decoderPool: CheckpointDecoderPool,
     resolvedArchiveUrl: string,
-    balanceProc: BalanceProcessor | null,
+    balanceProcessor: BalanceProcessor | null,
   ): Promise<void> {
-    const bfLog = log.child({ component: "backfill" });
+    const backfillLog = log.child({ component: "backfill" });
     const cursorKey = `backfill:${network}`;
 
     // Determine the upper bound
-    bfLog.info("fetching latest checkpoint...");
+    backfillLog.info("fetching latest checkpoint...");
     const latest = await getLatestCheckpoint(createGrpcClient({ url: grpcUrl }));
     const to = BigInt(latest);
 
@@ -347,16 +347,16 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     const startFrom = savedCursor && savedCursor > startSeq ? savedCursor + 1n : startSeq;
 
     if (startFrom > to) {
-      bfLog.info({ cursor: savedCursor?.toString() }, "already complete");
+      backfillLog.info({ cursor: savedCursor?.toString() }, "already complete");
       return;
     }
 
     if (savedCursor) {
-      bfLog.info({ from: startFrom.toString(), savedCursor: savedCursor.toString() }, "resuming");
+      backfillLog.info({ from: startFrom.toString(), savedCursor: savedCursor.toString() }, "resuming");
     }
 
     const totalCheckpoints = to - startFrom + 1n;
-    bfLog.info({ from: startFrom.toString(), to: to.toString(), total: totalCheckpoints.toString() }, "starting");
+    backfillLog.info({ from: startFrom.toString(), to: to.toString(), total: totalCheckpoints.toString() }, "starting");
 
     let processed = 0;
     let totalEvents = 0;
@@ -396,7 +396,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         batch.push(i);
       }
 
-      bfLog.debug({ window: `${windowStart}..${windowEnd}`, concurrency: throttle.getConcurrency() }, "processing window");
+      backfillLog.debug({ window: `${windowStart}..${windowEnd}`, concurrency: throttle.getConcurrency() }, "processing window");
 
       await pMap(
         batch,
@@ -429,8 +429,8 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             // This ensures checkpoints reach the buffer in order even though
             // workers complete out of order.
             // Extract balance changes if enabled
-            if (balanceProc) {
-              const changes = balanceProc.extract(response);
+            if (balanceProcessor) {
+              const changes = balanceProcessor.extract(response);
               buffer.pushBalances(changes);
             }
 
@@ -444,10 +444,10 @@ export function defineIndexer(config: IndexerConfig): Indexer {
               const rate = (processed / (parseFloat(elapsed) || 1)).toFixed(0);
               const total = Number(to - startFrom + 1n);
               const pct = ((processed / total) * 100).toFixed(1);
-              bfLog.info({ processed, total, pct, rate: `${rate}/s`, events: totalEvents, elapsed }, "progress");
+              backfillLog.info({ processed, total, pct, rate: `${rate}/s`, events: totalEvents, elapsed }, "progress");
             }
           } catch (err) {
-            bfLog.error({ checkpoint: seq.toString(), err }, "error processing checkpoint");
+            backfillLog.error({ checkpoint: seq.toString(), err }, "error processing checkpoint");
           }
         },
         { concurrency: throttle.getConcurrency(), signal: abortController.signal },
@@ -460,7 +460,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     }
 
     const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
-    bfLog.info({ processed, events: totalEvents, elapsed }, "complete");
+    backfillLog.info({ processed, events: totalEvents, elapsed }, "complete");
   }
 
   // -------------------------------------------------------------------------
@@ -513,29 +513,29 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     },
 
     async backfill(options: { from: bigint }): Promise<void> {
-      const bfLog = log.child({ component: "backfill" });
+      const backfillLog = log.child({ component: "backfill" });
       const { state, output, processor, grpcClient } = await init();
       setupSignalHandlers();
 
       const cursorKey = `backfill:${network}`;
       const from = options.from;
 
-      bfLog.info("fetching latest checkpoint...");
+      backfillLog.info("fetching latest checkpoint...");
       const latest = await getLatestCheckpoint(grpcClient);
       const to = BigInt(latest);
-      bfLog.info({ from: from.toString(), to: to.toString(), total: (to - from + 1n).toString() }, "starting");
+      backfillLog.info({ from: from.toString(), to: to.toString(), total: (to - from + 1n).toString() }, "starting");
 
       const savedCursor = await state.getCheckpointCursor(cursorKey);
       const startFrom = savedCursor && savedCursor > from ? savedCursor + 1n : from;
 
       if (startFrom > to) {
-        bfLog.info({ cursor: savedCursor?.toString() }, "already complete");
+        backfillLog.info({ cursor: savedCursor?.toString() }, "already complete");
         await this.shutdown();
         return;
       }
 
       if (savedCursor) {
-        bfLog.info({ from: startFrom.toString(), savedCursor: savedCursor.toString() }, "resuming");
+        backfillLog.info({ from: startFrom.toString(), savedCursor: savedCursor.toString() }, "resuming");
       }
 
       const checkpoints: bigint[] = [];
@@ -584,10 +584,10 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             if (processed % 100 === 0) {
               const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
               const rate = (processed / (parseFloat(elapsed) || 1)).toFixed(0);
-              bfLog.info({ processed, total: checkpoints.length, rate: `${rate}/s`, events: totalEvents, elapsed }, "progress");
+              backfillLog.info({ processed, total: checkpoints.length, rate: `${rate}/s`, events: totalEvents, elapsed }, "progress");
             }
           } catch (err) {
-            bfLog.error({ checkpoint: seq.toString(), err }, "error processing checkpoint");
+            backfillLog.error({ checkpoint: seq.toString(), err }, "error processing checkpoint");
           }
         },
         { concurrency: backfillConcurrency, signal: abortController.signal },
@@ -597,7 +597,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       });
 
       const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
-      bfLog.info({ processed, events: totalEvents, elapsed }, "complete");
+      backfillLog.info({ processed, events: totalEvents, elapsed }, "complete");
 
       await this.shutdown();
     },
@@ -649,12 +649,12 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       const broadcastManager = createBroadcastManager(options?.broadcastTargets ?? [], log);
 
       // Balance indexing (optional)
-      let balanceProc: BalanceProcessor | null = null;
-      let balWriter: BalanceWriter | null = null;
+      let balanceProcessor: BalanceProcessor | null = null;
+      let balanceWriter: BalanceWriter | null = null;
       if (balancesConfig) {
-        balanceProc = createBalanceProcessor(balancesConfig.coinTypes);
-        balWriter = createBalanceWriter(sql);
-        await balWriter.migrate();
+        balanceProcessor = createBalanceProcessor(balancesConfig.coinTypes);
+        balanceWriter = createBalanceWriter(sql);
+        await balanceWriter.migrate();
         log.info({ coinTypes: balancesConfig.coinTypes }, "balance indexing enabled");
       }
 
@@ -674,14 +674,14 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           }
         },
         onEvents: (events) => broadcastManager.broadcastDecodedEvents(events, "live"),
-      }, liveBufferLog, balWriter);
+      }, liveBufferLog, balanceWriter);
 
       const throttleLog = log.child({ component: "throttle" });
       const throttle = createAdaptiveThrottle({
         initialConcurrency: backfillConcurrency,
       }, throttleLog);
 
-      const bfBufferLog = log.child({ component: "backfill:buffer" });
+      const backfillBufferLog = log.child({ component: "backfill:buffer" });
       const backfillBuffer = createWriteBuffer(output, state, {
         label: "backfill",
         intervalMs: 1000,
@@ -691,14 +691,14 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           metrics.recordBackfillFlush(stats);
           metrics.recordThrottleState(throttle.getConcurrency(), throttle.isPaused());
           if (stats.eventsWritten > 0) {
-            bfBufferLog.info(
+            backfillBufferLog.info(
               { events: stats.eventsWritten, durationMs: Math.round(stats.flushDurationMs), concurrency: throttle.getConcurrency() },
               "flushed",
             );
           }
         },
         onEvents: (events) => broadcastManager.broadcastDecodedEvents(events, "backfill"),
-      }, bfBufferLog, balWriter);
+      }, backfillBufferLog, balanceWriter);
 
       // Start buffer timers
       liveBuffer.start();
@@ -719,12 +719,12 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       const tasks: Promise<void>[] = [];
 
       if (mode === "all" || mode === "live-only") {
-        tasks.push(liveLoop(grpcClient, getProcessor, liveBuffer, metrics, broadcastManager, balanceProc));
+        tasks.push(liveLoop(grpcClient, getProcessor, liveBuffer, metrics, broadcastManager, balanceProcessor));
       }
 
       if ((mode === "all" || mode === "backfill-only") && startSeq !== null) {
         tasks.push(
-          backfillLoop(getProcessor, backfillBuffer, state, throttle, startSeq, metrics, broadcastManager, decoderPool, resolvedArchiveUrl, balanceProc),
+          backfillLoop(getProcessor, backfillBuffer, state, throttle, startSeq, metrics, broadcastManager, decoderPool, resolvedArchiveUrl, balanceProcessor),
         );
       } else if (mode === "backfill-only" && startSeq === null) {
         log.error("backfill requires startCheckpoint in config or a saved cursor");

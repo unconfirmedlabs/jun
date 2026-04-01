@@ -51,9 +51,9 @@ export interface AdaptiveThrottle {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function computeP95(arr: number[]): number {
-  if (arr.length === 0) return 0;
-  const sorted = [...arr].sort((a, b) => a - b);
+function computeP95(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length * 0.95)]!;
 }
 

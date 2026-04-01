@@ -63,15 +63,15 @@ export function createBalanceWriter(sql: any): BalanceWriter {
       const ledgerValues: unknown[] = [];
       const ledgerRows: string[] = [];
 
-      for (const c of changes) {
+      for (const change of changes) {
         ledgerRows.push(`($${ledgerValues.length + 1}, $${ledgerValues.length + 2}, $${ledgerValues.length + 3}, $${ledgerValues.length + 4}, $${ledgerValues.length + 5}, $${ledgerValues.length + 6})`);
         ledgerValues.push(
-          c.txDigest,
-          c.checkpointSeq.toString(),
-          c.address,
-          c.coinType,
-          c.amount,
-          c.timestamp,
+          change.txDigest,
+          change.checkpointSeq.toString(),
+          change.address,
+          change.coinType,
+          change.amount,
+          change.timestamp,
         );
       }
 
@@ -85,20 +85,20 @@ export function createBalanceWriter(sql: any): BalanceWriter {
       // 2. Aggregate changes per (address, coin_type) for running balance upsert
       const aggregated = new Map<string, { address: string; coinType: string; totalAmount: bigint; maxCheckpoint: bigint }>();
 
-      for (const c of changes) {
-        const key = `${c.address}:${c.coinType}`;
+      for (const change of changes) {
+        const key = `${change.address}:${change.coinType}`;
         const existing = aggregated.get(key);
         if (existing) {
-          existing.totalAmount += BigInt(c.amount);
-          if (c.checkpointSeq > existing.maxCheckpoint) {
-            existing.maxCheckpoint = c.checkpointSeq;
+          existing.totalAmount += BigInt(change.amount);
+          if (change.checkpointSeq > existing.maxCheckpoint) {
+            existing.maxCheckpoint = change.checkpointSeq;
           }
         } else {
           aggregated.set(key, {
-            address: c.address,
-            coinType: c.coinType,
-            totalAmount: BigInt(c.amount),
-            maxCheckpoint: c.checkpointSeq,
+            address: change.address,
+            coinType: change.coinType,
+            totalAmount: BigInt(change.amount),
+            maxCheckpoint: change.checkpointSeq,
           });
         }
       }
@@ -107,13 +107,13 @@ export function createBalanceWriter(sql: any): BalanceWriter {
       const balanceValues: unknown[] = [];
       const balanceRows: string[] = [];
 
-      for (const agg of aggregated.values()) {
+      for (const aggregation of aggregated.values()) {
         balanceRows.push(`($${balanceValues.length + 1}, $${balanceValues.length + 2}, $${balanceValues.length + 3}, $${balanceValues.length + 4})`);
         balanceValues.push(
-          agg.address,
-          agg.coinType,
-          agg.totalAmount.toString(),
-          agg.maxCheckpoint.toString(),
+          aggregation.address,
+          aggregation.coinType,
+          aggregation.totalAmount.toString(),
+          aggregation.maxCheckpoint.toString(),
         );
       }
 

@@ -118,23 +118,23 @@ export function createProcessor(handlers: Record<string, EventHandler>): EventPr
   return {
     process(response: GrpcCheckpointResponse): DecodedEvent[] {
       const events: DecodedEvent[] = [];
-      const cp = response.checkpoint;
-      if (!cp?.transactions) return events;
+      const checkpoint = response.checkpoint;
+      if (!checkpoint?.transactions) return events;
 
       const checkpointSeq = BigInt(response.cursor);
-      const timestamp = parseTimestamp(cp.summary?.timestamp);
+      const timestamp = parseTimestamp(checkpoint.summary?.timestamp);
 
-      for (const tx of cp.transactions) {
-        const txEvents = tx.events?.events;
+      for (const transaction of checkpoint.transactions) {
+        const txEvents = transaction.events?.events;
         if (!txEvents?.length) continue;
 
         for (let eventSeq = 0; eventSeq < txEvents.length; eventSeq++) {
-          const ev = txEvents[eventSeq]!;
-          const handler = matchHandler(ev.eventType);
+          const event = txEvents[eventSeq]!;
+          const handler = matchHandler(event.eventType);
           if (!handler) continue;
 
           // Decode BCS
-          const value = ev.contents?.value;
+          const value = event.contents?.value;
           if (!value || value.length === 0) continue;
 
           try {
@@ -146,15 +146,15 @@ export function createProcessor(handlers: Record<string, EventHandler>): EventPr
             events.push({
               handlerName: handler.name,
               checkpointSeq,
-              txDigest: tx.digest,
+              txDigest: transaction.digest,
               eventSeq,
-              sender: ev.sender,
+              sender: event.sender,
               timestamp,
               data: formatted,
             });
           } catch (err) {
             console.error(
-              `[jun] BCS decode error for ${handler.name} in tx ${tx.digest}:`,
+              `[jun] BCS decode error for ${handler.name} in tx ${transaction.digest}:`,
               err instanceof Error ? err.message : err,
             );
           }

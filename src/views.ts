@@ -42,10 +42,10 @@ export interface ViewManager {
 // ---------------------------------------------------------------------------
 
 /** Parse a duration string ("30s", "5m", "1h") to milliseconds */
-export function parseDuration(dur: string): number {
-  const match = dur.match(/^(\d+)(s|m|h)$/);
+export function parseDuration(duration: string): number {
+  const match = duration.match(/^(\d+)(s|m|h)$/);
   if (!match) {
-    throw new Error(`Invalid duration "${dur}". Expected format: 30s, 5m, 1h`);
+    throw new Error(`Invalid duration "${duration}". Expected format: 30s, 5m, 1h`);
   }
   const value = parseInt(match[1]!, 10);
   const unit = match[2]!;

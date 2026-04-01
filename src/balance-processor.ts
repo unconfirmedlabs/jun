@@ -58,16 +58,16 @@ export function createBalanceProcessor(coinTypes: string[] | "*"): BalanceProces
         const bcs = tx.balanceChanges;
         if (!bcs?.length) continue;
 
-        for (const bc of bcs) {
+        for (const balanceChange of bcs) {
           // Apply coin type filter
-          if (filter && !filter.has(bc.coinType)) continue;
+          if (filter && !filter.has(balanceChange.coinType)) continue;
 
           changes.push({
             txDigest: tx.digest,
             checkpointSeq,
-            address: bc.address,
-            coinType: bc.coinType,
-            amount: bc.amount,
+            address: balanceChange.address,
+            coinType: balanceChange.coinType,
+            amount: balanceChange.amount,
             timestamp,
           });
         }
