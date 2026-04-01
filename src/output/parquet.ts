@@ -153,84 +153,93 @@ export function createParquetStorageBackend(
 
     const snapshot = new Map(accumulated);
     const snapshotSeq = maxCheckpointSeq;
-    accumulated.clear();
-    accumulatedCount = 0;
+    // Don't clear yet — only clear on successful write
 
-    for (const [handlerName, events] of snapshot) {
-      if (events.length === 0) continue;
+    try {
+      for (const [handlerName, events] of snapshot) {
+        if (events.length === 0) continue;
 
-      const schema = schemas.get(handlerName);
-      if (!schema) continue;
+        const schema = schemas.get(handlerName);
+        if (!schema) continue;
 
-      // Group by partition
-      const partitions = new Map<string, DecodedEvent[]>();
-      for (const ev of events) {
-        const partition = formatDatePartition(ev.timestamp, partitionBy);
-        const list = partitions.get(partition);
-        if (list) list.push(ev);
-        else partitions.set(partition, [ev]);
-      }
-
-      const tableName = toTableName(handlerName);
-
-      for (const [partition, partEvents] of partitions) {
-        const dir = path.join(basePath, tableName, partition);
-        fs.mkdirSync(dir, { recursive: true });
-
-        const chunkFile = path.join(dir, `chunk-${Date.now()}.parquet`);
-
-        const writer = await parquet.ParquetWriter.openFile(schema, chunkFile);
-        try {
-          for (const ev of partEvents) {
-            const row: Record<string, any> = {
-              tx_digest: ev.txDigest,
-              event_seq: ev.eventSeq,
-              sender: ev.sender,
-              sui_timestamp: ev.timestamp.toISOString(),
-            };
-            for (const [key, val] of Object.entries(ev.data)) {
-              // BigInt: u64 fits in Number, u128/u256 stored as UTF8 string (see schema mapping)
-              if (typeof val === "bigint") {
-                row[key] = val <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(val) : val.toString();
-              } else {
-                row[key] = val;
-              }
-            }
-            await writer.appendRow(row);
-          }
-        } finally {
-          await writer.close();
+        // Group by partition
+        const partitions = new Map<string, DecodedEvent[]>();
+        for (const ev of events) {
+          const partition = formatDatePartition(ev.timestamp, partitionBy);
+          const list = partitions.get(partition);
+          if (list) list.push(ev);
+          else partitions.set(partition, [ev]);
         }
 
-        parquetLog.debug({ handler: handlerName, partition, events: partEvents.length, file: chunkFile }, "chunk written");
+        const tableName = toTableName(handlerName);
 
-        // S3 upload if configured
-        if (config.s3) {
+        for (const [partition, partEvents] of partitions) {
+          const dir = path.join(basePath, tableName, partition);
+          fs.mkdirSync(dir, { recursive: true });
+
+          const chunkFile = path.join(dir, `chunk-${Date.now()}.parquet`);
+
+          const writer = await parquet.ParquetWriter.openFile(schema, chunkFile);
           try {
-            const s3Key = `${tableName}/${partition}/${path.basename(chunkFile)}`;
-            const s3Client = new Bun.S3Client({
-              endpoint: config.s3.endpoint,
-              credentials: {
-                accessKeyId: config.s3.accessKeyId ?? "",
-                secretAccessKey: config.s3.secretAccessKey ?? "",
-              },
-            });
-            const s3File = s3Client.file(`${config.s3.bucket}/${s3Key}`);
-            await Bun.write(s3File, Bun.file(chunkFile));
-            parquetLog.debug({ key: s3Key }, "uploaded to S3");
-          } catch (err) {
-            parquetLog.error({ err }, "S3 upload failed");
+            for (const ev of partEvents) {
+              const row: Record<string, any> = {
+                tx_digest: ev.txDigest,
+                event_seq: ev.eventSeq,
+                sender: ev.sender,
+                sui_timestamp: ev.timestamp.toISOString(),
+              };
+              for (const [key, val] of Object.entries(ev.data)) {
+                // BigInt: u64 fits in Number, u128/u256 stored as UTF8 string (see schema mapping)
+                if (typeof val === "bigint") {
+                  row[key] = val <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(val) : val.toString();
+                } else {
+                  row[key] = val;
+                }
+              }
+              await writer.appendRow(row);
+            }
+          } finally {
+            await writer.close();
+          }
+
+          parquetLog.debug({ handler: handlerName, partition, events: partEvents.length, file: chunkFile }, "chunk written");
+
+          // S3 upload if configured
+          if (config.s3) {
+            try {
+              const s3Key = `${tableName}/${partition}/${path.basename(chunkFile)}`;
+              const s3Client = new Bun.S3Client({
+                endpoint: config.s3.endpoint,
+                credentials: {
+                  accessKeyId: config.s3.accessKeyId ?? "",
+                  secretAccessKey: config.s3.secretAccessKey ?? "",
+                },
+              });
+              const s3File = s3Client.file(`${config.s3.bucket}/${s3Key}`);
+              await Bun.write(s3File, Bun.file(chunkFile));
+              parquetLog.debug({ key: s3Key }, "uploaded to S3");
+            } catch (err) {
+              parquetLog.error({ err }, "S3 upload failed");
+            }
           }
         }
       }
-    }
 
-    // Update state file
-    if (snapshotSeq > 0n) {
-      writeState(statePath, snapshotSeq);
-    }
+      // Only clear on success
+      accumulated.clear();
+      accumulatedCount = 0;
 
-    parquetLog.info({ cursor: snapshotSeq.toString() }, "parquet flush complete");
+      // Update state file
+      if (snapshotSeq > 0n) {
+        writeState(statePath, snapshotSeq);
+      }
+
+      parquetLog.info({ cursor: snapshotSeq.toString() }, "parquet flush complete");
+    } catch (err) {
+      parquetLog.error({ err }, "parquet flush failed, will retry");
+      // Don't clear — data stays in accumulator for next flush attempt
+      return;
+    }
   }
 
   return {

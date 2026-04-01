@@ -68,94 +68,102 @@ export function createWriteBuffer(
 
   let buffer: DecodedEvent[] = [];
   let cursors = new Map<string, bigint>();
+  let processedSeqs = new Set<bigint>();
   let flushing: Promise<void> | null = null;
   let timer: Timer | null = null;
   let stopped = false;
 
   /** Execute a flush: snapshot buffer, write to Postgres, update cursors. */
   async function doFlush(): Promise<void> {
-    if (buffer.length === 0 && cursors.size === 0) return;
+    if (buffer.length === 0 && cursors.size === 0 && processedSeqs.size === 0) return;
 
     // Snapshot and clear
     const batch = buffer;
     const cursorSnapshot = new Map(cursors);
+    const seqSnapshot = new Set(processedSeqs);
     buffer = [];
     cursors = new Map();
+    processedSeqs = new Set();
 
-    // Collect unique checkpoint seqs for gap detection tracking
-    const checkpointSeqs = new Set<bigint>();
-    for (const ev of batch) {
-      checkpointSeqs.add(ev.checkpointSeq);
-    }
-    // Also include cursor values (covers checkpoints with no matching events)
-    for (const seq of cursorSnapshot.values()) {
-      checkpointSeqs.add(seq);
-    }
+    log.debug({ events: batch.length, checkpoints: seqSnapshot.size }, "flushing");
 
-    log.debug({ events: batch.length, checkpoints: checkpointSeqs.size }, "flushing");
+    const flushPromise = (async () => {
+      try {
+        await pRetry(
+          async () => {
+            const start = performance.now();
 
-    const flushPromise = pRetry(
-      async () => {
-        const start = performance.now();
+            // Group events by handler
+            const grouped = new Map<string, DecodedEvent[]>();
+            for (const event of batch) {
+              const list = grouped.get(event.handlerName);
+              if (list) {
+                list.push(event);
+              } else {
+                grouped.set(event.handlerName, [event]);
+              }
+            }
 
-        // Group events by handler
-        const grouped = new Map<string, DecodedEvent[]>();
-        for (const event of batch) {
-          const list = grouped.get(event.handlerName);
-          if (list) {
-            list.push(event);
-          } else {
-            grouped.set(event.handlerName, [event]);
-          }
-        }
+            // Parallel inserts across tables
+            if (grouped.size > 0) {
+              await Promise.all(
+                Array.from(grouped.entries()).map(([handlerName, events]) =>
+                  output.writeHandler(handlerName, events),
+                ),
+              );
+            }
 
-        // Parallel inserts across tables
-        if (grouped.size > 0) {
-          await Promise.all(
-            Array.from(grouped.entries()).map(([handlerName, events]) =>
-              output.writeHandler(handlerName, events),
-            ),
-          );
-        }
+            // Update cursors (only after all inserts succeed)
+            for (const [key, seq] of cursorSnapshot) {
+              await state.setCheckpointCursor(key, seq);
+            }
 
-        // Update cursors (only after all inserts succeed)
-        for (const [key, seq] of cursorSnapshot) {
-          await state.setCheckpointCursor(key, seq);
-        }
+            // Record processed checkpoints for gap detection
+            if (seqSnapshot.size > 0) {
+              await state.recordProcessedCheckpoints([...seqSnapshot]);
+            }
 
-        // Record processed checkpoints for gap detection
-        if (checkpointSeqs.size > 0) {
-          await state.recordProcessedCheckpoints([...checkpointSeqs]);
-        }
+            const durationMs = performance.now() - start;
 
-        const durationMs = performance.now() - start;
+            const stats: FlushStats = {
+              eventsWritten: batch.length,
+              tablesWritten: grouped.size,
+              flushDurationMs: durationMs,
+              cursorKeys: cursorSnapshot,
+              bufferSizeAfter: buffer.length,
+            };
 
-        const stats: FlushStats = {
-          eventsWritten: batch.length,
-          tablesWritten: grouped.size,
-          flushDurationMs: durationMs,
-          cursorKeys: cursorSnapshot,
-          bufferSizeAfter: buffer.length,
-        };
+            log.debug(
+              { events: stats.eventsWritten, tables: stats.tablesWritten, durationMs: Math.round(durationMs), remaining: stats.bufferSizeAfter },
+              "flush complete",
+            );
 
-        log.debug(
-          { events: stats.eventsWritten, tables: stats.tablesWritten, durationMs: Math.round(durationMs), remaining: stats.bufferSizeAfter },
-          "flush complete",
+            onFlush?.(stats);
+
+            // Broadcast events after successful Postgres write (for SSE streaming)
+            if (onEvents && batch.length > 0) {
+              try {
+                onEvents(batch);
+              } catch (err) {
+                log.error({ err }, "onEvents callback failed");
+              }
+            }
+          },
+          { retries, minTimeout: 1000 },
         );
-
-        onFlush?.(stats);
-
-        // Broadcast events after successful Postgres write (for SSE streaming)
-        if (onEvents && batch.length > 0) {
-          try {
-            onEvents(batch);
-          } catch (err) {
-            log.error({ err }, "onEvents callback failed");
-          }
+      } catch (err) {
+        // Restore batch to front of buffer so data is not lost
+        buffer = batch.concat(buffer);
+        for (const [key, seq] of cursorSnapshot) {
+          const prev = cursors.get(key);
+          if (prev === undefined || seq > prev) cursors.set(key, seq);
         }
-      },
-      { retries, minTimeout: 1000 },
-    );
+        for (const seq of seqSnapshot) {
+          processedSeqs.add(seq);
+        }
+        throw err;
+      }
+    })();
 
     flushing = flushPromise;
     try {
@@ -170,6 +178,9 @@ export function createWriteBuffer(
       if (events.length > 0) {
         buffer.push(...events);
       }
+
+      // Track every checkpoint seq pushed (including empty ones)
+      processedSeqs.add(seq);
 
       // Coalesce cursors: keep highest seq per key
       const prev = cursors.get(cursorKey);
@@ -211,7 +222,12 @@ export function createWriteBuffer(
         timer = null;
       }
       if (flushing) await flushing;
-      await doFlush();
+      // Best-effort final flush — error already propagated if flush() rejected
+      try {
+        await doFlush();
+      } catch (err) {
+        log.error({ err }, "final flush on stop failed");
+      }
     },
   };
 }

@@ -190,6 +190,7 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
           });
 
           // Buffer incoming data events for the async iterator
+          const MAX_BUFFER = 1024;
           const buffer: GrpcCheckpointResponse[] = [];
           let waiting: {
             resolve: (value: IteratorResult<GrpcCheckpointResponse>) => void;
@@ -204,6 +205,9 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
               w.resolve({ value: response, done: false });
             } else {
               buffer.push(response);
+              if (buffer.length >= MAX_BUFFER) {
+                call.pause();
+              }
             }
           });
 
@@ -236,7 +240,11 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
           return {
             next(): Promise<IteratorResult<GrpcCheckpointResponse>> {
               if (buffer.length > 0) {
-                return Promise.resolve({ value: buffer.shift()!, done: false });
+                const value = buffer.shift()!;
+                if (buffer.length < MAX_BUFFER / 2) {
+                  call.resume();
+                }
+                return Promise.resolve({ value, done: false });
               }
               if (done) {
                 return Promise.resolve({ value: undefined as any, done: true });

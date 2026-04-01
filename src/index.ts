@@ -9,6 +9,7 @@
  */
 import { SQL } from "bun";
 import pMap from "p-map";
+import pRetry from "p-retry";
 import { createGrpcClient, type GrpcClient } from "./grpc.ts";
 import { createArchiveClient, cachedGetCheckpoint, fetchCompressed, type ArchiveClient } from "./archive.ts";
 import { createProcessor, type EventHandler, type EventProcessor } from "./processor.ts";
@@ -385,8 +386,10 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
           try {
             // Fetch compressed bytes on main thread (I/O), decode in worker (CPU)
-            const compressed = await fetchCompressed(seq, resolvedArchiveUrl);
-            const response = await decoderPool.decode(seq, compressed);
+            const response = await pRetry(async () => {
+              const compressed = await fetchCompressed(seq, resolvedArchiveUrl);
+              return decoderPool.decode(seq, compressed);
+            }, { retries: 3, minTimeout: 1000 });
 
             // Broadcast full checkpoint data to SSE + NATS clients
             broadcast.broadcast(response, "backfill");
