@@ -31,8 +31,8 @@ sources:
 
 processors:
   events:
-    record_pressed:
-      type: "0x10ad578f5b202fd137546f2e7bc12c319dfef98871feeb429506c4b3d62bf702::pressing::RecordPressedEvent"
+    my_event:
+      type: "0xPKG::module::MyEvent"
   balances:
     coinTypes:
       - "0x2::sui::SUI"
@@ -93,8 +93,8 @@ sources:
 ```yaml
 processors:
   events:
-    record_pressed:                    # handler name = table name
-      type: "0x10ad...::pressing::RecordPressedEvent"
+    my_event:                          # handler name = table name
+      type: "0xPKG::module::MyEvent"
       # Fields auto-resolved from chain — no manual definition needed
     item_listed:
       type: "0xdead...::marketplace::ItemListedEvent"

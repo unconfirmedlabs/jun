@@ -409,16 +409,16 @@ Unique constraint: (tx_digest, event_seq) with ON CONFLICT DO NOTHING for idempo
 
 \`\`\`yaml
 views:
-  daily_presses:
+  daily_counts:
     sql: |
       SELECT date_trunc('day', sui_timestamp) AS day,
              count(*) AS presses
-      FROM record_pressed
+      FROM my_event
       GROUP BY 1
     refresh: 60s                   # Duration: "30s", "5m", "1h"
 \`\`\`
 
-Views are created on startup and refreshed on a timer. Reference event table names as snake_case of handler names (RecordPressed → record_pressed).
+Views are created on startup and refreshed on a timer. Reference event table names as snake_case of handler names (MyEvent → my_event).
 
 ## Environment variable substitution
 
@@ -447,15 +447,15 @@ jun indexer run --config-url s3://my-bucket/indexer.yml
 network: testnet
 grpcUrl: fullnode.testnet.sui.io:443
 database: $DATABASE_URL
-startCheckpoint: "package:0x10ad578f"
+startCheckpoint: "package:0xPKG"
 mode: all
 repairGaps: true
 serve:
   port: 8080
 
 events:
-  RecordPressed:
-    type: "0x10ad578f5b202fd137546f2e7bc12c319dfef98871feeb429506c4b3d62bf702::pressing::RecordPressedEvent"
+  MyEvent:
+    type: "0xPKG5b202fd137546f2e7bc12c319dfef98871feeb429506c4b3d62bf702::pressing::MyEventEvent"
     # Fields auto-resolved from chain at startup
 
 balances:
@@ -466,12 +466,12 @@ broadcast:
   sse: true
 
 views:
-  daily_presses:
+  daily_counts:
     sql: |
       SELECT date_trunc('day', sui_timestamp) AS day,
              release_id,
              count(*) AS presses
-      FROM record_pressed
+      FROM my_event
       GROUP BY 1, 2
     refresh: 60s
 \`\`\`
@@ -513,7 +513,7 @@ Execute read-only SQL against indexed event tables.
 **Request body (JSON):**
 \`\`\`json
 {
-  "sql": "SELECT * FROM record_pressed LIMIT 5",
+  "sql": "SELECT * FROM my_event LIMIT 5",
   "limit": 1000,
   "timeout": 5000
 }
@@ -530,13 +530,13 @@ Execute read-only SQL against indexed event tables.
 **Examples:**
 \`\`\`bash
 curl -X POST http://localhost:8080/query -H 'Content-Type: application/json' \\
-  -d '{"sql": "SELECT * FROM record_pressed LIMIT 5"}'
+  -d '{"sql": "SELECT * FROM my_event LIMIT 5"}'
 
 curl -X POST http://localhost:8080/query -H 'Content-Type: application/json' \\
-  -d '{"sql": "SELECT count(*) FROM record_pressed"}'
+  -d '{"sql": "SELECT count(*) FROM my_event"}'
 
 curl -X POST http://localhost:8080/query -H 'Content-Type: application/json' \\
-  -d '{"sql": "WITH recent AS (SELECT * FROM record_pressed WHERE sui_timestamp > now() - interval \\'1 hour\\') SELECT pressed_by, count(*) FROM recent GROUP BY 1", "limit": 20}'
+  -d '{"sql": "WITH recent AS (SELECT * FROM my_event WHERE sui_timestamp > now() - interval \\'1 hour\\') SELECT sender, count(*) FROM recent GROUP BY 1", "limit": 20}'
 \`\`\`
 
 ### POST /admin/reload
