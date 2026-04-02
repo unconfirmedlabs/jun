@@ -14,6 +14,7 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import protobuf from "protobufjs";
 import { cacheGet, cachePut } from "./cache.ts";
+import { parseCheckpointProto } from "./proto-parser.ts";
 import path from "path";
 import type { GrpcCheckpointResponse, GrpcEvent } from "./grpc.ts";
 import { parseSender } from "./sui-bcs.ts";
@@ -397,10 +398,14 @@ export async function decodeCompressedCheckpoint(
   compressed: Uint8Array,
   verifyOpts?: { grpcUrl: string },
 ): Promise<GrpcCheckpointResponse> {
-  const Checkpoint = await getCheckpointType();
   const decompressed = zstdDecompressSync(Buffer.from(compressed));
-  const decoded = Checkpoint.decode(decompressed);
-  const cp = Checkpoint.toObject(decoded, { longs: String, enums: String, defaults: false }) as any;
+  if (USE_NATIVE_BCS) {
+    const Checkpoint = await getCheckpointType();
+    const decoded = Checkpoint.decode(decompressed);
+    const cp = Checkpoint.toObject(decoded, { longs: String, enums: String, defaults: false }) as any;
+    return decodeCheckpointFromProto(seq, cp, verifyOpts);
+  }
+  const cp = parseCheckpointProto(new Uint8Array(decompressed)) as any;
   return decodeCheckpointFromProto(seq, cp, verifyOpts);
 }
 

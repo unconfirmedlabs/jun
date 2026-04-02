@@ -9,8 +9,11 @@
  */
 /// <reference lib="webworker" />
 import { decodeCheckpointFromProto, getCheckpointType } from "./archive.ts";
+import { parseCheckpointProto } from "./proto-parser.ts";
 import { computeBalanceChangesFromArchive } from "./archive-balance.ts";
 import { zstdDecompressSync } from "zlib";
+
+const USE_NATIVE_BCS = process.env.JUN_NATIVE_BCS === "1";
 
 declare var self: Worker;
 
@@ -29,9 +32,14 @@ self.onmessage = async (event: MessageEvent) => {
     const decompressed = zstdDecompressSync(Buffer.from(new Uint8Array(compressed)));
 
     // Protobuf decode ONCE
-    const Checkpoint = await getCheckpointType();
-    const protoDecoded = Checkpoint.decode(decompressed);
-    const checkpointProto = Checkpoint.toObject(protoDecoded, { longs: String, enums: String, defaults: false });
+    let checkpointProto: any;
+    if (USE_NATIVE_BCS) {
+      const Checkpoint = await getCheckpointType();
+      const protoDecoded = Checkpoint.decode(decompressed);
+      checkpointProto = Checkpoint.toObject(protoDecoded, { longs: String, enums: String, defaults: false });
+    } else {
+      checkpointProto = parseCheckpointProto(new Uint8Array(decompressed));
+    }
 
     // 1. BCS decode events from the shared protobuf (no re-decompression)
     const decoded = await decodeCheckpointFromProto(sequenceNumber, checkpointProto);
