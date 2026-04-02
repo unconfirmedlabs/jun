@@ -154,8 +154,15 @@ export function computeBalanceChangesFromArchive(
 
   for (const object of objects) {
     if (!object.bcs?.value) continue;
+    const rawBytes = new Uint8Array(object.bcs.value);
+
+    // Fast filter: skip non-coin objects without full BCS parse.
+    // BCS Object layout: byte[0]=data enum (0=Move), byte[1]=type hint.
+    // GasCoin: [0, 1, ...], Coin<T>: [0, 3, ...], Other: [0, 0, ...]
+    if (rawBytes[0] !== 0 || rawBytes[1] === 0) continue;
+
     try {
-      const parsed = suiBcs.Object.parse(new Uint8Array(object.bcs.value));
+      const parsed = suiBcs.Object.parse(rawBytes);
       if (!parsed.data.Move) continue;
 
       const type = parsed.data.Move.type;
