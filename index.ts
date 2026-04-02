@@ -1,47 +1,50 @@
 /**
- * Jun — Sui Event Indexer for Bun
+ * Jun — Sui Data Pipeline for Bun
  *
- * The default export is the high-level indexer API. For building blocks,
- * import from subpaths:
+ * Composable Source → Processor → Destination pipeline for indexing
+ * Sui blockchain data.
  *
- * @example Define and run an indexer
+ * @example Pipeline API (recommended)
  * ```ts
- * import { defineIndexer } from "jun";
+ * import { createPipeline } from "jun";
+ * import { createGrpcLiveSource } from "jun/pipeline/sources/grpc-live";
+ * import { createBalanceTracker } from "jun/pipeline/processors/balance-tracker";
+ * import { createPostgresDestination } from "jun/pipeline/destinations/postgres";
  *
- * const indexer = defineIndexer({
- *   network: "mainnet",
- *   grpcUrl: "fullnode.mainnet.sui.io:443",
- *   database: process.env.DATABASE_URL!,
- *   startCheckpoint: "package:0x...",
- *   events: { ... },
- * });
- *
- * await indexer.run();
+ * const pipeline = createPipeline()
+ *   .source(createGrpcLiveSource({ url: "fullnode.testnet.sui.io:443" }))
+ *   .processor(createBalanceTracker({ coinTypes: ["0x2::sui::SUI"] }))
+ *   .destination(createPostgresDestination({ url: process.env.DATABASE_URL! }))
+ *   .run();
  * ```
  *
- * @example Compose building blocks
- * ```ts
- * import { createGrpcClient } from "jun/grpc";
- * import { createProcessor } from "jun/events";
- * import { createArchiveClient } from "jun/checkpoints";
- * import { createWriteBuffer, createAdaptiveThrottle } from "jun/pipeline";
- * import { createPostgresOutput } from "jun/output/postgres";
- * import { createStateManager } from "jun/cursor";
+ * @example YAML config
+ * ```bash
+ * jun pipeline run config.yml
  * ```
  */
 
-// Indexer — high-level orchestrator
-export { defineIndexer } from "./src/index.ts";
+// Pipeline API
+export { createPipeline } from "./src/pipeline/pipeline.ts";
 export type {
-  IndexerConfig,
-  Indexer,
-  RunOptions,
-  RunMode,
-} from "./src/index.ts";
+  Pipeline,
+  PipelineConfig,
+  Source,
+  Processor,
+  Destination,
+  Checkpoint,
+  ProcessedCheckpoint,
+  DecodedEvent,
+  BalanceChange,
+} from "./src/pipeline/types.ts";
 
-// Types users always need alongside defineIndexer
-export type { EventHandler, DecodedEvent } from "./src/processor.ts";
+// Config parser
+export { parsePipelineConfig } from "./src/pipeline/config-parser.ts";
+export type { ParsedPipelineConfig } from "./src/pipeline/config-parser.ts";
+
+// Legacy API (defineIndexer — still functional, will be deprecated)
+export { defineIndexer } from "./src/index.ts";
+export type { IndexerConfig, Indexer, RunOptions, RunMode } from "./src/index.ts";
+
+// Schema types
 export type { FieldDefs, FieldType, PrimitiveFieldType } from "./src/schema.ts";
-export type { ServeConfig, IndexerMetrics, MetricsSnapshot } from "./src/serve.ts";
-export { parseIndexerConfig, loadIndexerConfig, mergeRunOptions } from "./src/indexer-config.ts";
-export type { ParsedIndexerConfig } from "./src/indexer-config.ts";
