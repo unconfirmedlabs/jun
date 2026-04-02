@@ -352,9 +352,7 @@ database: $DATABASE_URL             # Postgres connection string (env vars suppo
 events:                             # Event handlers (at least one required)
   HandlerName:
     type: "0xPKG::module::EventStruct"  # Fully qualified Move event type
-    fields:                         # Field name → type (must match Move struct order!)
-      field1: address
-      field2: u64
+    # fields are optional — auto-resolved from chain at startup
 \`\`\`
 
 ## Optional fields
@@ -363,6 +361,17 @@ events:                             # Event handlers (at least one required)
 startCheckpoint: 316756645          # Where to start backfill (see formats below)
 backfillConcurrency: 10             # Parallel archive fetches (default: 10)
 archiveUrl: https://checkpoints.testnet.sui.io  # Override archive URL
+
+balances:                           # Track coin balance changes
+  coinTypes:
+    - "0x2::sui::SUI"
+    - "0xPKG::module::COIN"
+  # Or use "*" to track all coin types:
+  # coinTypes: "*"
+
+broadcast:                          # Real-time event broadcasting
+  sse: true                         # Enable Server-Sent Events
+  nats: "nats://localhost:4222"     # NATS server URL (optional)
 \`\`\`
 
 ## startCheckpoint formats
@@ -382,23 +391,6 @@ serve:                              # HTTP server for /health, /status, /query, 
   port: 8080
   hostname: 127.0.0.1              # Default: localhost only
 \`\`\`
-
-## Field types
-
-| Type | Postgres | Notes |
-|------|----------|-------|
-| address | TEXT | 32-byte Sui address as 0x hex |
-| bool | BOOLEAN | |
-| u8, u16, u32 | INTEGER | |
-| u64, u128, u256 | NUMERIC | Arbitrary precision for large values |
-| string | TEXT | |
-| option<T> | nullable T | e.g. option<address> → nullable TEXT |
-| vector<T> | JSONB | JSON array, e.g. vector<u64> |
-
-**Critical rules:**
-- Field order MUST match the Move struct exactly (BCS is positional encoding)
-- Only primitive types supported. Custom structs/enums → use granular events or JSONB
-- Phantom type parameters don't affect BCS encoding
 
 ## Standard columns (auto-added to every event table)
 
@@ -437,6 +429,18 @@ database: $DATABASE_URL
 grpcUrl: \${GRPC_ENDPOINT}
 \`\`\`
 
+## Interactive setup
+
+Use \`jun indexer generate-config\` for interactive config generation — walks you through network, events, and options.
+
+## Remote config
+
+Load config from a remote URL instead of a local file:
+
+\`\`\`bash
+jun indexer run --config-url s3://my-bucket/indexer.yml
+\`\`\`
+
 ## Example: complete config
 
 \`\`\`yaml
@@ -452,16 +456,14 @@ serve:
 events:
   RecordPressed:
     type: "0x10ad578f5b202fd137546f2e7bc12c319dfef98871feeb429506c4b3d62bf702::pressing::RecordPressedEvent"
-    fields:
-      pressing_id: address
-      release_id: address
-      edition: u16
-      record_id: address
-      record_number: u64
-      quantity: u64
-      pressed_by: address
-      paid_value: u64
-      timestamp_ms: u64
+    # Fields auto-resolved from chain at startup
+
+balances:
+  coinTypes:
+    - "0x2::sui::SUI"
+
+broadcast:
+  sse: true
 
 views:
   daily_presses:
@@ -474,8 +476,8 @@ views:
     refresh: 60s
 \`\`\`
 
-Run with: \`jun run config.yml\`
-Override: \`jun run config.yml --mode backfill-only --serve 9090\`
+Run with: \`jun indexer run config.yml\`
+Override: \`jun indexer run config.yml --mode backfill-only --serve 9090\`
 `;
 
     return { contents: [{ uri: "jun://config-guide", text: guide, mimeType: "text/markdown" }] };
@@ -485,6 +487,8 @@ Override: \`jun run config.yml --mode backfill-only --serve 9090\`
     const guide = `# Jun HTTP API Reference
 
 Enable with \`serve: { port: 8080 }\` in YAML config or \`--serve 8080\` CLI flag.
+
+The HTTP server runs on a dedicated worker thread, separate from the indexer pipeline.
 
 ## Endpoints
 
@@ -503,10 +507,18 @@ Returns indexer status as JSON:
 }
 \`\`\`
 
-### GET /query?sql=...&limit=N&timeout=N
+### POST /query
 Execute read-only SQL against indexed event tables.
 
-**Parameters:**
+**Request body (JSON):**
+\`\`\`json
+{
+  "sql": "SELECT * FROM record_pressed LIMIT 5",
+  "limit": 1000,
+  "timeout": 5000
+}
+\`\`\`
+
 - \`sql\` (required): SQL query. Only SELECT, WITH, EXPLAIN allowed.
 - \`limit\` (optional): Max rows returned. Default 1000, max 10000.
 - \`timeout\` (optional): Query timeout in ms. Default 5000, max 30000.
@@ -516,12 +528,24 @@ Execute read-only SQL against indexed event tables.
 **Safety:** Two layers — string prefix check + Postgres SET TRANSACTION READ ONLY.
 
 **Examples:**
+\`\`\`bash
+curl -X POST http://localhost:8080/query -H 'Content-Type: application/json' \\
+  -d '{"sql": "SELECT * FROM record_pressed LIMIT 5"}'
+
+curl -X POST http://localhost:8080/query -H 'Content-Type: application/json' \\
+  -d '{"sql": "SELECT count(*) FROM record_pressed"}'
+
+curl -X POST http://localhost:8080/query -H 'Content-Type: application/json' \\
+  -d '{"sql": "WITH recent AS (SELECT * FROM record_pressed WHERE sui_timestamp > now() - interval \\'1 hour\\') SELECT pressed_by, count(*) FROM recent GROUP BY 1", "limit": 20}'
 \`\`\`
-GET /query?sql=SELECT * FROM record_pressed LIMIT 5
-GET /query?sql=SELECT count(*) FROM record_pressed
-GET /query?sql=SELECT * FROM daily_presses WHERE day >= now() - interval '7 days'
-GET /query?sql=WITH recent AS (SELECT * FROM record_pressed WHERE sui_timestamp > now() - interval '1 hour') SELECT pressed_by, count(*) FROM recent GROUP BY 1&limit=20
-\`\`\`
+
+### POST /admin/reload
+Reload indexer configuration without restarting. Requires authentication.
+
+**Headers:**
+- \`Authorization: Bearer <JUN_ADMIN_TOKEN>\`
+
+Set \`JUN_ADMIN_TOKEN\` environment variable to enable this endpoint.
 
 ### GET /metrics
 Prometheus text format. Scrape with Prometheus at this endpoint.
@@ -536,6 +560,24 @@ Prometheus text format. Scrape with Prometheus at this endpoint.
 - \`jun_buffer_size{buffer="live|backfill"}\` — gauge
 - \`jun_backfill_concurrency\` — gauge
 - \`jun_backfill_paused\` — gauge (0 or 1)
+
+## SSE Streams
+
+Server-Sent Events for real-time data streaming. Requires \`broadcast: { sse: true }\` in config.
+
+### GET /stream/checkpoints
+Stream checkpoint data as they are processed.
+
+### GET /stream/transactions
+Stream transaction data in real-time.
+
+### GET /stream/events
+Stream all indexed events as they are decoded and flushed.
+
+### GET /broadcast/events
+Broadcast stream of all events across all handlers. Useful for building real-time dashboards.
+
+Each SSE message is a JSON object with \`event\` (handler name) and \`data\` (event payload).
 `;
 
     return { contents: [{ uri: "jun://http-api", text: guide, mimeType: "text/markdown" }] };
@@ -565,8 +607,13 @@ Prometheus text format. Scrape with Prometheus at this endpoint.
 
         for (const name of eventNames) {
           const handler = parsed.indexer.events[name]!;
-          const fieldCount = Object.keys(handler.fields).length;
-          summary.push(`  ${name}: ${handler.type} (${fieldCount} fields)`);
+          const fieldCount = handler.fields ? Object.keys(handler.fields).length : 0;
+          summary.push(`  ${name}: ${handler.type}${fieldCount > 0 ? ` (${fieldCount} fields)` : ' (fields auto-resolved)'}`);
+        }
+
+        if (parsed.balances) {
+          const ct = parsed.balances.coinTypes;
+          summary.push(`Balances: ${ct === '*' ? 'all coin types' : (ct as string[]).join(', ')}`);
         }
 
         if (viewNames.length > 0) {
@@ -611,10 +658,6 @@ Prometheus text format. Scrape with Prometheus at this endpoint.
         const formatted = formatCodegenResult(result);
 
         // Also generate YAML-ready snippet
-        const yamlFields = result.fields
-          .map((f) => f.type ? `      ${f.name}: ${f.type}` : `      # ${f.name}: ${f.rawType} (not a primitive — use granular events)`)
-          .join("\n");
-
         const yamlSnippet = [
           ``,
           `YAML config snippet:`,
@@ -622,8 +665,7 @@ Prometheus text format. Scrape with Prometheus at this endpoint.
           `events:`,
           `  ${result.name}:`,
           `    type: "${type_name}"`,
-          `    fields:`,
-          yamlFields,
+          `    # Fields auto-resolved from chain at startup`,
         ].join("\n");
 
         return { content: [{ type: "text" as const, text: formatted + yamlSnippet }] };
@@ -635,7 +677,7 @@ Prometheus text format. Scrape with Prometheus at this endpoint.
 
   server.tool(
     "jun_generate_config",
-    "Generate a complete jun YAML config from parameters. Provide event types and the tool will fetch field definitions from the chain.",
+    "Generate a complete jun YAML config from parameters. Fields are auto-resolved from chain at startup, so only event types are needed.",
     {
       network: z.string().describe("Network name: mainnet, testnet, or custom"),
       grpc_url: z.string().describe("gRPC endpoint URL"),
@@ -644,13 +686,10 @@ Prometheus text format. Scrape with Prometheus at this endpoint.
       start_checkpoint: z.string().optional().describe("Start checkpoint (number, epoch:N, timestamp:ISO, package:0x...)"),
       mode: z.string().optional().describe("Run mode: all, live-only, backfill-only"),
       serve_port: z.number().optional().describe("HTTP server port (omit to disable)"),
+      balance_coin_types: z.union([z.array(z.string()), z.literal("*")]).optional().describe("Coin types to track balances for, or \"*\" for all"),
     },
-    async ({ network, grpc_url, database, event_types, start_checkpoint, mode, serve_port }) => {
+    async ({ network, grpc_url, database, event_types, start_checkpoint, mode, serve_port, balance_coin_types }) => {
       try {
-        const { createGrpcClient } = await import("./grpc.ts");
-        const { generateFieldDSL } = await import("./codegen.ts");
-
-        const client = createGrpcClient({ url: grpc_url });
         const lines: string[] = [];
 
         lines.push(`network: ${network}`);
@@ -671,28 +710,24 @@ Prometheus text format. Scrape with Prometheus at this endpoint.
             continue;
           }
 
-          try {
-            const descriptor = await client.getDatatype(parts[0]!, parts[1]!, parts[2]!);
-            const result = generateFieldDSL(descriptor);
-
-            lines.push(`  ${result.name}:`);
-            lines.push(`    type: "${typeName}"`);
-            lines.push(`    fields:`);
-
-            for (const field of result.fields) {
-              if (field.type) {
-                lines.push(`      ${field.name}: ${field.type}`);
-              } else {
-                lines.push(`      # ${field.name}: ${field.rawType} (not primitive — use granular events)`);
-                warnings.push(`${result.name}.${field.name} is not a primitive type (${field.rawType})`);
-              }
-            }
-          } catch (err) {
-            warnings.push(`Failed to fetch ${typeName}: ${err instanceof Error ? err.message : String(err)}`);
-          }
+          const structName = parts[2]!;
+          lines.push(`  ${structName}:`);
+          lines.push(`    type: "${typeName}"`);
+          lines.push(`    # Fields auto-resolved from chain at startup`);
         }
 
-        client.close();
+        if (balance_coin_types) {
+          lines.push(``);
+          lines.push(`balances:`);
+          if (balance_coin_types === "*") {
+            lines.push(`  coinTypes: "*"`);
+          } else {
+            lines.push(`  coinTypes:`);
+            for (const ct of balance_coin_types) {
+              lines.push(`    - "${ct}"`);
+            }
+          }
+        }
 
         let output = lines.join("\n");
         if (warnings.length > 0) {
