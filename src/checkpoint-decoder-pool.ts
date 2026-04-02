@@ -13,15 +13,21 @@
  * ```
  */
 import type { GrpcCheckpointResponse } from "./grpc.ts";
+import type { BalanceChange } from "./balance-processor.ts";
 import path from "path";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
+export interface DecodeResult {
+  decoded: GrpcCheckpointResponse;
+  balanceChanges: BalanceChange[] | null;
+}
+
 export interface CheckpointDecoderPool {
-  /** Decode a compressed checkpoint in a worker thread. */
-  decode(seq: bigint, compressed: Uint8Array): Promise<GrpcCheckpointResponse>;
+  /** Decode a compressed checkpoint in a worker thread. Returns events + optional balance changes. */
+  decode(seq: bigint, compressed: Uint8Array): Promise<DecodeResult>;
   /** Terminate all workers. */
   shutdown(): void;
   /** Number of workers in the pool. */
@@ -29,7 +35,7 @@ export interface CheckpointDecoderPool {
 }
 
 interface PendingJob {
-  resolve: (decoded: GrpcCheckpointResponse) => void;
+  resolve: (result: DecodeResult) => void;
   reject: (err: Error) => void;
 }
 
@@ -43,7 +49,16 @@ export function defaultWorkerCount(): number {
   return Math.max(1, Math.min(4, cpus - 1));
 }
 
-export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool {
+export function createCheckpointDecoderPool(
+  size: number,
+  balanceCoinTypes?: string[] | "*",
+): CheckpointDecoderPool {
+  // Serialize coin types for worker messages: null = disabled, [] = all (*), [...] = specific types
+  const workerBalanceCoinTypes: string[] | null = balanceCoinTypes === undefined
+    ? null
+    : balanceCoinTypes === "*"
+      ? []
+      : balanceCoinTypes;
   const workerUrl = path.join(import.meta.dir, "checkpoint-decoder.ts");
 
   const workers: Worker[] = [];
@@ -56,7 +71,7 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
     const worker = new Worker(workerUrl);
 
     worker.onmessage = (event: MessageEvent) => {
-      const { id, decoded, error } = event.data;
+      const { id, decoded, balanceChanges, error } = event.data;
       const job = pending.get(id);
       if (!job) return;
       pending.delete(id);
@@ -64,7 +79,7 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
       if (error) {
         job.reject(new Error(error));
       } else {
-        job.resolve(decoded);
+        job.resolve({ decoded, balanceChanges });
       }
     };
 
@@ -84,7 +99,7 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
   return {
     get size() { return size; },
 
-    decode(seq: bigint, compressed: Uint8Array): Promise<GrpcCheckpointResponse> {
+    decode(seq: bigint, compressed: Uint8Array): Promise<DecodeResult> {
       return new Promise((resolve, reject) => {
         const id = nextId;
         nextId = nextId >= MAX_ID ? 0 : nextId + 1;
@@ -92,7 +107,10 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
 
         // Round-robin assignment
         const worker = workers[id % size]!;
-        worker.postMessage({ id, seq: seq.toString(), compressed }, [compressed.buffer]);
+        worker.postMessage(
+          { id, seq: seq.toString(), compressed, balanceCoinTypes: workerBalanceCoinTypes },
+          [compressed.buffer],
+        );
       });
     },
 

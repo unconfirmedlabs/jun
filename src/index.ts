@@ -405,7 +405,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
           try {
             // Fetch compressed bytes on main thread (I/O), decode in worker (CPU)
-            const response = await pRetry(async () => {
+            const result = await pRetry(async () => {
               const ac = new AbortController();
               const timeout = setTimeout(() => ac.abort(), 30_000);
               try {
@@ -416,6 +416,8 @@ export function defineIndexer(config: IndexerConfig): Indexer {
               }
             }, { retries: 3, minTimeout: 1000 });
 
+            const response = result.decoded;
+
             // Broadcast full checkpoint data to SSE + NATS clients
             broadcast.broadcast(response, "backfill");
 
@@ -425,11 +427,11 @@ export function defineIndexer(config: IndexerConfig): Indexer {
               totalEvents += decoded.length;
             }
 
-            // Store in pending map, then drain contiguously into buffer.
-            // This ensures checkpoints reach the buffer in order even though
-            // workers complete out of order.
-            // Extract balance changes if enabled
-            if (balanceProcessor) {
+            // Balance changes: use worker-computed archive balances if available,
+            // otherwise extract from gRPC balance_changes field (live mode)
+            if (result.balanceChanges && result.balanceChanges.length > 0) {
+              buffer.pushBalances(result.balanceChanges);
+            } else if (balanceProcessor) {
               const changes = balanceProcessor.extract(response);
               buffer.pushBalances(changes);
             }
@@ -712,7 +714,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
       // Checkpoint decoder pool (workers for CPU-bound decompress + decode)
       const workerCount = backfillWorkers ?? defaultWorkerCount();
-      const decoderPool = createCheckpointDecoderPool(workerCount);
+      const decoderPool = createCheckpointDecoderPool(workerCount, balancesConfig?.coinTypes);
       log.info({ workers: workerCount }, "checkpoint decoder pool started");
 
       // Build concurrent tasks
