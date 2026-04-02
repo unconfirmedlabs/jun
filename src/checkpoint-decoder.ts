@@ -9,7 +9,7 @@
  */
 /// <reference lib="webworker" />
 import { decodeCheckpointFromProto, getCheckpointType } from "./archive.ts";
-import { parseCheckpointProto } from "./proto-parser.ts";
+import { parseCheckpointProtoNative } from "./proto-parser-native.ts";
 import { computeBalanceChangesFromArchive } from "./archive-balance.ts";
 import { zstdDecompressSync } from "zlib";
 
@@ -38,7 +38,7 @@ self.onmessage = async (event: MessageEvent) => {
       const protoDecoded = Checkpoint.decode(decompressed);
       checkpointProto = Checkpoint.toObject(protoDecoded, { longs: String, enums: String, defaults: false });
     } else {
-      checkpointProto = parseCheckpointProto(new Uint8Array(decompressed));
+      checkpointProto = parseCheckpointProtoNative(new Uint8Array(decompressed));
     }
 
     // 1. BCS decode events from the shared protobuf (no re-decompression)

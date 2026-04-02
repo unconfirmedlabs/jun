@@ -15,6 +15,7 @@ import * as protoLoader from "@grpc/proto-loader";
 import protobuf from "protobufjs";
 import { cacheGet, cachePut } from "./cache.ts";
 import { parseCheckpointProto } from "./proto-parser.ts";
+import { parseCheckpointProtoNative } from "./proto-parser-native.ts";
 import path from "path";
 import type { GrpcCheckpointResponse, GrpcEvent } from "./grpc.ts";
 import { parseSender } from "./sui-bcs.ts";
@@ -405,7 +406,7 @@ export async function decodeCompressedCheckpoint(
     const cp = Checkpoint.toObject(decoded, { longs: String, enums: String, defaults: false }) as any;
     return decodeCheckpointFromProto(seq, cp, verifyOpts);
   }
-  const cp = parseCheckpointProto(new Uint8Array(decompressed)) as any;
+  const cp = parseCheckpointProtoNative(new Uint8Array(decompressed)) as any;
   return decodeCheckpointFromProto(seq, cp, verifyOpts);
 }
 
