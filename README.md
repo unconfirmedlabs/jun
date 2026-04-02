@@ -301,7 +301,7 @@ Production pipeline benchmarks on AMD Ryzen 9 9950X3D (16C/32T, 10gbit). Archive
 - Custom BCS parsers (coin objects, transaction effects, events) provide 2-7x speedup over native `@mysten/sui/bcs`.
 - Custom protobuf wire format parser bypasses protobufjs for checkpoint decoding.
 - Streaming pipeline: fetch, decode, and yield run concurrently with backpressure.
-- Set `JUN_NATIVE_BCS=1` to fall back to native parsers for debugging.
+- Set `JUN_LEGACY_PARSERS=1` to fall back to native parsers for debugging.
 
 ## Architecture
 

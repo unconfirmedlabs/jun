@@ -22,10 +22,10 @@ import { parseSender } from "./sui-bcs.ts";
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
-/** Use native suiBcs parsers instead of custom fast parsers. Set JUN_NATIVE_BCS=1 to enable. */
-const USE_NATIVE_BCS = process.env.JUN_NATIVE_BCS === "1";
+/** Use native suiBcs parsers instead of custom fast parsers. Set JUN_LEGACY_PARSERS=1 to enable. */
+const USE_LEGACY_PARSERS = process.env.JUN_LEGACY_PARSERS === "1";
 
-// ─── Native BCS types (used when JUN_NATIVE_BCS=1) ─────────────────────────
+// ─── Native BCS types (used when JUN_LEGACY_PARSERS=1) ─────────────────────────
 
 const NativeSuiEvent = suiBcs.struct("Event", {
   packageId: suiBcs.Address,
@@ -400,7 +400,7 @@ export async function decodeCompressedCheckpoint(
   verifyOpts?: { grpcUrl: string },
 ): Promise<GrpcCheckpointResponse> {
   const decompressed = zstdDecompressSync(Buffer.from(compressed));
-  if (USE_NATIVE_BCS) {
+  if (USE_LEGACY_PARSERS) {
     const Checkpoint = await getCheckpointType();
     const decoded = Checkpoint.decode(decompressed);
     const cp = Checkpoint.toObject(decoded, { longs: String, enums: String, defaults: false }) as any;
@@ -463,7 +463,7 @@ export async function decodeCheckpointFromProto(
 
     if (eventsBcs && eventsBcs.length > 0) {
       const raw = new Uint8Array(eventsBcs);
-      events = USE_NATIVE_BCS ? nativeParseEvents(raw) : fastParseEvents(raw);
+      events = USE_LEGACY_PARSERS ? nativeParseEvents(raw) : fastParseEvents(raw);
     }
 
     // Extract balance changes from protobuf (field 8 on ExecutedTransaction)

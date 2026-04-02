@@ -13,7 +13,7 @@ import { parseCheckpointProtoNative } from "./proto-parser-native.ts";
 import { computeBalanceChangesFromArchive } from "./archive-balance.ts";
 import { zstdDecompressSync } from "zlib";
 
-const USE_NATIVE_BCS = process.env.JUN_NATIVE_BCS === "1";
+const USE_LEGACY_PARSERS = process.env.JUN_LEGACY_PARSERS === "1";
 
 declare var self: Worker;
 
@@ -33,7 +33,7 @@ self.onmessage = async (event: MessageEvent) => {
 
     // Protobuf decode ONCE
     let checkpointProto: any;
-    if (USE_NATIVE_BCS) {
+    if (USE_LEGACY_PARSERS) {
       const Checkpoint = await getCheckpointType();
       const protoDecoded = Checkpoint.decode(decompressed);
       checkpointProto = Checkpoint.toObject(protoDecoded, { longs: String, enums: String, defaults: false });

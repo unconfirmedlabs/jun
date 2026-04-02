@@ -16,8 +16,8 @@ import { bcs as suiBcs } from "@mysten/sui/bcs";
 import type { BalanceChange } from "./balance-processor.ts";
 import { normalizeSuiAddress, normalizeCoinType } from "./normalize.ts";
 
-/** Use native suiBcs parsers instead of custom fast parsers. Set JUN_NATIVE_BCS=1 to enable. */
-const USE_NATIVE_BCS = process.env.JUN_NATIVE_BCS === "1";
+/** Use native suiBcs parsers instead of custom fast parsers. Set JUN_LEGACY_PARSERS=1 to enable. */
+const USE_LEGACY_PARSERS = process.env.JUN_LEGACY_PARSERS === "1";
 
 // Pre-compute normalized SUI type to avoid repeated normalization
 const NORMALIZED_SUI = normalizeCoinType("0x2::sui::SUI");
@@ -641,7 +641,7 @@ export function computeBalanceChangesFromArchive(
       const raw = new Uint8Array(effectsBcs);
 
       // Fast path: V2 Success transactions (91%+ of cases)
-      const fastResult = USE_NATIVE_BCS ? null : fastParseEffects(raw);
+      const fastResult = USE_LEGACY_PARSERS ? null : fastParseEffects(raw);
       if (fastResult) {
         for (const id of fastResult.createdObjects) createdObjects.add(id);
         for (const id of fastResult.deletedObjects) deletedObjects.add(id);
@@ -708,7 +708,7 @@ export function computeBalanceChangesFromArchive(
     if (rawBytes[0] !== 0 || (rawBytes[1] !== 1 && rawBytes[1] !== 3)) continue;
 
     try {
-      const parsed = USE_NATIVE_BCS ? nativeParseCoinObject(rawBytes) : fastParseCoinObject(rawBytes);
+      const parsed = USE_LEGACY_PARSERS ? nativeParseCoinObject(rawBytes) : fastParseCoinObject(rawBytes);
       if (!parsed) continue;
 
       // Apply filter (both sides normalized)
