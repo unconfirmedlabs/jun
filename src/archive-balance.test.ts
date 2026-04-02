@@ -2,6 +2,9 @@ import { test, expect, describe } from "bun:test";
 import { computeBalanceChangesFromArchive } from "./archive-balance.ts";
 import { getCheckpointType } from "./archive.ts";
 import { zstdDecompressSync } from "zlib";
+import { normalizeCoinType } from "./normalize.ts";
+
+const SUI = normalizeCoinType("0x2::sui::SUI");
 
 /**
  * Integration test: verify balance change computation against a known
@@ -41,13 +44,13 @@ describe("computeBalanceChangesFromArchive", () => {
     // Sender: lost 1 SUI + gas
     const sender = changes[0]!;
     expect(sender.address).toContain("f3a64ba4");
-    expect(sender.coinType).toBe("0x2::sui::SUI");
+    expect(sender.coinType).toBe(SUI);
     expect(sender.amount).toBe("-1001009880");
 
     // Recipient: gained 1 SUI via accumulator
     const recipient = changes[1]!;
     expect(recipient.address).toContain("fbdc88b0");
-    expect(recipient.coinType).toBe("0x2::sui::SUI");
+    expect(recipient.coinType).toBe(SUI);
     expect(recipient.amount).toBe("1000000000");
   }, 30_000);
 
@@ -89,7 +92,7 @@ describe("computeBalanceChangesFromArchive", () => {
       checkpointProto,
       seq,
       new Date(),
-      new Set(["0x2::sui::SUI"]),
+      new Set([SUI]),
     );
 
     // Should find both sender and recipient

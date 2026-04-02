@@ -18,10 +18,14 @@ import path from "path";
 import type { GrpcCheckpointResponse, GrpcEvent } from "./grpc.ts";
 import { parseSender } from "./sui-bcs.ts";
 
-// ─── BCS types ───────────────────────────────────────────────────────────────
+// ─── Configuration ──────────────────────────────────────────────────────────
 
-// Event decoding (uses @mysten/sui/bcs for StructTag/Address)
-const SuiEvent = suiBcs.struct("Event", {
+/** Use native suiBcs parsers instead of custom fast parsers. Set JUN_NATIVE_BCS=1 to enable. */
+const USE_NATIVE_BCS = process.env.JUN_NATIVE_BCS === "1";
+
+// ─── Native BCS types (used when JUN_NATIVE_BCS=1) ─────────────────────────
+
+const NativeSuiEvent = suiBcs.struct("Event", {
   packageId: suiBcs.Address,
   transactionModule: suiBcs.String,
   sender: suiBcs.Address,
@@ -29,9 +33,198 @@ const SuiEvent = suiBcs.struct("Event", {
   contents: suiBcs.vector(suiBcs.U8),
 });
 
-const TransactionEvents = suiBcs.struct("TransactionEvents", {
-  data: suiBcs.vector(SuiEvent),
+const NativeTransactionEvents = suiBcs.struct("TransactionEvents", {
+  data: suiBcs.vector(NativeSuiEvent),
 });
+
+/** Format a TypeTag enum value to a string (native path). */
+function formatTypeTag(tag: any): string {
+  if (typeof tag === "string") return tag.toLowerCase();
+  if (tag.address) {
+    const params = (tag.typeParams ?? []).map((tp: any) => formatTypeTag(tp));
+    const suffix = params.length > 0 ? `<${params.join(", ")}>` : "";
+    return `${tag.address}::${tag.module}::${tag.name}${suffix}`;
+  }
+  for (const [key, val] of Object.entries(tag)) {
+    if (val === true || val === null) return key.toLowerCase();
+    return formatTypeTag(val);
+  }
+  return "unknown";
+}
+
+/** Parse events using native suiBcs (slow but battle-tested). */
+function nativeParseEvents(eventsBcs: Uint8Array): GrpcEvent[] {
+  const decoded = NativeTransactionEvents.parse(eventsBcs);
+  return decoded.data.map((ev: any) => {
+    const typeParams = (ev.type.typeParams ?? []).map((tp: any) => formatTypeTag(tp));
+    const typeSuffix = typeParams.length > 0 ? `<${typeParams.join(", ")}>` : "";
+    const eventType = `${ev.type.address}::${ev.type.module}::${ev.type.name}${typeSuffix}`;
+    return {
+      packageId: ev.packageId,
+      module: ev.transactionModule,
+      sender: ev.sender,
+      eventType,
+      contents: { name: eventType, value: new Uint8Array(ev.contents) },
+    };
+  });
+}
+
+// ─── Fast BCS types ─────────────────────────────────────────────────────────
+
+// Fast event parser — replaces suiBcs.struct("TransactionEvents") with direct
+// byte-level parsing that builds GrpcEvent[] without intermediate JS objects.
+//
+// BCS layout:
+//   TransactionEvents { data: vec<SuiEvent> }
+//   SuiEvent { packageId: Address(32), transactionModule: String,
+//              sender: Address(32), type: StructTag, contents: vec<u8> }
+//   StructTag { address: Address(32), module: String, name: String, typeParams: vec<TypeTag> }
+
+const HEX = "0123456789abcdef";
+const TYPE_TAG_NAMES = ["bool","u8","u64","u128","address","signer","vector","struct","u16","u32","u256"];
+
+function evBytesToHex(buf: Uint8Array, offset: number): string {
+  let hex = "0x";
+  for (let i = 0; i < 32; i++) {
+    const b = buf[offset + i]!;
+    hex += HEX[b >> 4]! + HEX[b & 0xf]!;
+  }
+  return hex;
+}
+
+function evReadUleb128(buf: Uint8Array, offset: number): [number, number] {
+  let value = 0, shift = 0, pos = offset;
+  for (;;) {
+    const b = buf[pos]!;
+    value |= (b & 0x7f) << shift;
+    pos++;
+    if ((b & 0x80) === 0) break;
+    shift += 7;
+  }
+  return [value, pos - offset];
+}
+
+function evReadString(buf: Uint8Array, offset: number): [string, number] {
+  const [len, lb] = evReadUleb128(buf, offset);
+  offset += lb;
+  let s = "";
+  for (let i = 0; i < len; i++) s += String.fromCharCode(buf[offset + i]!);
+  return [s, offset + len];
+}
+
+/** Format a TypeTag directly from BCS bytes → string. Returns [formatted, newOffset]. */
+function formatTypeTagFromBcs(buf: Uint8Array, offset: number): [string, number] {
+  const tag = buf[offset]!;
+  offset++;
+
+  if (tag <= 5 || (tag >= 8 && tag <= 10)) {
+    // Primitive: bool(0), u8(1), u64(2), u128(3), address(4), signer(5), u16(8), u32(9), u256(10)
+    return [TYPE_TAG_NAMES[tag]!, offset];
+  }
+
+  if (tag === 6) {
+    // vector<TypeTag>
+    let inner: string;
+    [inner, offset] = formatTypeTagFromBcs(buf, offset);
+    return [`vector<${inner}>`, offset];
+  }
+
+  if (tag === 7) {
+    // struct(StructTag)
+    const addr = evBytesToHex(buf, offset);
+    offset += 32;
+    let mod: string;
+    [mod, offset] = evReadString(buf, offset);
+    let name: string;
+    [name, offset] = evReadString(buf, offset);
+
+    const [paramCount, pcBytes] = evReadUleb128(buf, offset);
+    offset += pcBytes;
+
+    if (paramCount === 0) {
+      return [`${addr}::${mod}::${name}`, offset];
+    }
+
+    const params: string[] = [];
+    for (let i = 0; i < paramCount; i++) {
+      let p: string;
+      [p, offset] = formatTypeTagFromBcs(buf, offset);
+      params.push(p);
+    }
+    return [`${addr}::${mod}::${name}<${params.join(", ")}>`, offset];
+  }
+
+  return ["unknown", offset];
+}
+
+/**
+ * Fast-parse TransactionEvents BCS → GrpcEvent[].
+ * Builds target format directly from bytes, no intermediate SuiEvent/StructTag objects.
+ */
+function fastParseEvents(buf: Uint8Array): GrpcEvent[] {
+  let offset = 0;
+
+  // vec<SuiEvent> count
+  const [count, countBytes] = evReadUleb128(buf, offset);
+  offset += countBytes;
+  if (count === 0) return [];
+
+  const events: GrpcEvent[] = new Array(count);
+
+  for (let i = 0; i < count; i++) {
+    // packageId: Address (32 bytes)
+    const packageId = evBytesToHex(buf, offset);
+    offset += 32;
+
+    // transactionModule: String
+    let module: string;
+    [module, offset] = evReadString(buf, offset);
+
+    // sender: Address (32 bytes)
+    const sender = evBytesToHex(buf, offset);
+    offset += 32;
+
+    // type: StructTag → format directly to eventType string
+    const typeAddr = evBytesToHex(buf, offset);
+    offset += 32;
+    let typeMod: string;
+    [typeMod, offset] = evReadString(buf, offset);
+    let typeName: string;
+    [typeName, offset] = evReadString(buf, offset);
+
+    const [paramCount, pcBytes] = evReadUleb128(buf, offset);
+    offset += pcBytes;
+
+    let eventType: string;
+    if (paramCount === 0) {
+      eventType = `${typeAddr}::${typeMod}::${typeName}`;
+    } else {
+      const params: string[] = [];
+      for (let j = 0; j < paramCount; j++) {
+        let p: string;
+        [p, offset] = formatTypeTagFromBcs(buf, offset);
+        params.push(p);
+      }
+      eventType = `${typeAddr}::${typeMod}::${typeName}<${params.join(", ")}>`;
+    }
+
+    // contents: vec<u8>
+    const [contentsLen, clBytes] = evReadUleb128(buf, offset);
+    offset += clBytes;
+    const contentsValue = buf.subarray(offset, offset + contentsLen);
+    offset += contentsLen;
+
+    events[i] = {
+      packageId,
+      module,
+      sender,
+      eventType,
+      contents: { name: eventType, value: contentsValue },
+    };
+  }
+
+  return events;
+}
 
 // CheckpointSummary decoding (uses @mysten/bcs for custom digest type)
 const SuiDigest = bcs.vector(bcs.u8());
@@ -258,26 +451,13 @@ export async function decodeCheckpointFromProto(
     const txDataBcs = tx.transaction?.bcs?.value as Uint8Array | undefined;
     const sender = txDataBcs ? parseSender(new Uint8Array(txDataBcs)) : undefined;
 
-    // Decode events from BCS
+    // Decode events from BCS using fast parser
     const eventsBcs = tx.events?.bcs?.value as Uint8Array | undefined;
     let events: GrpcEvent[] = [];
 
     if (eventsBcs && eventsBcs.length > 0) {
-      const decoded = TransactionEvents.parse(new Uint8Array(eventsBcs));
-      events = decoded.data.map((ev: any) => {
-        const typeParams = (ev.type.typeParams ?? []).map((tp: any) => formatTypeTag(tp));
-        const typeSuffix = typeParams.length > 0 ? `<${typeParams.join(",")}>` : "";
-        return {
-          packageId: ev.packageId,
-          module: ev.transactionModule,
-          sender: ev.sender,
-          eventType: `${ev.type.address}::${ev.type.module}::${ev.type.name}${typeSuffix}`,
-          contents: {
-            name: `${ev.type.address}::${ev.type.module}::${ev.type.name}${typeSuffix}`,
-            value: new Uint8Array(ev.contents),
-          },
-        };
-      });
+      const raw = new Uint8Array(eventsBcs);
+      events = USE_NATIVE_BCS ? nativeParseEvents(raw) : fastParseEvents(raw);
     }
 
     // Extract balance changes from protobuf (field 8 on ExecutedTransaction)
