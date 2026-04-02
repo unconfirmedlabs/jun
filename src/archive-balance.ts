@@ -157,8 +157,10 @@ export function computeBalanceChangesFromArchive(
     const rawBytes = new Uint8Array(object.bcs.value);
 
     // Fast filter: skip non-coin objects without full BCS parse.
-    // BCS Object layout: byte[0]=data enum (0=Move), byte[1]=type hint.
-    // GasCoin: [0, 1, ...], Coin<T>: [0, 3, ...], Other: [0, 0, ...]
+    // BCS Object layout:
+    //   byte[0] = ObjectData enum: 0=Move, 1=Package
+    //   byte[1] = MoveObjectType enum: 0=Other, 1=GasCoin, 2=StakingSui, 3=Coin<T>
+    // Skip if Package (byte[0]!=0) or non-coin Move object (byte[1]=0).
     if (rawBytes[0] !== 0 || rawBytes[1] === 0) continue;
 
     try {
