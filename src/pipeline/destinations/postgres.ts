@@ -5,7 +5,7 @@
  * Uses parameterized queries with ON CONFLICT DO NOTHING for idempotency.
  */
 import { SQL } from "bun";
-import type { Destination, ProcessedCheckpoint, DecodedEvent, BalanceChange } from "../types.ts";
+import type { Storage, ProcessedCheckpoint, DecodedEvent, BalanceChange } from "../types.ts";
 import type { FieldDefs } from "../../schema.ts";
 import { generateDDL } from "../../schema.ts";
 import { validateIdentifier } from "../../output/storage.ts";
@@ -21,7 +21,7 @@ export interface PostgresDestinationConfig {
   balances?: boolean;
 }
 
-export function createPostgresDestination(config: PostgresDestinationConfig): Destination {
+export function createPostgresStorage(config: PostgresDestinationConfig): Storage {
   const log: Logger = createLogger().child({ component: "destination:postgres" });
   let sql: any = null;
 

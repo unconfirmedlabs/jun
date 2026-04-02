@@ -2074,7 +2074,7 @@ pipelineCmd
         process.env.LOG_LEVEL = "silent";
       }
 
-      const { sources, processors, destinations, pipelineConfig } = parsePipelineConfig(yamlContent);
+      const { sources, processors, storages, broadcasts, pipelineConfig } = parsePipelineConfig(yamlContent);
 
       const pipeline = createPipeline();
 
@@ -2085,7 +2085,8 @@ pipelineCmd
 
       for (const source of sources) pipeline.source(source);
       for (const processor of processors) pipeline.processor(processor);
-      for (const destination of destinations) pipeline.destination(destination);
+      for (const storage of storages) pipeline.storage(storage);
+      for (const broadcast of broadcasts) pipeline.broadcast(broadcast);
 
       await pipeline.run();
     } catch (err) {

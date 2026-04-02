@@ -85,22 +85,37 @@ export interface Processor {
 }
 
 // ---------------------------------------------------------------------------
-// Destination — where processed data goes
+// Storage — persistent, queryable destinations (batched, retried, cursor-tracked)
 // ---------------------------------------------------------------------------
 
-export interface Destination {
-  /** Destination name for logging. */
+export interface Storage {
+  /** Storage name for logging. */
   readonly name: string;
-  /** Initialize (create tables, open connections, etc.). */
+  /** Initialize (create tables, open connections). */
   initialize(): Promise<void>;
-  /** Write a batch of processed checkpoints. */
+  /** Write a batch of processed checkpoints. Retried on failure. */
   write(batch: ProcessedCheckpoint[]): Promise<void>;
   /** Graceful shutdown (flush remaining data, close connections). */
   shutdown(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline — orchestrates Source → Processor → Destination
+// Broadcast — ephemeral streaming destinations (fire-and-forget, no retry)
+// ---------------------------------------------------------------------------
+
+export interface Broadcast {
+  /** Broadcast name for logging. */
+  readonly name: string;
+  /** Initialize (start server, connect). */
+  initialize(): Promise<void>;
+  /** Push a single processed checkpoint to listeners. Synchronous, no retry. */
+  push(processed: ProcessedCheckpoint): void;
+  /** Graceful shutdown (close connections). */
+  shutdown(): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline — orchestrates Source → Processor → Storage + Broadcast
 // ---------------------------------------------------------------------------
 
 export interface PipelineConfig {
@@ -139,8 +154,10 @@ export interface Pipeline {
   source(source: Source): Pipeline;
   /** Add a processor to the pipeline. */
   processor(processor: Processor): Pipeline;
-  /** Add a destination to the pipeline. */
-  destination(destination: Destination): Pipeline;
+  /** Add a storage destination (Postgres, SQLite). Batched, retried, cursor-tracked. */
+  storage(storage: Storage): Pipeline;
+  /** Add a broadcast destination (SSE, NATS, stdout). Fire-and-forget, low latency. */
+  broadcast(broadcast: Broadcast): Pipeline;
   /** Configure pipeline behavior. */
   configure(config: PipelineConfig): Pipeline;
   /** Start the pipeline. */

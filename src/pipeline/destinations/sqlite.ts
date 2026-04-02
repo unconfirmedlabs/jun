@@ -5,7 +5,7 @@
  * Idempotent via INSERT OR IGNORE.
  */
 import { Database } from "bun:sqlite";
-import type { Destination, ProcessedCheckpoint, DecodedEvent } from "../types.ts";
+import type { Storage, ProcessedCheckpoint, DecodedEvent } from "../types.ts";
 import type { FieldDefs, FieldType } from "../../schema.ts";
 
 export interface SqliteDestinationConfig {
@@ -29,7 +29,7 @@ function fieldTypeToSqlite(type: FieldType): string {
   }
 }
 
-export function createSqliteDestination(config: SqliteDestinationConfig): Destination {
+export function createSqliteStorage(config: SqliteDestinationConfig): Storage {
   let database: Database | null = null;
   const insertStatements = new Map<string, ReturnType<Database["prepare"]>>();
   const tableColumns = new Map<string, string[]>();

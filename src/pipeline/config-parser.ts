@@ -5,16 +5,16 @@
  * actual Source, Processor, and Destination instances.
  */
 import yaml from "js-yaml";
-import type { Source, Processor, Destination, PipelineConfig } from "./types.ts";
+import type { Source, Processor, Storage, Broadcast, PipelineConfig } from "./types.ts";
 import { createGrpcLiveSource } from "./sources/grpc-live.ts";
 import { createArchiveSource } from "./sources/archive.ts";
 import { createEventDecoder } from "./processors/event-decoder.ts";
 import { createBalanceTracker } from "./processors/balance-tracker.ts";
-import { createPostgresDestination } from "./destinations/postgres.ts";
-import { createSqliteDestination } from "./destinations/sqlite.ts";
-import { createSseDestination } from "./destinations/sse.ts";
-import { createNatsDestination } from "./destinations/nats.ts";
-import { createStdoutDestination } from "./destinations/stdout.ts";
+import { createPostgresStorage } from "./destinations/postgres.ts";
+import { createSqliteStorage } from "./destinations/sqlite.ts";
+import { createSseBroadcast } from "./destinations/sse.ts";
+import { createNatsBroadcast } from "./destinations/nats.ts";
+import { createStdoutBroadcast } from "./destinations/stdout.ts";
 import { normalizeEventType, normalizeCoinType, validateEventTypeAddress } from "../normalize.ts";
 
 // ---------------------------------------------------------------------------
@@ -24,7 +24,8 @@ import { normalizeEventType, normalizeCoinType, validateEventTypeAddress } from 
 export interface ParsedPipelineConfig {
   sources: Source[];
   processors: Processor[];
-  destinations: Destination[];
+  storages: Storage[];
+  broadcasts: Broadcast[];
   pipelineConfig: PipelineConfig;
 }
 
@@ -69,7 +70,8 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
   const config = substituteDeep(raw);
   const sources: Source[] = [];
   const processors: Processor[] = [];
-  const destinations: Destination[] = [];
+  const storages: Storage[] = [];
+  const broadcasts: Broadcast[] = [];
 
   // --- Sources ---
   const sourceConfig = config.sources;
@@ -144,10 +146,9 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
   }
 
   // --- Destinations ---
-  const destinationConfig = config.destinations;
-  if (!destinationConfig) {
-    throw new Error("Invalid config: missing 'destinations' section");
-  }
+  const destinationConfig = config.destinations ?? {};
+  const storageConfig = config.storage ?? destinationConfig;
+  const broadcastConfig = config.broadcast ?? destinationConfig;
 
   // Collect handler table info for destinations that need it
   const handlerTables: Record<string, { tableName: string; fields: any }> = {};
@@ -158,50 +159,53 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
     }
   }
 
-  if (destinationConfig.postgres) {
-    const url = typeof destinationConfig.postgres === "string"
-      ? destinationConfig.postgres
-      : destinationConfig.postgres.url;
-    destinations.push(createPostgresDestination({
+  // Storage destinations
+  if (storageConfig.postgres) {
+    const url = typeof storageConfig.postgres === "string"
+      ? storageConfig.postgres
+      : storageConfig.postgres.url;
+    storages.push(createPostgresStorage({
       url,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
     }));
   }
 
-  if (destinationConfig.sqlite) {
-    const sqlitePath = typeof destinationConfig.sqlite === "string"
-      ? destinationConfig.sqlite
-      : destinationConfig.sqlite.path;
-    destinations.push(createSqliteDestination({
+  if (storageConfig.sqlite) {
+    const sqlitePath = typeof storageConfig.sqlite === "string"
+      ? storageConfig.sqlite
+      : storageConfig.sqlite.path;
+    storages.push(createSqliteStorage({
       path: sqlitePath,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
     }));
   }
 
-  if (destinationConfig.sse) {
-    destinations.push(createSseDestination({
-      port: destinationConfig.sse.port,
-      hostname: destinationConfig.sse.hostname,
+  // Broadcast destinations
+  if (broadcastConfig.sse) {
+    broadcasts.push(createSseBroadcast({
+      port: broadcastConfig.sse.port,
+      hostname: broadcastConfig.sse.hostname,
     }));
   }
 
-  if (destinationConfig.nats) {
-    destinations.push(createNatsDestination({
-      url: destinationConfig.nats.url,
-      prefix: destinationConfig.nats.prefix,
+  if (broadcastConfig.nats) {
+    broadcasts.push(createNatsBroadcast({
+      url: broadcastConfig.nats.url,
+      prefix: broadcastConfig.nats.prefix,
     }));
   }
 
-  if (destinationConfig.stdout) {
-    destinations.push(createStdoutDestination({
-      format: destinationConfig.stdout.format,
+  if (broadcastConfig.stdout) {
+    broadcasts.push(createStdoutBroadcast({
+      format: broadcastConfig.stdout.format,
     }));
   }
 
-  if (destinations.length === 0) {
-    throw new Error("Invalid config: must define at least one destination");
+  // Default to stdout if no destinations configured
+  if (storages.length === 0 && broadcasts.length === 0) {
+    broadcasts.push(createStdoutBroadcast({ format: "formatted" }));
   }
 
   // --- Pipeline config ---
@@ -214,5 +218,5 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
   }
   if (config.display) pipelineConfig.display = config.display;
 
-  return { sources, processors, destinations, pipelineConfig };
+  return { sources, processors, storages, broadcasts, pipelineConfig };
 }

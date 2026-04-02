@@ -4,7 +4,7 @@
  * Runs on the HTTP server worker thread. Pushes checkpoint summaries,
  * transaction summaries, decoded events, and raw events to filtered clients.
  */
-import type { Destination, ProcessedCheckpoint } from "../types.ts";
+import type { Broadcast, ProcessedCheckpoint } from "../types.ts";
 import type { Logger } from "../../logger.ts";
 import { createLogger } from "../../logger.ts";
 
@@ -26,7 +26,7 @@ interface SseClient {
 
 const MAX_SSE_CLIENTS = 100;
 
-export function createSseDestination(config: SseDestinationConfig): Destination {
+export function createSseBroadcast(config: SseDestinationConfig): Broadcast {
   const log: Logger = createLogger().child({ component: "destination:sse" });
   let server: ReturnType<typeof Bun.serve> | null = null;
   const clients = new Set<SseClient>();
@@ -99,11 +99,10 @@ export function createSseDestination(config: SseDestinationConfig): Destination 
       log.info({ port: server.port, hostname: config.hostname ?? "127.0.0.1" }, "SSE server started");
     },
 
-    async write(batch: ProcessedCheckpoint[]): Promise<void> {
+    push(processed: ProcessedCheckpoint): void {
       if (clients.size === 0) return;
 
-      for (const processed of batch) {
-        const checkpoint = processed.checkpoint;
+      const checkpoint = processed.checkpoint;
 
         // Checkpoint summary
         const checkpointMessage = `data: ${JSON.stringify({
@@ -140,7 +139,6 @@ export function createSseDestination(config: SseDestinationConfig): Destination 
             }
           }
         }
-      }
     },
 
     async shutdown(): Promise<void> {

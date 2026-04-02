@@ -21,7 +21,8 @@
 import type {
   Source,
   Processor,
-  Destination,
+  Storage,
+  Broadcast,
   Pipeline,
   PipelineConfig,
   Checkpoint,
@@ -37,7 +38,8 @@ import type { Logger } from "../logger.ts";
 export function createPipeline(): Pipeline {
   const sources: Source[] = [];
   const processors: Processor[] = [];
-  const destinations: Destination[] = [];
+  const storages: Storage[] = [];
+  const broadcasts: Broadcast[] = [];
   let config: PipelineConfig = {};
   let stopped = false;
   const log = createLogger();
@@ -53,8 +55,13 @@ export function createPipeline(): Pipeline {
       return pipeline;
     },
 
-    destination(destination: Destination): Pipeline {
-      destinations.push(destination);
+    storage(storage: Storage): Pipeline {
+      storages.push(storage);
+      return pipeline;
+    },
+
+    broadcast(broadcast: Broadcast): Pipeline {
+      broadcasts.push(broadcast);
       return pipeline;
     },
 
@@ -65,7 +72,6 @@ export function createPipeline(): Pipeline {
 
     async run(): Promise<void> {
       if (sources.length === 0) throw new Error("Pipeline has no sources");
-      if (destinations.length === 0) throw new Error("Pipeline has no destinations");
 
       const humanOutput = !config.quiet;
 
@@ -87,30 +93,36 @@ export function createPipeline(): Pipeline {
         }
       }
 
-      // Initialize destinations
-      for (const destination of destinations) {
-        await destination.initialize();
-        log.info({ destination: destination.name }, "destination initialized");
+      // Initialize storage destinations
+      for (const storage of storages) {
+        await storage.initialize();
+        log.info({ storage: storage.name }, "storage initialized");
+      }
+
+      // Initialize broadcast destinations
+      for (const broadcast of broadcasts) {
+        await broadcast.initialize();
+        log.info({ broadcast: broadcast.name }, "broadcast initialized");
       }
 
       // Print human-readable banner
       if (humanOutput) {
         console.log("\n=== Jun Pipeline ===");
-        console.log(`Sources:      ${sources.map(s => s.name).join(", ")}`);
-        console.log(`Processors:   ${processors.length > 0 ? processors.map(p => p.name).join(", ") : "none"}`);
-        console.log(`Destinations: ${destinations.map(d => d.name).join(", ")}`);
-        if (config.serve) console.log(`HTTP Server:  port ${config.serve.port}`);
+        console.log(`Sources:    ${sources.map(s => s.name).join(", ")}`);
+        if (processors.length > 0) console.log(`Processors: ${processors.map(p => p.name).join(", ")}`);
+        if (storages.length > 0) console.log(`Storage:    ${storages.map(s => s.name).join(", ")}`);
+        if (broadcasts.length > 0) console.log(`Broadcast:  ${broadcasts.map(b => b.name).join(", ")}`);
+        if (config.serve) console.log(`HTTP Server: port ${config.serve.port}`);
         console.log("");
       }
 
       // Run all sources concurrently
-      const sourcePromises = sources.map(source => runSource(source, processors, destinations, config, log, humanOutput));
+      const sourcePromises = sources.map(source => runSource(source, processors, storages, broadcasts, config, log, humanOutput));
       await Promise.all(sourcePromises);
 
-      // Shutdown destinations
-      for (const destination of destinations) {
-        await destination.shutdown();
-      }
+      // Shutdown
+      for (const storage of storages) await storage.shutdown();
+      for (const broadcast of broadcasts) await broadcast.shutdown();
 
       // Stop sources
       for (const source of sources) {
@@ -138,7 +150,8 @@ export function createPipeline(): Pipeline {
 async function runSource(
   source: Source,
   processors: Processor[],
-  destinations: Destination[],
+  storages: Storage[],
+  broadcasts: Broadcast[],
   config: PipelineConfig,
   log: Logger,
   humanOutput: boolean,
@@ -149,19 +162,21 @@ async function runSource(
   let batch: ProcessedCheckpoint[] = [];
   let lastFlush = performance.now();
 
-  async function flush(): Promise<void> {
+  async function flushStorage(): Promise<void> {
     if (batch.length === 0) return;
     const toFlush = batch;
     batch = [];
 
-    // Write to all destinations in parallel
-    await Promise.all(destinations.map(destination => destination.write(toFlush)));
+    // Write to all storage destinations in parallel (batched, retried)
+    if (storages.length > 0) {
+      await Promise.all(storages.map(storage => storage.write(toFlush)));
+    }
     lastFlush = performance.now();
   }
 
-  // Periodic flush timer
+  // Periodic storage flush timer
   const flushTimer = setInterval(async () => {
-    try { await flush(); } catch (err) {
+    try { await flushStorage(); } catch (err) {
       log.error({ err, source: source.name }, "periodic flush error");
     }
   }, bufferIntervalMs);
@@ -198,12 +213,15 @@ async function runSource(
         }
       }
 
-      // Add to batch
-      batch.push(processed);
+      // Broadcast immediately (fire-and-forget, low latency)
+      for (const broadcast of broadcasts) {
+        try { broadcast.push(processed); } catch {}
+      }
 
-      // Threshold flush
+      // Batch for storage (flushed on interval or threshold)
+      batch.push(processed);
       if (batch.length >= maxBatchSize) {
-        await flush();
+        await flushStorage();
       }
 
       // Progress logging
@@ -218,8 +236,8 @@ async function runSource(
       }
     }
 
-    // Final flush
-    await flush();
+    // Final storage flush
+    await flushStorage();
   } finally {
     clearInterval(flushTimer);
   }

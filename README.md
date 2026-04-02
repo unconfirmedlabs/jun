@@ -37,7 +37,7 @@ processors:
     coinTypes:
       - "0x2::sui::SUI"
 
-destinations:
+storage:
   postgres:
     url: $DATABASE_URL
 ```
@@ -106,31 +106,37 @@ processors:
     # or: coinTypes: "*"  for all coin types
 ```
 
-### Destinations
+### Storage (persistent, batched, retried)
 
-| Destination | Description |
-|-------------|-------------|
+| Storage | Description |
+|---------|-------------|
 | `postgres` | Batch inserts. Event tables + balance tables (ledger + running totals). |
 | `sqlite` | Local SQLite file with WAL mode. |
-| `sse` | Server-Sent Events streaming with filtering. |
-| `nats` | NATS pub/sub with subject hierarchy. |
-| `stdout` | Console output (JSONL or formatted). |
 
 ```yaml
-destinations:
+storage:
   postgres:
     url: $DATABASE_URL
-
+  # or:
   sqlite:
     path: ./events.db
+```
 
+### Broadcast (fire-and-forget, low latency)
+
+| Broadcast | Description |
+|-----------|-------------|
+| `sse` | Server-Sent Events streaming with filtering. |
+| `nats` | NATS pub/sub with subject hierarchy. |
+| `stdout` | Console output (JSONL or formatted). Default if nothing configured. |
+
+```yaml
+broadcast:
   sse:
     port: 8080
-
   nats:
     url: nats://localhost:4222
     prefix: jun
-
   stdout:
     format: jsonl
 ```
