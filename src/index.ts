@@ -238,10 +238,17 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     }
 
     // Build handler table mapping (after fields are resolved)
+    // Handler key = table name (snake_cased). Validate no duplicates.
     handlerTables = {};
+    const tableNames = new Set<string>();
     for (const [name, handler] of Object.entries(events)) {
+      const tableName = toTableName(name);
+      if (tableNames.has(tableName)) {
+        throw new Error(`Duplicate table name "${tableName}" — two event handlers resolve to the same table. Use distinct handler keys.`);
+      }
+      tableNames.add(tableName);
       handlerTables[name] = {
-        tableName: toTableName(name),
+        tableName,
         fields: handler.fields!,
       };
     }
