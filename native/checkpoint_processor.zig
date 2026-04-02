@@ -1,13 +1,12 @@
-// Complete balance change computation from checkpoint data.
-// Single FFI call: [zstd decompress →] proto parse → effects BCS → coin BCS → diff → aggregate.
+// Unified checkpoint processor — single Zig FFI call from compressed bytes to
+// fully decoded balance changes + events.
 //
-// Two entry points:
-//   compute_balance_changes            — takes decompressed protobuf bytes
-//   compute_balance_changes_compressed — takes zstd-compressed bytes, decompresses internally
+// Entry points:
+//   process_checkpoint_compressed — compressed bytes → balance changes + events (main)
+//   compute_balance_changes       — decompressed proto → balance changes only (legacy)
+//   compute_balance_changes_compressed — compressed → balance changes only (legacy)
 //
-// Zero heap allocations for the core pipeline. Decompression uses a fixed 4MB stack buffer.
-//
-// Output format:
+// Output format for process_checkpoint_compressed:
 //   u32 num_changes
 //   Per change:
 //     u16 owner_len (always 66)
@@ -940,6 +939,349 @@ fn filterMatch(filter: []const u8, ct: []const u8) bool {
         if (std.mem.eql(u8, filter[start..], ct)) return true;
     }
     return false;
+}
+
+// --- Event BCS parser ---
+// TransactionEvents BCS layout: vec<SuiEvent>
+// SuiEvent: Address(32) + String(transactionModule) + Address(32 sender) + StructTag(type) + vec<u8>(contents)
+
+const MAX_EVENTS: u32 = 8192;
+
+fn parseEventsToOutput(buf: []const u8, events_off: u32, events_len: u32, w: *OutputWriter) u32 {
+    const raw = buf[events_off .. events_off + events_len];
+    var pos: u32 = 0;
+    const cnt = readUleb(raw, pos) orelse return 0;
+    pos = cnt.end;
+
+    var event_count: u32 = 0;
+    var ev_scratch_buf: [64 * 1024]u8 = undefined;
+
+    for (0..cnt.val) |_| {
+        if (event_count >= MAX_EVENTS) break;
+
+        // packageId: Address (32 bytes)
+        if (pos + 32 > raw.len) return event_count;
+        var pkg_hex: [66]u8 = undefined;
+        bytesToHex(raw[pos .. pos + 32], &pkg_hex);
+        pos += 32;
+
+        // transactionModule: String
+        const mod = readBcsStr(raw, pos) orelse return event_count;
+        pos = mod.end;
+
+        // sender: Address (32 bytes)
+        if (pos + 32 > raw.len) return event_count;
+        var sender_hex: [66]u8 = undefined;
+        bytesToHex(raw[pos .. pos + 32], &sender_hex);
+        pos += 32;
+
+        // type: StructTag → format to eventType string
+        var ev_scratch = Scratch{ .buf = &ev_scratch_buf, .pos = 0 };
+        // StructTag: address(32) + module(string) + name(string) + typeParams(vec<TypeTag>)
+        if (pos + 32 > raw.len) return event_count;
+        _ = ev_scratch.writeHex32(raw[pos .. pos + 32]);
+        pos += 32;
+        _ = ev_scratch.write("::");
+        const type_mod = readBcsStr(raw, pos) orelse return event_count;
+        _ = ev_scratch.write(raw[type_mod.off .. type_mod.off + type_mod.len]);
+        pos = type_mod.end;
+        _ = ev_scratch.write("::");
+        const type_name = readBcsStr(raw, pos) orelse return event_count;
+        _ = ev_scratch.write(raw[type_name.off .. type_name.off + type_name.len]);
+        pos = type_name.end;
+        const pc = readUleb(raw, pos) orelse return event_count;
+        pos = pc.end;
+        if (pc.val > 0) {
+            _ = ev_scratch.write("<");
+            for (0..pc.val) |pi| {
+                if (pi > 0) _ = ev_scratch.write(", ");
+                pos = formatTypeTag(raw, pos, &ev_scratch) orelse return event_count;
+            }
+            _ = ev_scratch.write(">");
+        }
+        const eventType = ev_scratch_buf[0..ev_scratch.pos];
+
+        // contents: vec<u8>
+        const contents = readBcsStr(raw, pos) orelse return event_count;
+        pos = contents.end;
+
+        // Write event to output
+        // packageId
+        w.writeU16(66);
+        w.writeBytes(&pkg_hex);
+        // module
+        w.writeU16(@intCast(mod.len));
+        w.writeBytes(raw[mod.off .. mod.off + mod.len]);
+        // sender
+        w.writeU16(66);
+        w.writeBytes(&sender_hex);
+        // eventType
+        w.writeU16(@intCast(eventType.len));
+        w.writeBytes(eventType);
+        // contents (copy from decompressed buffer since it's stack-allocated)
+        w.writeU32(contents.len);
+        w.writeBytes(raw[contents.off .. contents.off + contents.len]);
+
+        event_count += 1;
+    }
+
+    return event_count;
+}
+
+// --- Output writer (for the unified entry point) ---
+
+const OutputWriter = struct {
+    buf: []u8,
+    pos: u32,
+
+    fn writeU16(self: *OutputWriter, v: u16) void {
+        if (self.pos + 2 > self.buf.len) return;
+        std.mem.writeInt(u16, self.buf[self.pos..][0..2], v, .little);
+        self.pos += 2;
+    }
+    fn writeU32(self: *OutputWriter, v: u32) void {
+        if (self.pos + 4 > self.buf.len) return;
+        std.mem.writeInt(u32, self.buf[self.pos..][0..4], v, .little);
+        self.pos += 4;
+    }
+    fn writeI64(self: *OutputWriter, v: i64) void {
+        if (self.pos + 8 > self.buf.len) return;
+        std.mem.writeInt(i64, self.buf[self.pos..][0..8], v, .little);
+        self.pos += 8;
+    }
+    fn writeBytes(self: *OutputWriter, data: []const u8) void {
+        if (self.pos + data.len > self.buf.len) return;
+        @memcpy(self.buf[self.pos..][0..data.len], data);
+        self.pos += @intCast(data.len);
+    }
+};
+
+// --- Unified entry point ---
+// Output format:
+//   u32 num_balance_changes
+//   u32 num_events
+//   u64 timestamp_ms (from checkpoint summary BCS)
+//   Balance changes: (same as compute_balance_changes)
+//   Events:
+//     Per event:
+//       u16 packageId_len + packageId
+//       u16 module_len + module
+//       u16 sender_len + sender
+//       u16 eventType_len + eventType
+//       u32 contents_len + contents
+
+export fn process_checkpoint_compressed(
+    compressed_ptr: [*]const u8,
+    compressed_len: u32,
+    output_ptr: [*]u8,
+    output_capacity: u32,
+    filter_ptr: [*]const u8,
+    filter_len: u32,
+) u32 {
+    var decompress_buf: [DECOMPRESS_BUF_SIZE]u8 = undefined;
+    const zresult = zstd_c.ZSTD_decompress(&decompress_buf, DECOMPRESS_BUF_SIZE, compressed_ptr, compressed_len);
+    if (zstd_c.ZSTD_isError(zresult) != 0) return 0;
+    const buf = decompress_buf[0..zresult];
+
+    // Working memory
+    var created: [MAX_CREATED][32]u8 = undefined;
+    var created_n: u32 = 0;
+    var deleted: [MAX_DELETED][32]u8 = undefined;
+    var deleted_n: u32 = 0;
+    var coins: [MAX_COINS]CoinSnap = undefined;
+    var coins_n: u32 = 0;
+    var agg: [MAX_AGG]AggEntry = undefined;
+    for (&agg) |*e| e.occupied = false;
+    var scratch_buf: [SCRATCH_SIZE]u8 = undefined;
+    var scratch = Scratch{ .buf = &scratch_buf, .pos = 0 };
+    const filter = if (filter_len > 0) filter_ptr[0..filter_len] else @as([]const u8, &.{});
+
+    // Proto scan: extract effects, events, objects, summary
+    var eff_slices: [MAX_TX]struct { off: u32, len: u32 } = undefined;
+    var num_eff: u32 = 0;
+    var evt_slices: [MAX_TX]struct { off: u32, len: u32 } = undefined;
+    var num_evt: u32 = 0;
+    var obj_entries: [MAX_OBJECTS]struct { bcs_off: u32, bcs_len: u32, id_off: u32, id_len: u32, version: u64 } = undefined;
+    var num_obj: u32 = 0;
+    var summary_bcs_off: u32 = 0;
+    var summary_bcs_len: u32 = 0;
+
+    var pos: u32 = 0;
+    while (pos < buf.len) {
+        const t = readVarint(buf, pos) orelse return 0;
+        pos = t.end;
+        const fn_: u32 = @intCast(t.val >> 3);
+        const wt: u3 = @intCast(t.val & 7);
+        if (wt == 0) {
+            pos = skipPbField(buf, pos, 0) orelse return 0;
+        } else if (wt == 2) {
+            const ld = readLen(buf, pos) orelse return 0;
+            pos = ld.end;
+            if (fn_ == 3) { // summary
+                if (bcsWrapper(buf, ld.off, ld.len)) |s| {
+                    summary_bcs_off = s.off;
+                    summary_bcs_len = s.len;
+                }
+            } else if (fn_ == 6) { // transaction
+                const txend = ld.off + ld.len;
+                var tp = ld.off;
+                while (tp < txend) {
+                    const tt = readVarint(buf, tp) orelse return 0;
+                    tp = tt.end;
+                    if (@as(u3, @intCast(tt.val & 7)) == 2) {
+                        const tld = readLen(buf, tp) orelse return 0;
+                        tp = tld.end;
+                        const tfn: u32 = @intCast(tt.val >> 3);
+                        if (tfn == 4) { // effects
+                            if (bcsWrapper(buf, tld.off, tld.len)) |s| {
+                                if (num_eff < MAX_TX) { eff_slices[num_eff] = .{ .off = s.off, .len = s.len }; num_eff += 1; }
+                            }
+                        } else if (tfn == 5) { // events
+                            if (bcsWrapper(buf, tld.off, tld.len)) |s| {
+                                if (num_evt < MAX_TX) { evt_slices[num_evt] = .{ .off = s.off, .len = s.len }; num_evt += 1; }
+                            }
+                        }
+                    } else {
+                        tp = skipPbField(buf, tp, @intCast(tt.val & 7)) orelse return 0;
+                    }
+                }
+            } else if (fn_ == 7) { // objects
+                const oend = ld.off + ld.len;
+                var op = ld.off;
+                while (op < oend) {
+                    const ot = readVarint(buf, op) orelse return 0;
+                    op = ot.end;
+                    if (@as(u3, @intCast(ot.val & 7)) == 2) {
+                        const old = readLen(buf, op) orelse return 0;
+                        op = old.end;
+                        if (@as(u32, @intCast(ot.val >> 3)) == 1) {
+                            var o_bcs_off: u32 = 0; var o_bcs_len: u32 = 0;
+                            var o_id_off: u32 = 0; var o_id_len: u32 = 0;
+                            var o_ver: u64 = 0;
+                            const oiend = old.off + old.len;
+                            var oip = old.off;
+                            while (oip < oiend) {
+                                const oit = readVarint(buf, oip) orelse return 0;
+                                oip = oit.end;
+                                const ofn: u32 = @intCast(oit.val >> 3);
+                                const owt: u3 = @intCast(oit.val & 7);
+                                if (owt == 2) {
+                                    const oild = readLen(buf, oip) orelse return 0;
+                                    oip = oild.end;
+                                    if (ofn == 1) { if (bcsValue(buf, oild.off, oild.len)) |s| { o_bcs_off = s.off; o_bcs_len = s.len; } }
+                                    else if (ofn == 2) { o_id_off = oild.off; o_id_len = oild.len; }
+                                } else if (owt == 0) {
+                                    const vr = readVarint(buf, oip) orelse return 0;
+                                    oip = vr.end;
+                                    if (ofn == 3) o_ver = vr.val;
+                                } else { oip = skipPbField(buf, oip, owt) orelse return 0; }
+                            }
+                            if (o_bcs_len > 0 and num_obj < MAX_OBJECTS) {
+                                obj_entries[num_obj] = .{ .bcs_off = o_bcs_off, .bcs_len = o_bcs_len, .id_off = o_id_off, .id_len = o_id_len, .version = o_ver };
+                                num_obj += 1;
+                            }
+                        }
+                    } else { op = skipPbField(buf, op, @intCast(ot.val & 7)) orelse return 0; }
+                }
+            }
+        } else { pos = skipPbField(buf, pos, wt) orelse return 0; }
+    }
+
+    // Extract timestamp from summary BCS (field: timestampMs at BCS offset 6*8 + 2*vec)
+    // CheckpointSummary BCS: epoch(u64) + seqNum(u64) + networkTotalTx(u64) + contentDigest(vec<u8>) + prevDigest(option<vec<u8>>) + gasSummary(4*u64) + timestampMs(u64)
+    var timestamp_ms: u64 = 0;
+    if (summary_bcs_len > 0) {
+        const sbcs = buf[summary_bcs_off .. summary_bcs_off + summary_bcs_len];
+        var sp: u32 = 24; // skip epoch(8) + seqNum(8) + networkTotalTx(8)
+        sp = skipVecU8(sbcs, sp) orelse 0; // contentDigest
+        if (sp > 0 and sp < sbcs.len) {
+            // option<vec<u8>> previousDigest
+            if (sbcs[sp] == 1) { sp += 1; sp = skipVecU8(sbcs, sp) orelse 0; } else sp += 1;
+        }
+        if (sp > 0) sp += 32; // gasSummary (4*u64)
+        if (sp > 0 and sp + 8 <= sbcs.len) {
+            timestamp_ms = std.mem.readInt(u64, sbcs[sp..][0..8], .little);
+        }
+    }
+
+    // Phase 2: Parse effects (balance computation)
+    for (0..num_eff) |i| {
+        if (!parseEffects(buf, eff_slices[i].off, eff_slices[i].len, &created, &created_n, &deleted, &deleted_n, &agg, &scratch)) return 0;
+    }
+
+    // Phase 3: Parse coin objects
+    for (0..num_obj) |i| {
+        const oe = obj_entries[i];
+        const raw = buf[oe.bcs_off .. oe.bcs_off + oe.bcs_len];
+        if (raw.len < 3 or raw[0] != 0 or (raw[1] != 1 and raw[1] != 3)) continue;
+        var snap = parseCoinObject(raw, &scratch) orelse continue;
+        if (filter.len > 0) {
+            const ct = scratch.buf[snap.ct_off .. snap.ct_off + snap.ct_len];
+            if (!filterMatch(filter, ct)) { scratch.pos = snap.ct_off; continue; }
+        }
+        if (oe.id_len > 0) { if (!hexDecode(buf[oe.id_off .. oe.id_off + oe.id_len], &snap.obj_id)) continue; }
+        snap.version = oe.version;
+        if (coins_n < MAX_COINS) { coins[coins_n] = snap; coins_n += 1; }
+    }
+
+    // Phase 4: Diff
+    sortCoins(coins[0..coins_n]);
+    sortIds(created[0..created_n]);
+    sortIds(deleted[0..deleted_n]);
+    var ci: u32 = 0;
+    while (ci < coins_n) {
+        var group_end = ci + 1;
+        while (group_end < coins_n and std.mem.eql(u8, &coins[ci].obj_id, &coins[group_end].obj_id)) group_end += 1;
+        if (group_end - ci >= 2) {
+            const input = coins[ci]; const output = coins[group_end - 1];
+            if (input.has_owner and output.has_owner and std.mem.eql(u8, &input.owner, &output.owner)) {
+                addDelta(&agg, input.owner, input.ct_off, input.ct_len, @as(i128, output.balance) - @as(i128, input.balance), &scratch_buf);
+            } else {
+                if (input.has_owner) addDelta(&agg, input.owner, input.ct_off, input.ct_len, -@as(i128, input.balance), &scratch_buf);
+                if (output.has_owner) addDelta(&agg, output.owner, output.ct_off, output.ct_len, @as(i128, output.balance), &scratch_buf);
+            }
+        } else {
+            const snap = coins[ci];
+            if (snap.has_owner) {
+                if (bsearchId(created[0..created_n], snap.obj_id)) addDelta(&agg, snap.owner, snap.ct_off, snap.ct_len, @as(i128, snap.balance), &scratch_buf)
+                else if (bsearchId(deleted[0..deleted_n], snap.obj_id)) addDelta(&agg, snap.owner, snap.ct_off, snap.ct_len, -@as(i128, snap.balance), &scratch_buf);
+            }
+        }
+        ci = group_end;
+    }
+
+    // Phase 5: Write output
+    const out = output_ptr[0..output_capacity];
+    var w = OutputWriter{ .buf = out, .pos = 16 }; // skip header (4+4+8 = 16)
+
+    // Write balance changes
+    var bal_count: u32 = 0;
+    for (&agg) |*e| {
+        if (!e.occupied or e.delta == 0) continue;
+        const ct = scratch_buf[e.key.ct_off .. e.key.ct_off + e.key.ct_len];
+        w.writeU16(66);
+        var owner_hex: [66]u8 = undefined;
+        bytesToHex(&e.key.owner, &owner_hex);
+        w.writeBytes(&owner_hex);
+        w.writeU16(@intCast(ct.len));
+        w.writeBytes(ct);
+        const amt: i64 = @intCast(@min(@max(e.delta, std.math.minInt(i64)), std.math.maxInt(i64)));
+        w.writeI64(amt);
+        bal_count += 1;
+    }
+
+    // Write events
+    var total_events: u32 = 0;
+    for (0..num_evt) |i| {
+        total_events += parseEventsToOutput(buf, evt_slices[i].off, evt_slices[i].len, &w);
+    }
+
+    // Write header (16 bytes: u32 + u32 + u64)
+    std.mem.writeInt(u32, out[0..4], bal_count, .little);
+    std.mem.writeInt(u32, out[4..8], total_events, .little);
+    std.mem.writeInt(u64, out[8..16], timestamp_ms, .little);
+
+    return w.pos;
 }
 
 // --- Compressed entry point (links against system libzstd) ---
