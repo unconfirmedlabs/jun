@@ -273,11 +273,13 @@ export async function decodeCompressedCheckpoint(
     }
 
     // Extract balance changes from protobuf (field 8 on ExecutedTransaction)
-    const balanceChanges = (tx.balanceChanges ?? []).map((bc: any) => ({
-      address: bc.address ?? "",
-      coinType: bc.coinType ?? "",
-      amount: bc.amount ?? "0",
-    }));
+    const balanceChanges = (tx.balanceChanges ?? [])
+      .filter((bc: any) => bc.address && bc.coinType)
+      .map((bc: any) => ({
+        address: bc.address,
+        coinType: bc.coinType,
+        amount: bc.amount ?? "0",
+      }));
 
     const txResult: any = {
       digest,

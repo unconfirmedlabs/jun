@@ -9,7 +9,7 @@
         "@grpc/proto-loader": "^0.8.0",
         "@modelcontextprotocol/sdk": "^1.28.0",
         "@mysten/bcs": "^2.0.3",
-        "@mysten/sui": "^2.13.0",
+        "@mysten/sui": "^2.13.4",
         "@noble/curves": "^1.9.0",
         "@noble/hashes": "^1.7.0",
         "@unconfirmed/kei": "0.0.9",
@@ -55,7 +55,7 @@
 
     "@mysten/bcs": ["@mysten/bcs@2.0.3", "", { "dependencies": { "@mysten/utils": "^0.3.1", "@scure/base": "^2.0.0" } }, ""],
 
-    "@mysten/sui": ["@mysten/sui@2.13.0", "", { "dependencies": { "@graphql-typed-document-node/core": "^3.2.0", "@mysten/bcs": "^2.0.3", "@mysten/utils": "^0.3.1", "@noble/curves": "^2.0.1", "@noble/hashes": "^2.0.1", "@protobuf-ts/grpcweb-transport": "^2.11.1", "@protobuf-ts/runtime": "^2.11.1", "@protobuf-ts/runtime-rpc": "^2.11.1", "@scure/base": "^2.0.0", "@scure/bip32": "^2.0.1", "@scure/bip39": "^2.0.1", "gql.tada": "^1.9.0", "graphql": "^16.12.0", "poseidon-lite": "0.2.1", "valibot": "^1.2.0" } }, "sha512-GG/XBUqrplPM1jEFMCiv7xA15qo5laaVmCVcdsZsJhzZInDJhxgV7IxFvkgrzA8bwIMhPMAA+m0CTXxznaS3eA=="],
+    "@mysten/sui": ["@mysten/sui@2.13.4", "", { "dependencies": { "@graphql-typed-document-node/core": "^3.2.0", "@mysten/bcs": "^2.0.3", "@mysten/utils": "^0.3.1", "@noble/curves": "^2.0.1", "@noble/hashes": "^2.0.1", "@protobuf-ts/grpcweb-transport": "^2.11.1", "@protobuf-ts/runtime": "^2.11.1", "@protobuf-ts/runtime-rpc": "^2.11.1", "@scure/base": "^2.0.0", "@scure/bip32": "^2.0.1", "@scure/bip39": "^2.0.1", "gql.tada": "^1.9.0", "graphql": "^16.12.0", "poseidon-lite": "0.2.1", "valibot": "^1.2.0" } }, "sha512-PoUytbQCpQQOobwaI6q1/V7jhgezf5CxsRvDZ2xPOoa2zy06EQOz03Q/iwL41DFmvoYSOmFM8Rgwn86tLBwlgg=="],
 
     "@mysten/utils": ["@mysten/utils@0.3.1", "", { "dependencies": { "@scure/base": "^2.0.0" } }, ""],
 
