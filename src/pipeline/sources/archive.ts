@@ -9,6 +9,14 @@
  * as soon as the next sequential one is ready — no window boundaries.
  */
 import { fetchCompressed } from "../../archive.ts";
+
+/** Direct fetch from archive — no cache read or write. */
+async function fetchDirect(seq: bigint, archiveUrl: string, signal?: AbortSignal): Promise<Uint8Array> {
+  const url = `${archiveUrl}/${seq}.binpb.zst`;
+  const resp = await fetch(url, signal ? { signal } : undefined);
+  if (!resp.ok) throw new Error(`Archive fetch failed: ${resp.status} for checkpoint ${seq}`);
+  return new Uint8Array(await resp.arrayBuffer());
+}
 import { createCheckpointDecoderPool, type CheckpointDecoderPool } from "../../checkpoint-decoder-pool.ts";
 import type { Source, Checkpoint } from "../types.ts";
 import { createLogger } from "../../logger.ts";
@@ -114,7 +122,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
       // Launch a single fetch+decode job
       async function processCheckpoint(seq: bigint): Promise<void> {
         try {
-          const compressed = await fetchCompressed(seq, config.archiveUrl);
+          const compressed = await fetchDirect(seq, config.archiveUrl);
           if (stopped) return;
 
           const result = await pool.decode(seq, compressed);
