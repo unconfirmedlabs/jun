@@ -43,10 +43,9 @@ interface PendingJob {
 // Raw output parser (reads Zig binary format on main thread)
 // ---------------------------------------------------------------------------
 
+const textDecoder = new TextDecoder();
 function readStr(buf: Uint8Array, pos: number, len: number): string {
-  let s = "";
-  for (let i = 0; i < len; i++) s += String.fromCharCode(buf[pos + i]!);
-  return s;
+  return textDecoder.decode(buf.subarray(pos, pos + len));
 }
 
 function parseRawOutput(raw: Uint8Array): DecodeResult {
