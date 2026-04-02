@@ -2693,7 +2693,11 @@ program
 // run — Run indexer from YAML config file
 // ---------------------------------------------------------------------------
 
-program
+const indexerCmd = program
+  .command("indexer")
+  .description("Event indexer commands");
+
+indexerCmd
   .command("run [config]")
   .description("Run indexer from a YAML config file or remote S3 URL")
   .option("--config-url <url>", "fetch config from S3 (s3://bucket/key) or HTTPS URL")
@@ -2767,6 +2771,125 @@ program
 
       natsTarget?.shutdown();
       viewManager?.stop();
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// indexer generate-config — interactive config generator
+// ---------------------------------------------------------------------------
+
+indexerCmd
+  .command("generate-config")
+  .description("Interactively generate a jun indexer YAML config")
+  .option("--output <path>", "write config to file (default: stdout)")
+  .action(async (opts: { output?: string }) => {
+    try {
+      const readline = await import("readline");
+      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      const ask = (question: string): Promise<string> =>
+        new Promise((resolve) => rl.question(question, resolve));
+
+      console.error("Jun Indexer Config Generator\n");
+
+      // Network
+      const network = await ask("Network (mainnet/testnet) [testnet]: ") || "testnet";
+
+      // gRPC URL
+      const defaultGrpc = network === "mainnet"
+        ? "fullnode.mainnet.sui.io:443"
+        : "fullnode.testnet.sui.io:443";
+      const grpcUrl = await ask(`gRPC URL [${defaultGrpc}]: `) || defaultGrpc;
+
+      // Database
+      const database = await ask("Database URL (or $ENV_VAR) [$DATABASE_URL]: ") || "$DATABASE_URL";
+
+      // Start checkpoint
+      const startCheckpointRaw = await ask("Start checkpoint (number, epoch:N, timestamp:ISO, package:0x...) [none]: ");
+
+      // Events
+      const eventTypes: { name: string; type: string }[] = [];
+      console.error("\nEvent handlers (press Enter with empty type to finish):");
+      while (true) {
+        const eventType = await ask("  Event type (0xPKG::module::EventStruct): ");
+        if (!eventType.trim()) break;
+
+        // Derive a default handler name from the struct name
+        const parts = eventType.split("::");
+        const structName = parts[parts.length - 1] ?? "Event";
+        const defaultName = structName
+          .replace(/Event$/, "")
+          .replace(/([A-Z])/g, "_$1")
+          .toLowerCase()
+          .replace(/^_/, "");
+        const handlerName = await ask(`  Handler/table name [${defaultName}]: `) || defaultName;
+
+        eventTypes.push({ name: handlerName, type: eventType });
+      }
+
+      // Balances
+      const balanceInput = await ask("\nBalance coin types (comma-separated, * for all, empty to skip): ");
+      let balanceCoinTypes: string[] | "*" | null = null;
+      if (balanceInput.trim() === "*") {
+        balanceCoinTypes = "*";
+      } else if (balanceInput.trim()) {
+        balanceCoinTypes = balanceInput.split(",").map((s: string) => s.trim()).filter(Boolean);
+      }
+
+      // Serve
+      const servePort = await ask("\nHTTP server port (empty to disable): ");
+
+      rl.close();
+
+      // Build YAML
+      const lines: string[] = [];
+      lines.push(`network: ${network}`);
+      lines.push(`grpcUrl: ${grpcUrl}`);
+      lines.push(`database: ${database}`);
+      if (startCheckpointRaw.trim()) {
+        const isNumeric = /^\d+$/.test(startCheckpointRaw.trim());
+        lines.push(`startCheckpoint: ${isNumeric ? startCheckpointRaw.trim() : `"${startCheckpointRaw.trim()}"`}`);
+      }
+      lines.push(`mode: all`);
+
+      if (servePort.trim()) {
+        lines.push(`serve:`);
+        lines.push(`  port: ${servePort.trim()}`);
+      }
+
+      if (eventTypes.length > 0) {
+        lines.push(``);
+        lines.push(`events:`);
+        for (const event of eventTypes) {
+          lines.push(`  ${event.name}:`);
+          lines.push(`    type: "${event.type}"`);
+        }
+      }
+
+      if (balanceCoinTypes) {
+        lines.push(``);
+        lines.push(`balances:`);
+        if (balanceCoinTypes === "*") {
+          lines.push(`  coinTypes: "*"`);
+        } else {
+          lines.push(`  coinTypes:`);
+          for (const coinType of balanceCoinTypes) {
+            lines.push(`    - "${coinType}"`);
+          }
+        }
+      }
+
+      lines.push(``);
+      const yaml = lines.join("\n");
+
+      if (opts.output) {
+        const { writeFileSync } = await import("fs");
+        writeFileSync(opts.output, yaml);
+        console.error(`\nConfig written to ${opts.output}`);
+      } else {
+        console.log(yaml);
+      }
     } catch (err) {
       cliError(err);
     }
