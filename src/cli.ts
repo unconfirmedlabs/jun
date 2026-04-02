@@ -2707,7 +2707,8 @@ indexerCmd
   .option("--serve <port>", "start HTTP server on port")
   .option("--no-serve", "disable HTTP server even if set in config")
   .option("--workers <count>", "number of decoder worker threads (default: auto)")
-  .option("--verbose", "print every indexed event and balance change")
+  .option("--headless", "suppress interactive output (JSON logs only, for production)")
+  .option("--verbose", "enable debug-level JSON logs alongside interactive output")
   .action(async (configFile: string | undefined, opts: {
     configUrl?: string;
     mode?: string;
@@ -2715,6 +2716,7 @@ indexerCmd
     serve?: string;
     noServe?: boolean;
     workers?: string;
+    headless?: boolean;
     verbose?: boolean;
   }) => {
     try {
@@ -2746,6 +2748,7 @@ indexerCmd
       }
       const runOpts = mergeRunOptions(yamlRunOpts, opts);
       if (configUrl) runOpts.configUrl = configUrl;
+      if (opts.headless) runOpts.headless = true;
       if (opts.verbose) runOpts.verbose = true;
 
       // Set up materialized views (separate sql connection)

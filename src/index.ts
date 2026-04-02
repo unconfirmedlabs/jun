@@ -78,7 +78,9 @@ export interface RunOptions {
   broadcastTargets?: BroadcastTarget[];
   /** Remote config URL for /admin/reload without body */
   configUrl?: string;
-  /** Print every indexed event and balance change to stdout */
+  /** Suppress pretty output (banner + event printing). JSON logs only. For production/CI. */
+  headless?: boolean;
+  /** Enable debug-level JSON logs alongside pretty output. */
   verbose?: boolean;
 }
 
@@ -626,6 +628,20 @@ export function defineIndexer(config: IndexerConfig): Indexer {
 
     async run(options?: RunOptions): Promise<void> {
       const mode = options?.mode ?? "all";
+
+      const headless = options?.headless ?? false;
+      const interactive = !headless;
+
+      // Default: suppress JSON logs (pretty output only)
+      // --verbose: debug JSON logs + pretty output
+      // --headless: JSON logs only, no pretty output
+      if (!headless && !options?.verbose) {
+        log.level = "silent";
+      }
+      if (options?.verbose) {
+        log.level = "debug";
+      }
+
       const { sql, state, output, processor: initialProcessor, grpcClient } = await init();
       setupSignalHandlers();
 
@@ -680,10 +696,8 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         log.info({ coinTypes: balancesConfig.coinTypes }, "balance indexing enabled");
       }
 
-      const verbose = options?.verbose ?? false;
-
-      // Verbose: print startup config summary
-      if (verbose) {
+      // Interactive: print startup config summary + indexed events
+      if (interactive) {
         console.log("\n=== Jun Indexer ===");
         console.log(`Network:    ${network}`);
         console.log(`gRPC:       ${grpcUrl}`);
@@ -739,9 +753,9 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         },
         onEvents: (events) => {
           broadcastManager.broadcastDecodedEvents(events, "live");
-          if (verbose) events.forEach(event => verboseEvent(event, "live"));
+          if (interactive) events.forEach(event => verboseEvent(event, "live"));
         },
-        onBalanceChanges: verbose ? (changes) => changes.forEach(change => verboseBalance(change, "live")) : undefined,
+        onBalanceChanges: interactive ? (changes) => changes.forEach(change => verboseBalance(change, "live")) : undefined,
       }, liveBufferLog, balanceWriter);
 
       const throttleLog = log.child({ component: "throttle" });
@@ -767,9 +781,9 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         },
         onEvents: (events) => {
           broadcastManager.broadcastDecodedEvents(events, "backfill");
-          if (verbose) events.forEach(event => verboseEvent(event, "backfill"));
+          if (interactive) events.forEach(event => verboseEvent(event, "backfill"));
         },
-        onBalanceChanges: verbose ? (changes) => changes.forEach(change => verboseBalance(change, "backfill")) : undefined,
+        onBalanceChanges: interactive ? (changes) => changes.forEach(change => verboseBalance(change, "backfill")) : undefined,
       }, backfillBufferLog, balanceWriter);
 
       // Start buffer timers
