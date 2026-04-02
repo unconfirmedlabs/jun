@@ -5,20 +5,22 @@
 # Indexes events and balance changes to Postgres, streams to SSE clients
 # and NATS subscribers simultaneously.
 #
+# Replace the event type below with your contract's event type.
+#
 # SSE: curl -N http://localhost:8080/stream/events
 # NATS: nats sub "jun.events.decoded.*"
 
 sources:
   live:
-    grpc: fullnode.testnet.sui.io:443
+    grpc: fullnode.mainnet.sui.io:443
   backfill:
-    archive: https://checkpoints.testnet.sui.io
-    from: 316756645
+    archive: https://checkpoints.mainnet.sui.io
+    from: 260000000
 
 processors:
   events:
-    record_pressed:
-      type: "0x10ad578f5b202fd137546f2e7bc12c319dfef98871feeb429506c4b3d62bf702::pressing::RecordPressedEvent"
+    my_event:
+      type: "0xPKG::module::EventStruct"
   balances:
     coinTypes:
       - "0x2::sui::SUI"
