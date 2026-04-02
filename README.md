@@ -276,6 +276,36 @@ jun/logger                              createLogger
 jun/normalize                           normalizeSuiAddress, normalizeCoinType
 ```
 
+## Performance
+
+Benchmarked on 5,000 mainnet checkpoints (260618000-260622999) with balance tracking enabled for all coin types. Full pipeline: zstd decompress + protobuf decode + BCS event decode + balance computation.
+
+### Apple M5 (10 cores: 4P + 6E)
+
+| Mode | Throughput |
+|------|-----------|
+| Single-thread (balance only) | 3,424 cp/s |
+| 1 worker (full pipeline) | 464 cp/s |
+| 4 workers | 1,544 cp/s |
+| 8 workers | **1,917 cp/s** |
+
+### AMD Ryzen 9 9950X3D (32 threads: 16C/32T)
+
+| Mode | Throughput |
+|------|-----------|
+| Single-thread (balance only) | 1,994 cp/s |
+| 1 worker (full pipeline) | 363 cp/s |
+| 4 workers | 1,111 cp/s |
+| 8 workers | **1,687 cp/s** |
+| 16 workers | 1,375 cp/s |
+| 32 workers | 1,285 cp/s |
+
+**Notes:**
+- "Full pipeline" includes event BCS decode (164K events) + balance computation (35K balance changes) per run. Single-thread balance-only skips event decode.
+- Sweet spot is 8 workers on both platforms. Beyond that, Bun Worker IPC overhead and GC pressure cause regression.
+- Custom BCS parsers provide 4.8-6.9x speedup over native `@mysten/sui/bcs` depending on platform.
+- Set `JUN_NATIVE_BCS=1` to fall back to native parsers for debugging.
+
 ## Architecture
 
 ```
