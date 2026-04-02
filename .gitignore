@@ -46,3 +46,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .gstack/
 native/libproto_parser.*
 native/*.o
+.zig-cache
+native/*.dylib
+native/*.so
+native/*.o

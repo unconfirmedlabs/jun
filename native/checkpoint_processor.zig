@@ -691,242 +691,6 @@ fn bsearchId(ids: [][32]u8, needle: [32]u8) bool {
     return false;
 }
 
-// --- Main entry ---
-
-export fn compute_balance_changes(
-    input_ptr: [*]const u8,
-    input_len: u32,
-    output_ptr: [*]u8,
-    output_capacity: u32,
-    filter_ptr: [*]const u8,
-    filter_len: u32,
-) u32 {
-    const buf = input_ptr[0..input_len];
-
-    // Working memory (stack)
-    var created: [MAX_CREATED][32]u8 = undefined;
-    var created_n: u32 = 0;
-    var deleted: [MAX_DELETED][32]u8 = undefined;
-    var deleted_n: u32 = 0;
-    var coins: [MAX_COINS]CoinSnap = undefined;
-    var coins_n: u32 = 0;
-    var agg: [MAX_AGG]AggEntry = undefined;
-    for (&agg) |*e| e.occupied = false;
-    var scratch_buf: [SCRATCH_SIZE]u8 = undefined;
-    var scratch = Scratch{ .buf = &scratch_buf, .pos = 0 };
-
-    const filter = if (filter_len > 0) filter_ptr[0..filter_len] else @as([]const u8, &.{});
-
-    // Phase 1: Proto parse — extract effects BCS + object data
-    var eff_slices: [MAX_TX]struct { off: u32, len: u32 } = undefined;
-    var num_eff: u32 = 0;
-
-    var obj_entries: [MAX_OBJECTS]struct { bcs_off: u32, bcs_len: u32, id_off: u32, id_len: u32, version: u64 } = undefined;
-    var num_obj: u32 = 0;
-
-    // Scan Checkpoint
-    var pos: u32 = 0;
-    while (pos < buf.len) {
-        const t = readVarint(buf, pos) orelse return 0;
-        pos = t.end;
-        const fn_: u32 = @intCast(t.val >> 3);
-        const wt: u3 = @intCast(t.val & 7);
-        if (wt == 0) {
-            pos = skipPbField(buf, pos, 0) orelse return 0;
-        } else if (wt == 2) {
-            const ld = readLen(buf, pos) orelse return 0;
-            pos = ld.end;
-            if (fn_ == 6) { // transaction
-                // Extract effects.bcs.value
-                const end = ld.off + ld.len;
-                var tp = ld.off;
-                while (tp < end) {
-                    const tt = readVarint(buf, tp) orelse return 0;
-                    tp = tt.end;
-                    if (@as(u3, @intCast(tt.val & 7)) == 2) {
-                        const tld = readLen(buf, tp) orelse return 0;
-                        tp = tld.end;
-                        if (@as(u32, @intCast(tt.val >> 3)) == 4) { // effects field
-                            if (bcsWrapper(buf, tld.off, tld.len)) |s| {
-                                if (num_eff < MAX_TX) {
-                                    eff_slices[num_eff] = .{ .off = s.off, .len = s.len };
-                                    num_eff += 1;
-                                }
-                            }
-                        }
-                    } else {
-                        tp = skipPbField(buf, tp, @intCast(tt.val & 7)) orelse return 0;
-                    }
-                }
-            } else if (fn_ == 7) { // objects (ObjectSet)
-                const oend = ld.off + ld.len;
-                var op = ld.off;
-                while (op < oend) {
-                    const ot = readVarint(buf, op) orelse return 0;
-                    op = ot.end;
-                    if (@as(u3, @intCast(ot.val & 7)) == 2) {
-                        const old = readLen(buf, op) orelse return 0;
-                        op = old.end;
-                        if (@as(u32, @intCast(ot.val >> 3)) == 1) { // Object message
-                            // Parse Object fields
-                            var o_bcs_off: u32 = 0;
-                            var o_bcs_len: u32 = 0;
-                            var o_id_off: u32 = 0;
-                            var o_id_len: u32 = 0;
-                            var o_ver: u64 = 0;
-                            const oiend = old.off + old.len;
-                            var oip = old.off;
-                            while (oip < oiend) {
-                                const oit = readVarint(buf, oip) orelse return 0;
-                                oip = oit.end;
-                                const ofn: u32 = @intCast(oit.val >> 3);
-                                const owt: u3 = @intCast(oit.val & 7);
-                                if (owt == 2) {
-                                    const oild = readLen(buf, oip) orelse return 0;
-                                    oip = oild.end;
-                                    if (ofn == 1) {
-                                        if (bcsValue(buf, oild.off, oild.len)) |s| {
-                                            o_bcs_off = s.off;
-                                            o_bcs_len = s.len;
-                                        }
-                                    } else if (ofn == 2) {
-                                        o_id_off = oild.off;
-                                        o_id_len = oild.len;
-                                    }
-                                } else if (owt == 0) {
-                                    const vr = readVarint(buf, oip) orelse return 0;
-                                    oip = vr.end;
-                                    if (ofn == 3) o_ver = vr.val;
-                                } else {
-                                    oip = skipPbField(buf, oip, owt) orelse return 0;
-                                }
-                            }
-                            if (o_bcs_len > 0 and num_obj < MAX_OBJECTS) {
-                                obj_entries[num_obj] = .{
-                                    .bcs_off = o_bcs_off,
-                                    .bcs_len = o_bcs_len,
-                                    .id_off = o_id_off,
-                                    .id_len = o_id_len,
-                                    .version = o_ver,
-                                };
-                                num_obj += 1;
-                            }
-                        }
-                    } else {
-                        op = skipPbField(buf, op, @intCast(ot.val & 7)) orelse return 0;
-                    }
-                }
-            }
-        } else {
-            pos = skipPbField(buf, pos, wt) orelse return 0;
-        }
-    }
-
-    // Phase 2: Parse effects
-    for (0..num_eff) |i| {
-        if (!parseEffects(buf, eff_slices[i].off, eff_slices[i].len, &created, &created_n, &deleted, &deleted_n, &agg, &scratch)) return 0;
-    }
-
-    // Phase 3: Parse coin objects
-    for (0..num_obj) |i| {
-        const oe = obj_entries[i];
-        const raw = buf[oe.bcs_off .. oe.bcs_off + oe.bcs_len];
-        if (raw.len < 3 or raw[0] != 0 or (raw[1] != 1 and raw[1] != 3)) continue;
-
-        var snap = parseCoinObject(raw, &scratch) orelse continue;
-
-        // Apply coin type filter
-        if (filter.len > 0) {
-            const ct = scratch.buf[snap.ct_off .. snap.ct_off + snap.ct_len];
-            if (!filterMatch(filter, ct)) {
-                scratch.pos = snap.ct_off; // rewind scratch
-                continue;
-            }
-        }
-
-        // Decode objectId from hex string
-        if (oe.id_len > 0) {
-            if (!hexDecode(buf[oe.id_off .. oe.id_off + oe.id_len], &snap.obj_id)) continue;
-        }
-        snap.version = oe.version;
-
-        if (coins_n < MAX_COINS) {
-            coins[coins_n] = snap;
-            coins_n += 1;
-        }
-    }
-
-    // Phase 4: Diff
-    sortCoins(coins[0..coins_n]);
-    sortIds(created[0..created_n]);
-    sortIds(deleted[0..deleted_n]);
-
-    var ci: u32 = 0;
-    while (ci < coins_n) {
-        // Find group with same object_id
-        var group_end = ci + 1;
-        while (group_end < coins_n and std.mem.eql(u8, &coins[ci].obj_id, &coins[group_end].obj_id)) {
-            group_end += 1;
-        }
-
-        if (group_end - ci >= 2) {
-            const input = coins[ci];
-            const output = coins[group_end - 1];
-            if (input.has_owner and output.has_owner and std.mem.eql(u8, &input.owner, &output.owner)) {
-                const delta = @as(i128, output.balance) - @as(i128, input.balance);
-                addDelta(&agg, input.owner, input.ct_off, input.ct_len, delta, &scratch_buf);
-            } else {
-                if (input.has_owner) addDelta(&agg, input.owner, input.ct_off, input.ct_len, -@as(i128, input.balance), &scratch_buf);
-                if (output.has_owner) addDelta(&agg, output.owner, output.ct_off, output.ct_len, @as(i128, output.balance), &scratch_buf);
-            }
-        } else {
-            const snap = coins[ci];
-            if (snap.has_owner) {
-                if (bsearchId(created[0..created_n], snap.obj_id)) {
-                    addDelta(&agg, snap.owner, snap.ct_off, snap.ct_len, @as(i128, snap.balance), &scratch_buf);
-                } else if (bsearchId(deleted[0..deleted_n], snap.obj_id)) {
-                    addDelta(&agg, snap.owner, snap.ct_off, snap.ct_len, -@as(i128, snap.balance), &scratch_buf);
-                }
-            }
-        }
-        ci = group_end;
-    }
-
-    // Phase 5: Write output
-    const out = output_ptr[0..output_capacity];
-    var wp: u32 = 4; // skip count header
-
-    var count: u32 = 0;
-    for (&agg) |*e| {
-        if (!e.occupied or e.delta == 0) continue;
-        const ct = scratch_buf[e.key.ct_off .. e.key.ct_off + e.key.ct_len];
-        const needed = 2 + 66 + 2 + ct.len + 8;
-        if (wp + needed > output_capacity) return 0;
-
-        // owner_len + owner
-        std.mem.writeInt(u16, out[wp..][0..2], 66, .little);
-        wp += 2;
-        bytesToHex(&e.key.owner, out[wp..][0..66]);
-        wp += 66;
-
-        // coinType_len + coinType
-        std.mem.writeInt(u16, out[wp..][0..2], @intCast(ct.len), .little);
-        wp += 2;
-        @memcpy(out[wp..][0..ct.len], ct);
-        wp += @intCast(ct.len);
-
-        // amount (i64)
-        const amt: i64 = @intCast(@min(@max(e.delta, std.math.minInt(i64)), std.math.maxInt(i64)));
-        std.mem.writeInt(i64, out[wp..][0..8], amt, .little);
-        wp += 8;
-        count += 1;
-    }
-
-    // Write count
-    std.mem.writeInt(u32, out[0..4], count, .little);
-    return wp;
-}
-
 fn filterMatch(filter: []const u8, ct: []const u8) bool {
     var start: usize = 0;
     for (filter, 0..) |b, i| {
@@ -1056,33 +820,23 @@ const OutputWriter = struct {
     }
 };
 
-// --- Unified entry point ---
-// Output format:
+// --- Core processing logic ---
+// Output format (16-byte header + balance changes + events):
 //   u32 num_balance_changes
 //   u32 num_events
-//   u64 timestamp_ms (from checkpoint summary BCS)
-//   Balance changes: (same as compute_balance_changes)
+//   u64 timestamp_ms
+//   Balance changes:
+//     Per change: u16 owner_len + owner + u16 coinType_len + coinType + i64 amount
 //   Events:
-//     Per event:
-//       u16 packageId_len + packageId
-//       u16 module_len + module
-//       u16 sender_len + sender
-//       u16 eventType_len + eventType
-//       u32 contents_len + contents
+//     Per event: u16 packageId_len + packageId + u16 module_len + module
+//              + u16 sender_len + sender + u16 eventType_len + eventType
+//              + u32 contents_len + contents
 
-export fn process_checkpoint_compressed(
-    compressed_ptr: [*]const u8,
-    compressed_len: u32,
-    output_ptr: [*]u8,
-    output_capacity: u32,
-    filter_ptr: [*]const u8,
-    filter_len: u32,
+fn processInternal(
+    buf: []const u8,
+    out: []u8,
+    filter: []const u8,
 ) u32 {
-    var decompress_buf: [DECOMPRESS_BUF_SIZE]u8 = undefined;
-    const zresult = zstd_c.ZSTD_decompress(&decompress_buf, DECOMPRESS_BUF_SIZE, compressed_ptr, compressed_len);
-    if (zstd_c.ZSTD_isError(zresult) != 0) return 0;
-    const buf = decompress_buf[0..zresult];
-
     // Working memory
     var created: [MAX_CREATED][32]u8 = undefined;
     var created_n: u32 = 0;
@@ -1094,7 +848,7 @@ export fn process_checkpoint_compressed(
     for (&agg) |*e| e.occupied = false;
     var scratch_buf: [SCRATCH_SIZE]u8 = undefined;
     var scratch = Scratch{ .buf = &scratch_buf, .pos = 0 };
-    const filter = if (filter_len > 0) filter_ptr[0..filter_len] else @as([]const u8, &.{});
+    // filter param is used in Phase 3 coin type filtering
 
     // Proto scan: extract effects, events, objects, summary
     var eff_slices: [MAX_TX]struct { off: u32, len: u32 } = undefined;
@@ -1251,7 +1005,6 @@ export fn process_checkpoint_compressed(
     }
 
     // Phase 5: Write output
-    const out = output_ptr[0..output_capacity];
     var w = OutputWriter{ .buf = out, .pos = 16 }; // skip header (4+4+8 = 16)
 
     // Write balance changes
@@ -1284,12 +1037,29 @@ export fn process_checkpoint_compressed(
     return w.pos;
 }
 
-// --- Compressed entry point (links against system libzstd) ---
+// --- Exported entry points ---
 
 const zstd_c = @cImport(@cInclude("zstd.h"));
-const DECOMPRESS_BUF_SIZE = 4 * 1024 * 1024; // 4MB max decompressed size
+const DECOMPRESS_BUF_SIZE = 4 * 1024 * 1024;
 
-export fn compute_balance_changes_compressed(
+/// Process a decompressed protobuf checkpoint → balance changes + events.
+export fn process_checkpoint(
+    input_ptr: [*]const u8,
+    input_len: u32,
+    output_ptr: [*]u8,
+    output_capacity: u32,
+    filter_ptr: [*]const u8,
+    filter_len: u32,
+) u32 {
+    const buf = input_ptr[0..input_len];
+    const out = output_ptr[0..output_capacity];
+    const filter = if (filter_len > 0) filter_ptr[0..filter_len] else @as([]const u8, &.{});
+    return processInternal(buf, out, filter);
+}
+
+/// Process a zstd-compressed checkpoint → balance changes + events.
+/// Decompresses internally, then calls the same core logic.
+export fn process_checkpoint_compressed(
     compressed_ptr: [*]const u8,
     compressed_len: u32,
     output_ptr: [*]u8,
@@ -1298,22 +1068,11 @@ export fn compute_balance_changes_compressed(
     filter_len: u32,
 ) u32 {
     var decompress_buf: [DECOMPRESS_BUF_SIZE]u8 = undefined;
-
-    const result = zstd_c.ZSTD_decompress(
-        &decompress_buf,
-        DECOMPRESS_BUF_SIZE,
-        compressed_ptr,
-        compressed_len,
-    );
-
+    const result = zstd_c.ZSTD_decompress(&decompress_buf, DECOMPRESS_BUF_SIZE, compressed_ptr, compressed_len);
     if (zstd_c.ZSTD_isError(result) != 0) return 0;
 
-    return compute_balance_changes(
-        &decompress_buf,
-        @intCast(result),
-        output_ptr,
-        output_capacity,
-        filter_ptr,
-        filter_len,
-    );
+    const buf = decompress_buf[0..result];
+    const out = output_ptr[0..output_capacity];
+    const filter = if (filter_len > 0) filter_ptr[0..filter_len] else @as([]const u8, &.{});
+    return processInternal(buf, out, filter);
 }
