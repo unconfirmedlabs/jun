@@ -278,31 +278,29 @@ jun/normalize                           normalizeSuiAddress, normalizeCoinType
 
 ## Performance
 
-Production pipeline benchmarks: archive backfill with balance tracking enabled for all coin types (`coinTypes: "*"`). Full pipeline: HTTP fetch (or cache read) + zstd decompress + protobuf decode + BCS event decode + balance computation.
+Production pipeline benchmarks on AMD Ryzen 9 9950X3D (16C/32T, 10gbit). Archive backfill with balance tracking for all coin types (`coinTypes: "*"`). Full pipeline: HTTP fetch + zstd decompress + protobuf decode + BCS event decode + balance computation.
 
-### Production pipeline (backfill)
+### Backfill throughput
 
-| Environment | Throughput | Notes |
-|-------------|-----------|-------|
-| AMD 9950X3D, cached (disk) | **1,919 cp/s** | 100K checkpoints, 8 workers |
-| AMD 9950X3D, 10gbit network | **1,247 cp/s** | 74K checkpoints in 60s, sustained |
-| Apple M5, cached (disk) | **1,276 cp/s** | 8 workers |
-| Apple M5, slow network | **200 cp/s** | Network-limited |
+| Mode | Throughput | Notes |
+|------|-----------|-------|
+| Cached (disk) | **1,919 cp/s** | 100K checkpoints sustained, 8 workers |
+| Network (10gbit) | **1,247 cp/s** | 74K checkpoints in 60s, no cache |
 
-### Decode throughput by worker count (5,000 checkpoints, pre-cached)
+### Scaling by worker count (5,000 checkpoints, cached)
 
-| Workers | Apple M5 | AMD 9950X3D |
-|---------|----------|-------------|
-| 1 | 464 cp/s | 363 cp/s |
-| 4 | 1,544 cp/s | 1,111 cp/s |
-| 8 | **1,917 cp/s** | **1,687 cp/s** |
-| 16 | — | 1,375 cp/s |
+| Workers | Throughput |
+|---------|-----------|
+| 1 | 363 cp/s |
+| 4 | 1,111 cp/s |
+| 8 | **1,687 cp/s** |
+| 16 | 1,375 cp/s |
 
 **Notes:**
-- Sweet spot is 8 workers on both platforms. Beyond that, Bun Worker IPC overhead and GC pressure cause regression.
+- Sweet spot is 8 workers. Beyond that, Worker IPC overhead and GC pressure cause regression.
 - Custom BCS parsers (coin objects, transaction effects, events) provide 2-7x speedup over native `@mysten/sui/bcs`.
 - Custom protobuf wire format parser bypasses protobufjs for checkpoint decoding.
-- Streaming pipeline architecture: fetch, decode, and yield run concurrently with backpressure — no window-based batching.
+- Streaming pipeline: fetch, decode, and yield run concurrently with backpressure.
 - Set `JUN_NATIVE_BCS=1` to fall back to native parsers for debugging.
 
 ## Architecture
