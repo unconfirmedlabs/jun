@@ -1,5 +1,5 @@
 /**
- * jun/checkpoints — Historical checkpoint fetching and local caching.
+ * jun/checkpoints — Historical checkpoint fetching and decoding.
  *
  * @example Fetch a checkpoint from the public archive
  * ```ts
@@ -8,19 +8,10 @@
  * const archive = createArchiveClient({ archiveUrl: "https://checkpoints.mainnet.sui.io" });
  * const checkpoint = await archive.fetchCheckpoint(316756645n);
  * ```
- *
- * @example Cache-through fetch (local cache → fallback)
- * ```ts
- * import { cachedGetCheckpoint } from "jun/checkpoints";
- *
- * const checkpoint = await cachedGetCheckpoint(seq, () => grpcClient.getCheckpoint(seq));
- * ```
  */
 
-// Archive client
 export {
   createArchiveClient,
-  cachedGetCheckpoint,
   decodeCompressedCheckpoint,
   fetchCompressed,
   fetchRawCheckpoint,
@@ -32,11 +23,3 @@ export type {
   ArchiveClientOptions,
   RawCheckpoint,
 } from "./archive.ts";
-
-// Local checkpoint cache
-export {
-  cacheGet,
-  cachePut,
-  cacheStats,
-  cacheClear,
-} from "./cache.ts";

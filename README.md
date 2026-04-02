@@ -247,7 +247,6 @@ jun codegen 0xPKG::module::Struct   # generate field definitions
 jun mcp                             # MCP server for AI
 jun chat --live                     # AI chat with chain data
 jun config show                     # environment management
-jun cache show                      # checkpoint cache stats
 jun ns resolve-address name.sui     # name service
 ```
 
@@ -267,7 +266,7 @@ jun/pipeline/destinations/stdout        createStdoutDestination
 jun/pipeline/config                     parsePipelineConfig
 jun/grpc                                createGrpcClient
 jun/schema                              buildBcsSchema, generateDDL
-jun/checkpoints                         createArchiveClient, cache utils
+jun/checkpoints                         createArchiveClient
 jun/verify                              verifyTransaction, verifyObject
 jun/codegen                             generateFieldDSL
 jun/mcp                                 createMcpServer
@@ -285,7 +284,6 @@ Benchmarked on AMD Ryzen 9 9950X3D (16C/32T, 10gbit). Archive backfill with bala
 | Mode | Throughput | Bandwidth | Notes |
 |------|-----------|-----------|-------|
 | Network (10gbit) | **15,775 cp/s** | 7.2 Gbit/s | 358K checkpoints in 23s, 32 workers |
-| Cached (disk) | **8,859 cp/s** | — | 263K checkpoints in 30s |
 
 ### Scaling by worker count (network, concurrency 500)
 

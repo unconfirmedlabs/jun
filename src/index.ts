@@ -12,7 +12,7 @@ import path from "path";
 import pMap from "p-map";
 import pRetry from "p-retry";
 import { createGrpcClient, type GrpcClient } from "./grpc.ts";
-import { createArchiveClient, cachedGetCheckpoint, fetchCompressed, type ArchiveClient } from "./archive.ts";
+import { createArchiveClient, fetchCompressed, decodeCompressedCheckpoint, type ArchiveClient } from "./archive.ts";
 import { createProcessor, type EventHandler, type EventProcessor, type DecodedEvent } from "./processor.ts";
 import { createPostgresOutput, type PostgresOutput } from "./output/postgres.ts";
 import { createStateManager, type StateManager } from "./state.ts";
@@ -593,7 +593,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           if (shutdownRequested) return;
 
           try {
-            const response = await cachedGetCheckpoint(seq, () => grpcClient.getCheckpoint(seq));
+            const response = await grpcClient.getCheckpoint(seq);
             const decoded = processor.process(response);
 
             if (decoded.length > 0) {

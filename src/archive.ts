@@ -13,7 +13,6 @@ import { verifyCheckpoint as keiVerify, PreparedCommittee } from "@unconfirmed/k
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import protobuf from "protobufjs";
-import { cacheGet, cachePut } from "./cache.ts";
 import { parseCheckpointProto } from "./proto-parser.ts";
 import { parseCheckpointProtoNative } from "./proto-parser-native.ts";
 import path from "path";
@@ -296,21 +295,16 @@ export async function getCheckpointType(): Promise<protobuf.Type> {
   return checkpointType;
 }
 
-// ─── Cached archive fetch ────────────────────────────────────────────────────
+// ─── Archive fetch ──────────────────────────────────────────────────────────
 
-/** Fetch compressed checkpoint bytes with local cache. */
+/** Fetch compressed checkpoint bytes from the archive. */
 export async function fetchCompressed(seq: bigint, archiveUrl: string, signal?: AbortSignal): Promise<Uint8Array> {
-  const cached = await cacheGet(seq);
-  if (cached) return cached;
-
   const url = `${archiveUrl}/${seq}.binpb.zst`;
   const resp = await fetch(url, signal ? { signal } : undefined);
   if (!resp.ok) {
     throw new Error(`Archive fetch failed: ${resp.status} ${resp.statusText} for checkpoint ${seq}`);
   }
-  const compressed = new Uint8Array(await resp.arrayBuffer());
-  await cachePut(seq, compressed);
-  return compressed;
+  return new Uint8Array(await resp.arrayBuffer());
 }
 
 // ─── Archive client ──────────────────────────────────────────────────────────
@@ -507,18 +501,6 @@ export async function decodeCheckpointFromProto(
   };
 }
 
-/**
- * Cache-through checkpoint fetch. Checks local cache first, falls back to the
- * provided fetcher (typically a gRPC call). Use for all historical lookups.
- */
-export async function cachedGetCheckpoint(
-  seq: bigint,
-  fallback: () => Promise<GrpcCheckpointResponse>,
-): Promise<GrpcCheckpointResponse> {
-  const cached = await cacheGet(seq);
-  if (cached) return decodeCompressedCheckpoint(seq, cached);
-  return fallback();
-}
 
 // ─── Raw checkpoint for verification ─────────────────────────────────────────
 

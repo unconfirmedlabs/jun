@@ -837,18 +837,21 @@ fn processInternal(
     out: []u8,
     filter: []const u8,
 ) u32 {
-    // Working memory
-    var created: [MAX_CREATED][32]u8 = undefined;
+    // Working memory — large arrays use threadlocal to avoid stack overflow in worker threads.
+    // Each worker thread gets its own copy; no synchronization needed.
+    const TLS = struct {
+        threadlocal var coins: [MAX_COINS]CoinSnap = undefined;
+        threadlocal var agg: [MAX_AGG]AggEntry = undefined;
+        threadlocal var scratch_buf: [SCRATCH_SIZE]u8 = undefined;
+        threadlocal var created: [MAX_CREATED][32]u8 = undefined;
+        threadlocal var deleted: [MAX_DELETED][32]u8 = undefined;
+    };
+
     var created_n: u32 = 0;
-    var deleted: [MAX_DELETED][32]u8 = undefined;
     var deleted_n: u32 = 0;
-    var coins: [MAX_COINS]CoinSnap = undefined;
     var coins_n: u32 = 0;
-    var agg: [MAX_AGG]AggEntry = undefined;
-    for (&agg) |*e| e.occupied = false;
-    var scratch_buf: [SCRATCH_SIZE]u8 = undefined;
-    var scratch = Scratch{ .buf = &scratch_buf, .pos = 0 };
-    // filter param is used in Phase 3 coin type filtering
+    for (&TLS.agg) |*e| e.occupied = false;
+    var scratch = Scratch{ .buf = &TLS.scratch_buf, .pos = 0 };
 
     // Proto scan: extract effects, events, objects, summary
     var eff_slices: [MAX_TX]struct { off: u32, len: u32 } = undefined;
@@ -960,7 +963,7 @@ fn processInternal(
 
     // Phase 2: Parse effects (balance computation)
     for (0..num_eff) |i| {
-        if (!parseEffects(buf, eff_slices[i].off, eff_slices[i].len, &created, &created_n, &deleted, &deleted_n, &agg, &scratch)) return 0;
+        if (!parseEffects(buf, eff_slices[i].off, eff_slices[i].len, &TLS.created, &created_n, &TLS.deleted, &deleted_n, &TLS.agg, &scratch)) return 0;
     }
 
     // Phase 3: Parse coin objects
@@ -975,30 +978,30 @@ fn processInternal(
         }
         if (oe.id_len > 0) { if (!hexDecode(buf[oe.id_off .. oe.id_off + oe.id_len], &snap.obj_id)) continue; }
         snap.version = oe.version;
-        if (coins_n < MAX_COINS) { coins[coins_n] = snap; coins_n += 1; }
+        if (coins_n < MAX_COINS) { TLS.coins[coins_n] = snap; coins_n += 1; }
     }
 
     // Phase 4: Diff
-    sortCoins(coins[0..coins_n]);
-    sortIds(created[0..created_n]);
-    sortIds(deleted[0..deleted_n]);
+    sortCoins(TLS.coins[0..coins_n]);
+    sortIds(TLS.created[0..created_n]);
+    sortIds(TLS.deleted[0..deleted_n]);
     var ci: u32 = 0;
     while (ci < coins_n) {
         var group_end = ci + 1;
-        while (group_end < coins_n and std.mem.eql(u8, &coins[ci].obj_id, &coins[group_end].obj_id)) group_end += 1;
+        while (group_end < coins_n and std.mem.eql(u8, &TLS.coins[ci].obj_id, &TLS.coins[group_end].obj_id)) group_end += 1;
         if (group_end - ci >= 2) {
-            const input = coins[ci]; const output = coins[group_end - 1];
+            const input = TLS.coins[ci]; const output = TLS.coins[group_end - 1];
             if (input.has_owner and output.has_owner and std.mem.eql(u8, &input.owner, &output.owner)) {
-                addDelta(&agg, input.owner, input.ct_off, input.ct_len, @as(i128, output.balance) - @as(i128, input.balance), &scratch_buf);
+                addDelta(&TLS.agg, input.owner, input.ct_off, input.ct_len, @as(i128, output.balance) - @as(i128, input.balance), &TLS.scratch_buf);
             } else {
-                if (input.has_owner) addDelta(&agg, input.owner, input.ct_off, input.ct_len, -@as(i128, input.balance), &scratch_buf);
-                if (output.has_owner) addDelta(&agg, output.owner, output.ct_off, output.ct_len, @as(i128, output.balance), &scratch_buf);
+                if (input.has_owner) addDelta(&TLS.agg, input.owner, input.ct_off, input.ct_len, -@as(i128, input.balance), &TLS.scratch_buf);
+                if (output.has_owner) addDelta(&TLS.agg, output.owner, output.ct_off, output.ct_len, @as(i128, output.balance), &TLS.scratch_buf);
             }
         } else {
-            const snap = coins[ci];
+            const snap = TLS.coins[ci];
             if (snap.has_owner) {
-                if (bsearchId(created[0..created_n], snap.obj_id)) addDelta(&agg, snap.owner, snap.ct_off, snap.ct_len, @as(i128, snap.balance), &scratch_buf)
-                else if (bsearchId(deleted[0..deleted_n], snap.obj_id)) addDelta(&agg, snap.owner, snap.ct_off, snap.ct_len, -@as(i128, snap.balance), &scratch_buf);
+                if (bsearchId(TLS.created[0..created_n], snap.obj_id)) addDelta(&TLS.agg, snap.owner, snap.ct_off, snap.ct_len, @as(i128, snap.balance), &TLS.scratch_buf)
+                else if (bsearchId(TLS.deleted[0..deleted_n], snap.obj_id)) addDelta(&TLS.agg, snap.owner, snap.ct_off, snap.ct_len, -@as(i128, snap.balance), &TLS.scratch_buf);
             }
         }
         ci = group_end;
@@ -1009,9 +1012,9 @@ fn processInternal(
 
     // Write balance changes
     var bal_count: u32 = 0;
-    for (&agg) |*e| {
+    for (&TLS.agg) |*e| {
         if (!e.occupied or e.delta == 0) continue;
-        const ct = scratch_buf[e.key.ct_off .. e.key.ct_off + e.key.ct_len];
+        const ct = TLS.scratch_buf[e.key.ct_off .. e.key.ct_off + e.key.ct_len];
         w.writeU16(66);
         var owner_hex: [66]u8 = undefined;
         bytesToHex(&e.key.owner, &owner_hex);
