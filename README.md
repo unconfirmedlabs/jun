@@ -278,30 +278,39 @@ jun/normalize                           normalizeSuiAddress, normalizeCoinType
 
 ## Performance
 
-Production pipeline benchmarks on AMD Ryzen 9 9950X3D (16C/32T, 10gbit). Archive backfill with balance tracking for all coin types (`coinTypes: "*"`). Full pipeline: HTTP fetch + zstd decompress + protobuf decode + BCS event decode + balance computation.
+Benchmarked on AMD Ryzen 9 9950X3D (16C/32T, 10gbit). Archive backfill with balance tracking + event decoding for all coin types. Full pipeline: HTTP fetch → Zig checkpoint processor (zstd + protobuf + BCS + balance diff) → ordered drain.
 
 ### Backfill throughput
 
-| Mode | Throughput | Notes |
-|------|-----------|-------|
-| Cached (disk) | **1,919 cp/s** | 100K checkpoints sustained, 8 workers |
-| Network (10gbit) | **1,247 cp/s** | 74K checkpoints in 60s, no cache |
+| Mode | Throughput | Bandwidth | Notes |
+|------|-----------|-----------|-------|
+| Network (10gbit) | **15,775 cp/s** | 7.2 Gbit/s | 358K checkpoints in 23s, 32 workers |
+| Cached (disk) | **8,859 cp/s** | — | 263K checkpoints in 30s |
 
-### Scaling by worker count (5,000 checkpoints, cached)
+### Scaling by worker count (network, concurrency 500)
 
 | Workers | Throughput |
 |---------|-----------|
-| 1 | 363 cp/s |
-| 4 | 1,111 cp/s |
-| 8 | **1,687 cp/s** |
-| 16 | 1,375 cp/s |
+| 8 | 5,442 cp/s |
+| 16 | 6,850 cp/s |
+| 32 | **15,775 cp/s** |
 
-**Notes:**
-- Sweet spot is 8 workers. Beyond that, Worker IPC overhead and GC pressure cause regression.
-- Custom BCS parsers (coin objects, transaction effects, events) provide 2-7x speedup over native `@mysten/sui/bcs`.
-- Custom protobuf wire format parser bypasses protobufjs for checkpoint decoding.
-- Streaming pipeline: fetch, decode, and yield run concurrently with backpressure.
-- Set `JUN_LEGACY_PARSERS=1` to fall back to native parsers for debugging.
+At 15,775 cp/s, a full genesis backfill (~500M checkpoints) completes in ~9 hours.
+
+### Architecture
+
+The performance comes from a layered optimization stack:
+
+- **Zig checkpoint processor** (`native/checkpoint_processor.zig`): single FFI call does zstd decompression + protobuf wire format parsing + BCS event decode + BCS balance computation + coin version diffing + aggregation. 17x faster than the equivalent JS pipeline.
+- **Zero-copy worker IPC**: workers transfer raw Zig output buffers via `postMessage` transferable — no structured clone of JS objects.
+- **Streaming pipeline**: fetch, decode, and yield run concurrently with backpressure signaling. No window-based batching.
+- **Direct fetch**: backfill bypasses the disk cache entirely — checkpoints go straight from CDN to worker pool.
+
+### Fallback
+
+Set `JUN_LEGACY_PARSERS=1` to fall back to the pure TypeScript pipeline (protobufjs + @mysten/sui/bcs). Useful for debugging or platforms without Zig.
+
+Build the native lib: `cd native && ./build.sh` (requires Zig + libzstd).
 
 ## Architecture
 
