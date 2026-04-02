@@ -205,13 +205,21 @@ export async function decodeCompressedCheckpoint(
   verifyOpts?: { grpcUrl: string },
 ): Promise<GrpcCheckpointResponse> {
   const Checkpoint = await getCheckpointType();
-
-  // 1. Zstd decompress (Bun built-in)
   const decompressed = zstdDecompressSync(Buffer.from(compressed));
-
-  // 2. Protobuf decode outer Checkpoint
   const decoded = Checkpoint.decode(decompressed);
   const cp = Checkpoint.toObject(decoded, { longs: String, enums: String, defaults: false }) as any;
+  return decodeCheckpointFromProto(seq, cp, verifyOpts);
+}
+
+/**
+ * Decode a checkpoint from an already-decoded protobuf object.
+ * Avoids re-decompression when the protobuf is already available (e.g., in workers).
+ */
+export async function decodeCheckpointFromProto(
+  seq: bigint,
+  cp: any,
+  verifyOpts?: { grpcUrl: string },
+): Promise<GrpcCheckpointResponse> {
 
   // 3. BCS decode CheckpointSummary for timestamp + epoch
   let timestampMs = 0;

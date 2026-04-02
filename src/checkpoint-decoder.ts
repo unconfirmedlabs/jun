@@ -1,12 +1,14 @@
 /**
- * Worker thread for CPU-bound checkpoint decoding.
+ * Worker thread for CPU-bound checkpoint decoding + balance computation.
  *
- * Receives compressed checkpoint bytes from the main thread,
- * runs zstd decompress + protobuf decode + BCS decode, and
- * returns the decoded GrpcCheckpointResponse + balance changes.
+ * Receives compressed checkpoint bytes, decompresses ONCE, then:
+ * 1. Decodes protobuf → BCS for events (GrpcCheckpointResponse)
+ * 2. Computes balance changes from ObjectSet + effects (if enabled)
+ *
+ * Single decompression, single protobuf decode, shared across both paths.
  */
 /// <reference lib="webworker" />
-import { decodeCompressedCheckpoint, getCheckpointType } from "./archive.ts";
+import { decodeCheckpointFromProto, getCheckpointType } from "./archive.ts";
 import { computeBalanceChangesFromArchive } from "./archive-balance.ts";
 import { zstdDecompressSync } from "zlib";
 
@@ -17,25 +19,26 @@ self.onmessage = async (event: MessageEvent) => {
     id: number;
     seq: string;
     compressed: Uint8Array;
-    balanceCoinTypes: string[] | null; // null = disabled, "*" not sent (use null for all)
+    balanceCoinTypes: string[] | null;
   };
 
   try {
-    const seqBigInt = BigInt(seq);
-    const compressedBytes = new Uint8Array(compressed);
+    const sequenceNumber = BigInt(seq);
 
-    // Decode checkpoint for events
-    const decoded = await decodeCompressedCheckpoint(seqBigInt, compressedBytes);
+    // Decompress ONCE
+    const decompressed = zstdDecompressSync(Buffer.from(new Uint8Array(compressed)));
 
-    // Compute balance changes from archive if enabled
+    // Protobuf decode ONCE
+    const Checkpoint = await getCheckpointType();
+    const protoDecoded = Checkpoint.decode(decompressed);
+    const checkpointProto = Checkpoint.toObject(protoDecoded, { longs: String, enums: String, defaults: false });
+
+    // 1. BCS decode events from the shared protobuf (no re-decompression)
+    const decoded = await decodeCheckpointFromProto(sequenceNumber, checkpointProto);
+
+    // 2. Compute balance changes from the same protobuf (if enabled)
     let balanceChanges: any[] | null = null;
     if (balanceCoinTypes !== null) {
-      // Re-decode the protobuf to get ObjectSet + effects (decodeCompressedCheckpoint doesn't expose these)
-      const Checkpoint = await getCheckpointType();
-      const decompressed = zstdDecompressSync(Buffer.from(compressedBytes));
-      const protoDecoded = Checkpoint.decode(decompressed);
-      const checkpointProto = Checkpoint.toObject(protoDecoded, { longs: String, enums: String, defaults: false });
-
       const timestamp = decoded.checkpoint.summary?.timestamp;
       const timestampDate = timestamp
         ? new Date(Number(BigInt(timestamp.seconds) * 1000n + BigInt(Math.floor(timestamp.nanos / 1_000_000))))
@@ -44,7 +47,7 @@ self.onmessage = async (event: MessageEvent) => {
       const coinTypeFilter = balanceCoinTypes.length === 0 ? null : new Set(balanceCoinTypes);
       balanceChanges = computeBalanceChangesFromArchive(
         checkpointProto,
-        seqBigInt,
+        sequenceNumber,
         timestampDate,
         coinTypeFilter,
       );
