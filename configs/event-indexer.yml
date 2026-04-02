@@ -1,0 +1,26 @@
+# Index specific Move events to Postgres
+#
+# Use case: dApp analytics, contract activity monitoring, event-driven backends
+#
+# Tables created:
+#   One table per event handler (handler key = table name, snake_cased)
+#   Fields auto-resolved from chain — no manual BCS schema needed
+#
+# Query events:
+#   SELECT * FROM record_pressed ORDER BY sui_timestamp DESC LIMIT 20;
+
+sources:
+  live:
+    grpc: fullnode.testnet.sui.io:443
+  backfill:
+    archive: https://checkpoints.testnet.sui.io
+    from: 316756645
+
+processors:
+  events:
+    record_pressed:
+      type: "0x10ad578f5b202fd137546f2e7bc12c319dfef98871feeb429506c4b3d62bf702::pressing::RecordPressedEvent"
+
+storage:
+  postgres:
+    url: $DATABASE_URL

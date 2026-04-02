@@ -1,0 +1,14 @@
+# Stream live balance changes to console — no database needed
+#
+# Use case: monitoring, debugging, quick inspection of chain activity
+#
+# Just run: jun pipeline run configs/live-stream.yml
+
+sources:
+  live:
+    grpc: fullnode.testnet.sui.io:443
+
+processors:
+  balances:
+    coinTypes:
+      - "0x2::sui::SUI"

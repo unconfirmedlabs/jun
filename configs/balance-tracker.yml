@@ -1,0 +1,28 @@
+# Track SUI balance changes — holder list with running totals
+#
+# Use case: token holder dashboards, whale tracking, balance alerts
+#
+# Tables created:
+#   balance_changes  — every individual change (the ledger)
+#   balances         — current running totals (the snapshot)
+#
+# Query holders:
+#   SELECT address, balance FROM balances
+#   WHERE coin_type = '0x2::sui::SUI' AND balance > 0
+#   ORDER BY balance DESC LIMIT 100;
+
+sources:
+  live:
+    grpc: fullnode.mainnet.sui.io:443
+  backfill:
+    archive: https://checkpoints.mainnet.sui.io
+    from: 260000000
+
+processors:
+  balances:
+    coinTypes:
+      - "0x2::sui::SUI"
+
+storage:
+  postgres:
+    url: $DATABASE_URL

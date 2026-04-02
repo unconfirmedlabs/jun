@@ -1,0 +1,20 @@
+# Track multiple coin types simultaneously
+#
+# Use case: DeFi dashboards, portfolio tracking, multi-token analytics
+#
+# Tracks SUI and all coins. Use specific coin types to reduce noise.
+
+sources:
+  live:
+    grpc: fullnode.mainnet.sui.io:443
+  backfill:
+    archive: https://checkpoints.mainnet.sui.io
+    from: 260000000
+
+processors:
+  balances:
+    coinTypes: "*"
+
+storage:
+  postgres:
+    url: $DATABASE_URL

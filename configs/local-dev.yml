@@ -1,0 +1,20 @@
+# Local development — SQLite storage, no external dependencies
+#
+# Use case: quick local exploration, prototyping, AI chat integration
+#
+# No Postgres needed. Data stored in a local SQLite file.
+# Query with: sqlite3 events.db "SELECT * FROM record_pressed LIMIT 10"
+# Or with DuckDB: duckdb events.db "SELECT count(*) FROM record_pressed"
+
+sources:
+  live:
+    grpc: fullnode.testnet.sui.io:443
+
+processors:
+  events:
+    record_pressed:
+      type: "0x10ad578f5b202fd137546f2e7bc12c319dfef98871feeb429506c4b3d62bf702::pressing::RecordPressedEvent"
+
+storage:
+  sqlite:
+    path: ./events.db

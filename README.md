@@ -141,6 +141,25 @@ broadcast:
     format: jsonl
 ```
 
+## Example configs
+
+Ready-to-use configs in the `configs/` directory:
+
+| Config | Use case |
+|--------|----------|
+| [`balance-tracker.yml`](configs/balance-tracker.yml) | Track SUI holders with running totals. Whale dashboards, balance alerts. |
+| [`event-indexer.yml`](configs/event-indexer.yml) | Index specific Move events to Postgres. dApp analytics, contract monitoring. |
+| [`multi-coin-tracker.yml`](configs/multi-coin-tracker.yml) | Track all coin types (`*`). DeFi dashboards, portfolio tracking. |
+| [`live-stream.yml`](configs/live-stream.yml) | Stream to console — no database. Quick inspection, debugging. |
+| [`full-stack.yml`](configs/full-stack.yml) | Events + balances + Postgres + SSE + NATS. Full production setup. |
+| [`local-dev.yml`](configs/local-dev.yml) | SQLite storage, no external deps. Prototyping, local exploration. |
+
+```bash
+# Try any config:
+jun pipeline run configs/live-stream.yml
+DATABASE_URL=postgres://... jun pipeline run configs/balance-tracker.yml
+```
+
 ## Balance indexing
 
 Jun tracks coin holder balances in real-time with two tables:
