@@ -8,7 +8,7 @@
  * Used when native lib unavailable or JUN_LEGACY_PARSERS=1.
  */
 /// <reference lib="webworker" />
-import { processCheckpointCompressed, nativeProcessorAvailable } from "./checkpoint-processor-native.ts";
+import { processCheckpointDecompressed, nativeProcessorAvailable } from "./checkpoint-processor-native.ts";
 import { decodeCheckpointFromProto, getCheckpointType } from "./archive.ts";
 import { parseCheckpointProtoNative } from "./proto-parser-native.ts";
 import { computeBalanceChangesFromArchive } from "./archive-balance.ts";
@@ -34,9 +34,10 @@ self.onmessage = async (event: MessageEvent) => {
       : balanceCoinTypes.length === 0 ? null
       : new Set(balanceCoinTypes);
 
-    // --- Native path: single Zig FFI call ---
+    // --- Native path: JS decompresses, Zig does everything else ---
     if (USE_NATIVE) {
-      const result = processCheckpointCompressed(compressedBytes, sequenceNumber, coinTypeFilter);
+      const decompressed = zstdDecompressSync(Buffer.from(compressedBytes));
+      const result = processCheckpointDecompressed(new Uint8Array(decompressed), sequenceNumber, coinTypeFilter);
 
       if (result) {
         const timestamp = result.timestampMs > 0

@@ -18,23 +18,26 @@ const LIB_PATHS = [
   join(import.meta.dir, "..", LIB_NAME),
 ];
 
+const ffiSymbols = {
+  process_checkpoint: {
+    args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32] as const,
+    returns: FFIType.u32 as const,
+  },
+  process_checkpoint_compressed: {
+    args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32] as const,
+    returns: FFIType.u32 as const,
+  },
+};
+
 let nativeLib: {
-  process_checkpoint_compressed: (
-    compressed_ptr: number, compressed_len: number,
-    output_ptr: number, output_capacity: number,
-    filter_ptr: number, filter_len: number,
-  ) => number;
+  process_checkpoint: (input_ptr: number, input_len: number, output_ptr: number, output_capacity: number, filter_ptr: number, filter_len: number) => number;
+  process_checkpoint_compressed: (compressed_ptr: number, compressed_len: number, output_ptr: number, output_capacity: number, filter_ptr: number, filter_len: number) => number;
 } | null = null;
 
 for (const libPath of LIB_PATHS) {
   if (existsSync(libPath)) {
     try {
-      const lib = dlopen(libPath, {
-        process_checkpoint_compressed: {
-          args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32],
-          returns: FFIType.u32,
-        },
-      });
+      const lib = dlopen(libPath, ffiSymbols);
       nativeLib = lib.symbols;
       break;
     } catch {}
@@ -77,23 +80,7 @@ function readString(pos: number, len: number): string {
   return s;
 }
 
-/**
- * Process a compressed checkpoint: zstd decompress → proto → BCS → balance + events.
- * Returns null if native lib unavailable or parse fails.
- */
-export function processCheckpointCompressed(
-  compressed: Uint8Array,
-  checkpointSeq: bigint,
-  coinTypeFilter: Set<string> | null,
-): ProcessedResult | null {
-  if (!nativeLib) return null;
-
-  const filter = getFilter(coinTypeFilter);
-  const bytesWritten = nativeLib.process_checkpoint_compressed(
-    ptr(compressed), compressed.length,
-    outputPtr, OUTPUT_CAPACITY,
-    filter.ptr, filter.len,
-  );
+function readOutput(bytesWritten: number, checkpointSeq: bigint): ProcessedResult | null {
 
   if (bytesWritten === 0 || bytesWritten < 16) return null;
 
@@ -153,4 +140,45 @@ export function processCheckpointCompressed(
   }
 
   return { balanceChanges, events, timestampMs };
+}
+
+/**
+ * Process a compressed checkpoint (.binpb.zst) — single FFI call.
+ * Uses the compressed entry point (includes zstd decompression in Zig).
+ * Best for main-thread use. Workers should use processCheckpointDecompressed
+ * to avoid stack overflow from the 4MB decompression buffer.
+ */
+export function processCheckpointCompressed(
+  compressed: Uint8Array,
+  checkpointSeq: bigint,
+  coinTypeFilter: Set<string> | null,
+): ProcessedResult | null {
+  if (!nativeLib) return null;
+  const filter = getFilter(coinTypeFilter);
+  const bytesWritten = nativeLib.process_checkpoint_compressed(
+    ptr(compressed), compressed.length,
+    outputPtr, OUTPUT_CAPACITY,
+    filter.ptr, filter.len,
+  );
+  return readOutput(bytesWritten, checkpointSeq);
+}
+
+/**
+ * Process a decompressed protobuf checkpoint — single FFI call.
+ * Worker-safe: no 4MB stack buffer for zstd decompression.
+ * JS does the decompression, Zig does everything else.
+ */
+export function processCheckpointDecompressed(
+  decompressed: Uint8Array,
+  checkpointSeq: bigint,
+  coinTypeFilter: Set<string> | null,
+): ProcessedResult | null {
+  if (!nativeLib) return null;
+  const filter = getFilter(coinTypeFilter);
+  const bytesWritten = nativeLib.process_checkpoint(
+    ptr(decompressed), decompressed.length,
+    outputPtr, OUTPUT_CAPACITY,
+    filter.ptr, filter.len,
+  );
+  return readOutput(bytesWritten, checkpointSeq);
 }
