@@ -2901,4 +2901,73 @@ indexerCmd
     }
   });
 
+// ---------------------------------------------------------------------------
+// pipeline — composable Source → Processor → Destination
+// ---------------------------------------------------------------------------
+
+const pipelineCmd = program
+  .command("pipeline")
+  .description("Composable data pipeline (Source → Processor → Destination)");
+
+pipelineCmd
+  .command("run [config]")
+  .description("Run a pipeline from YAML config")
+  .option("--config-url <url>", "fetch config from S3 or HTTPS URL")
+  .option("--headless", "suppress interactive output (JSON logs only)")
+  .option("--verbose", "enable debug logs alongside interactive output")
+  .action(async (configFile: string | undefined, opts: {
+    configUrl?: string;
+    headless?: boolean;
+    verbose?: boolean;
+  }) => {
+    try {
+      const { resolve } = await import("path");
+      const { parsePipelineConfig } = await import("./pipeline/config-parser.ts");
+      const { createPipeline } = await import("./pipeline/pipeline.ts");
+
+      let yamlContent: string;
+      const configUrl = opts.configUrl ?? process.env.JUN_CONFIG_URL;
+
+      if (configUrl) {
+        const { fetchRemoteConfig } = await import("./remote-config.ts");
+        yamlContent = await fetchRemoteConfig(configUrl);
+      } else if (configFile) {
+        const { readFileSync } = require("fs");
+        yamlContent = readFileSync(resolve(configFile), "utf-8");
+      } else {
+        console.error("[jun] error: provide a config file or --config-url");
+        process.exit(1);
+      }
+
+      // Set log level before creating components (affects all loggers)
+      if (opts.headless) {
+        // headless: JSON logs at info level
+      } else if (opts.verbose) {
+        process.env.LOG_LEVEL = "debug";
+      } else {
+        // interactive: suppress JSON logs
+        process.env.LOG_LEVEL = "silent";
+      }
+
+      const { sources, processors, destinations, pipelineConfig } = parsePipelineConfig(yamlContent);
+
+      const pipeline = createPipeline();
+
+      // Configure display mode
+      if (opts.headless) pipelineConfig.display = "headless";
+      else if (opts.verbose) pipelineConfig.display = "verbose";
+      else pipelineConfig.display = "interactive";
+
+      pipeline.configure(pipelineConfig);
+
+      for (const source of sources) pipeline.source(source);
+      for (const processor of processors) pipeline.processor(processor);
+      for (const destination of destinations) pipeline.destination(destination);
+
+      await pipeline.run();
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
 program.parse();

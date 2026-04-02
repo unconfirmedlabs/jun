@@ -70,9 +70,10 @@ export function createPipeline(): Pipeline {
       const interactive = config.display !== "headless";
       const verbose = config.display === "verbose";
 
-      // Set log level based on display mode
-      if (interactive && !verbose) log.level = "silent";
-      if (verbose) log.level = "debug";
+      // Set log level globally (affects all loggers created by components)
+      if (interactive && !verbose) process.env.LOG_LEVEL = "silent";
+      if (verbose) process.env.LOG_LEVEL = "debug";
+      log.level = process.env.LOG_LEVEL ?? "info";
 
       // Initialize processors
       for (const processor of processors) {
