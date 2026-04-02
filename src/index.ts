@@ -78,10 +78,10 @@ export interface RunOptions {
   broadcastTargets?: BroadcastTarget[];
   /** Remote config URL for /admin/reload without body */
   configUrl?: string;
-  /** Suppress pretty output (banner + event printing). JSON logs only. For production/CI. */
-  headless?: boolean;
-  /** Enable debug-level JSON logs alongside pretty output. */
-  verbose?: boolean;
+  /** Suppress human-readable output to stdout */
+  quiet?: boolean;
+  /** Enable JSON logs to stderr. true for info, or a level string. */
+  log?: boolean | string;
 }
 
 export interface Indexer {
@@ -629,17 +629,14 @@ export function defineIndexer(config: IndexerConfig): Indexer {
     async run(options?: RunOptions): Promise<void> {
       const mode = options?.mode ?? "all";
 
-      const headless = options?.headless ?? false;
-      const interactive = !headless;
+      const humanOutput = !options?.quiet;
 
-      // Default: suppress JSON logs (pretty output only)
-      // --verbose: debug JSON logs + pretty output
-      // --headless: JSON logs only, no pretty output
-      if (!headless && !options?.verbose) {
+      // Machine logs: off by default, enabled with log option
+      if (options?.log) {
+        const level = typeof options.log === "string" ? options.log : "info";
+        log.level = level;
+      } else {
         log.level = "silent";
-      }
-      if (options?.verbose) {
-        log.level = "debug";
       }
 
       const { sql, state, output, processor: initialProcessor, grpcClient } = await init();
@@ -697,7 +694,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       }
 
       // Interactive: print startup config summary + indexed events
-      if (interactive) {
+      if (humanOutput) {
         console.log("\n=== Jun Indexer ===");
         console.log(`Network:    ${network}`);
         console.log(`gRPC:       ${grpcUrl}`);
@@ -753,9 +750,9 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         },
         onEvents: (events) => {
           broadcastManager.broadcastDecodedEvents(events, "live");
-          if (interactive) events.forEach(event => verboseEvent(event, "live"));
+          if (humanOutput) events.forEach(event => verboseEvent(event, "live"));
         },
-        onBalanceChanges: interactive ? (changes) => changes.forEach(change => verboseBalance(change, "live")) : undefined,
+        onBalanceChanges: humanOutput ? (changes) => changes.forEach(change => verboseBalance(change, "live")) : undefined,
       }, liveBufferLog, balanceWriter);
 
       const throttleLog = log.child({ component: "throttle" });
@@ -781,9 +778,9 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         },
         onEvents: (events) => {
           broadcastManager.broadcastDecodedEvents(events, "backfill");
-          if (interactive) events.forEach(event => verboseEvent(event, "backfill"));
+          if (humanOutput) events.forEach(event => verboseEvent(event, "backfill"));
         },
-        onBalanceChanges: interactive ? (changes) => changes.forEach(change => verboseBalance(change, "backfill")) : undefined,
+        onBalanceChanges: humanOutput ? (changes) => changes.forEach(change => verboseBalance(change, "backfill")) : undefined,
       }, backfillBufferLog, balanceWriter);
 
       // Start buffer timers

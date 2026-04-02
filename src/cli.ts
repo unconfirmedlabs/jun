@@ -2707,8 +2707,8 @@ indexerCmd
   .option("--serve <port>", "start HTTP server on port")
   .option("--no-serve", "disable HTTP server even if set in config")
   .option("--workers <count>", "number of decoder worker threads (default: auto)")
-  .option("--headless", "suppress interactive output (JSON logs only, for production)")
-  .option("--verbose", "enable debug-level JSON logs alongside interactive output")
+  .option("--quiet", "suppress human-readable output to stdout")
+  .option("--log [level]", "enable JSON logs to stderr (default: info)")
   .action(async (configFile: string | undefined, opts: {
     configUrl?: string;
     mode?: string;
@@ -2716,8 +2716,8 @@ indexerCmd
     serve?: string;
     noServe?: boolean;
     workers?: string;
-    headless?: boolean;
-    verbose?: boolean;
+    quiet?: boolean;
+    log?: string | boolean;
   }) => {
     try {
       const { resolve } = await import("path");
@@ -2748,8 +2748,8 @@ indexerCmd
       }
       const runOpts = mergeRunOptions(yamlRunOpts, opts);
       if (configUrl) runOpts.configUrl = configUrl;
-      if (opts.headless) runOpts.headless = true;
-      if (opts.verbose) runOpts.verbose = true;
+      if (opts.quiet) runOpts.quiet = true;
+      if (opts.log) runOpts.log = opts.log;
 
       // Set up materialized views (separate sql connection)
       let viewManager: { stop(): void } | null = null;
@@ -2913,12 +2913,12 @@ pipelineCmd
   .command("run [config]")
   .description("Run a pipeline from YAML config")
   .option("--config-url <url>", "fetch config from S3 or HTTPS URL")
-  .option("--headless", "suppress interactive output (JSON logs only)")
-  .option("--verbose", "enable debug logs alongside interactive output")
+  .option("--quiet", "suppress human-readable output to stdout")
+  .option("--log [level]", "enable JSON logs to stderr (default: info)")
   .action(async (configFile: string | undefined, opts: {
     configUrl?: string;
-    headless?: boolean;
-    verbose?: boolean;
+    quiet?: boolean;
+    log?: string | boolean;
   }) => {
     try {
       const { resolve } = await import("path");
@@ -2939,13 +2939,11 @@ pipelineCmd
         process.exit(1);
       }
 
-      // Set log level before creating components (affects all loggers)
-      if (opts.headless) {
-        // headless: JSON logs at info level
-      } else if (opts.verbose) {
-        process.env.LOG_LEVEL = "debug";
+      // Set log level before creating components
+      if (opts.log) {
+        const level = typeof opts.log === "string" ? opts.log : "info";
+        process.env.LOG_LEVEL = level;
       } else {
-        // interactive: suppress JSON logs
         process.env.LOG_LEVEL = "silent";
       }
 
@@ -2953,10 +2951,8 @@ pipelineCmd
 
       const pipeline = createPipeline();
 
-      // Configure display mode
-      if (opts.headless) pipelineConfig.display = "headless";
-      else if (opts.verbose) pipelineConfig.display = "verbose";
-      else pipelineConfig.display = "interactive";
+      pipelineConfig.quiet = opts.quiet ?? false;
+      pipelineConfig.log = opts.log ?? false;
 
       pipeline.configure(pipelineConfig);
 

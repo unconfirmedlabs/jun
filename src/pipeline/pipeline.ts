@@ -67,13 +67,17 @@ export function createPipeline(): Pipeline {
       if (sources.length === 0) throw new Error("Pipeline has no sources");
       if (destinations.length === 0) throw new Error("Pipeline has no destinations");
 
-      const interactive = config.display !== "headless";
-      const verbose = config.display === "verbose";
+      const humanOutput = !config.quiet;
 
-      // Set log level globally (affects all loggers created by components)
-      if (interactive && !verbose) process.env.LOG_LEVEL = "silent";
-      if (verbose) process.env.LOG_LEVEL = "debug";
-      log.level = process.env.LOG_LEVEL ?? "info";
+      // Machine logs: off by default, enabled with --log or --log=LEVEL
+      if (config.log) {
+        const level = typeof config.log === "string" ? config.log : "info";
+        process.env.LOG_LEVEL = level;
+        log.level = level;
+      } else {
+        process.env.LOG_LEVEL = "silent";
+        log.level = "silent";
+      }
 
       // Initialize processors
       for (const processor of processors) {
@@ -89,8 +93,8 @@ export function createPipeline(): Pipeline {
         log.info({ destination: destination.name }, "destination initialized");
       }
 
-      // Print interactive banner
-      if (interactive) {
+      // Print human-readable banner
+      if (humanOutput) {
         console.log("\n=== Jun Pipeline ===");
         console.log(`Sources:      ${sources.map(s => s.name).join(", ")}`);
         console.log(`Processors:   ${processors.length > 0 ? processors.map(p => p.name).join(", ") : "none"}`);
@@ -100,7 +104,7 @@ export function createPipeline(): Pipeline {
       }
 
       // Run all sources concurrently
-      const sourcePromises = sources.map(source => runSource(source, processors, destinations, config, log, interactive));
+      const sourcePromises = sources.map(source => runSource(source, processors, destinations, config, log, humanOutput));
       await Promise.all(sourcePromises);
 
       // Shutdown destinations
@@ -113,7 +117,7 @@ export function createPipeline(): Pipeline {
         await source.stop();
       }
 
-      if (interactive) console.log("\nPipeline stopped.");
+      if (humanOutput) console.log("\nPipeline stopped.");
     },
 
     async stop(): Promise<void> {
@@ -137,7 +141,7 @@ async function runSource(
   destinations: Destination[],
   config: PipelineConfig,
   log: Logger,
-  interactive: boolean,
+  humanOutput: boolean,
 ): Promise<void> {
   const bufferIntervalMs = config.buffer?.intervalMs ?? (source.name.includes("live") ? 200 : 1000);
   const maxBatchSize = config.buffer?.maxBatchSize ?? (source.name.includes("live") ? 50 : 500);
@@ -180,8 +184,8 @@ async function runSource(
         processed.balanceChanges.push(...result.balanceChanges);
       }
 
-      // Interactive output
-      if (interactive) {
+      // Human output
+      if (humanOutput) {
         for (const event of processed.events) {
           const shortSender = event.sender.slice(0, 10) + "..." + event.sender.slice(-4);
           console.log(`[${source.name}] EVENT  cp:${event.checkpointSeq} ${event.handlerName} sender:${shortSender} ${JSON.stringify(event.data)}`);
@@ -207,7 +211,7 @@ async function runSource(
       if (checkpointCount % 100 === 0) {
         const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
         const rate = (checkpointCount / (parseFloat(elapsed) || 1)).toFixed(0);
-        if (interactive) {
+        if (humanOutput) {
           console.log(`[${source.name}] ${checkpointCount} checkpoints (${rate}/s, ${elapsed}s)`);
         }
         log.info({ source: source.name, checkpoints: checkpointCount, rate: `${rate}/s`, elapsed }, "progress");

@@ -104,8 +104,10 @@ export interface Destination {
 // ---------------------------------------------------------------------------
 
 export interface PipelineConfig {
-  /** Display mode: interactive (default), headless (JSON logs), verbose (both) */
-  display?: "interactive" | "headless" | "verbose";
+  /** Suppress human-readable output to stdout (default: false) */
+  quiet?: boolean;
+  /** Enable machine-readable JSON logs to stderr. Set to a level string (debug, info, warn, error) or true for info. */
+  log?: boolean | string;
   /** Buffer config for batching writes */
   buffer?: {
     intervalMs?: number;

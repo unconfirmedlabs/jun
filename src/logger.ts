@@ -13,5 +13,5 @@ export function createLogger(name = "jun"): Logger {
   return pino({
     name,
     level: process.env.LOG_LEVEL ?? "info",
-  });
+  }, pino.destination(2)); // fd 2 = stderr
 }
