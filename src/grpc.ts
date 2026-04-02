@@ -88,9 +88,20 @@ export interface GrpcBalanceChange {
 /** A transaction from a gRPC checkpoint response */
 export interface GrpcTransaction {
   digest: string;
+  transaction?: {
+    sender: string;
+  };
   events: {
     events: GrpcEvent[];
   } | null;
+  effects?: {
+    status: { success?: boolean };
+    gasUsed?: {
+      computationCost: string;
+      storageCost: string;
+      storageRebate: string;
+    };
+  };
   balanceChanges?: GrpcBalanceChange[];
 }
 
@@ -226,7 +237,7 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
               if (waiting) {
                 const waiter = waiting;
                 waiting = null;
-                waiter.resolve({ value: undefined as any, done: true });
+                waiter.resolve({ value: undefined!, done: true as const });
               }
               return;
             }
@@ -242,7 +253,7 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
             if (waiting) {
               const waiter = waiting;
               waiting = null;
-              waiter.resolve({ value: undefined as any, done: true });
+              waiter.resolve({ value: undefined!, done: true as const });
             }
           });
 
@@ -256,7 +267,7 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
                 return Promise.resolve({ value, done: false });
               }
               if (done) {
-                return Promise.resolve({ value: undefined as any, done: true });
+                return Promise.resolve({ value: undefined!, done: true as const });
               }
               return new Promise((resolve, reject) => {
                 waiting = { resolve, reject };
@@ -265,7 +276,7 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
             return(): Promise<IteratorResult<GrpcCheckpointResponse>> {
               call.cancel();
               done = true;
-              return Promise.resolve({ value: undefined as any, done: true });
+              return Promise.resolve({ value: undefined!, done: true as const });
             },
           };
         },

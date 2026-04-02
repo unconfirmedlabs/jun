@@ -31,6 +31,9 @@ export interface StorageBackend {
 
   /** Graceful shutdown (close connections, flush remaining data). */
   shutdown(): Promise<void>;
+
+  /** Reload handler table configs (for hot reload). Optional — not all backends support it. */
+  reloadHandlers?(handlers: Record<string, HandlerTableConfig>): void;
 }
 
 /** Handler table config passed to storage backends. */

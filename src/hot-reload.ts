@@ -195,9 +195,7 @@ export async function applyReload(
   const newProcessor = createProcessor(incomingEvents);
   ctx.setProcessor(newProcessor);
 
-  if ('reloadHandlers' in ctx.output) {
-    (ctx.output as any).reloadHandlers(ctx.handlerTables);
-  }
+  ctx.output.reloadHandlers?.(ctx.handlerTables);
 
   reloadLog.info("processor swapped");
 

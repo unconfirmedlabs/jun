@@ -161,7 +161,7 @@ export function createBroadcastManager(
       const eventMessages: { eventType: string; sender: string; formatted: string }[] = [];
 
       for (const tx of cp.transactions) {
-        const txSender = (tx as any).transaction?.sender ?? null;
+        const txSender = tx.transaction?.sender ?? null;
         const events = tx.events?.events ?? [];
 
         const txData: TransactionBroadcast = {
