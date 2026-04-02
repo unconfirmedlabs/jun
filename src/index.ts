@@ -8,6 +8,7 @@
  * mediated by WriteBuffers that batch events and flush to Postgres.
  */
 import { SQL } from "bun";
+import path from "path";
 import pMap from "p-map";
 import pRetry from "p-retry";
 import { createGrpcClient, type GrpcClient } from "./grpc.ts";
@@ -706,10 +707,60 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       liveBuffer.start();
       backfillBuffer.start();
 
-      // HTTP server (opt-in)
-      let httpServer: { stop(): Promise<void> } | null = null;
+      // HTTP server worker (opt-in — runs on a dedicated thread)
+      let httpWorker: Worker | null = null;
+      let metricsInterval: Timer | null = null;
       if (options?.serve) {
-        httpServer = createServer(options.serve, { sql, state, metrics, broadcast: broadcastManager, hotReload: hotReloadCtx, log });
+        const workerUrl = path.join(import.meta.dir, "serve-worker.ts");
+        httpWorker = new Worker(workerUrl);
+
+        // Send config to worker
+        httpWorker.postMessage({
+          type: "config",
+          port: options.serve.port,
+          hostname: options.serve.hostname ?? "127.0.0.1",
+          database,
+          adminToken: process.env.JUN_ADMIN_TOKEN,
+          configUrl: options.configUrl,
+        });
+
+        // Forward reload messages from worker to hot reload
+        httpWorker.onmessage = (event: MessageEvent) => {
+          if (event.data.type === "reload" && hotReloadCtx) {
+            const { applyReload } = require("./hot-reload.ts");
+            const { parseIndexerConfig } = require("./indexer-config.ts");
+            const { fetchRemoteConfig } = require("./remote-config.ts");
+
+            (async () => {
+              try {
+                let yamlContent = event.data.body;
+                if (!yamlContent?.trim() && event.data.configUrl) {
+                  yamlContent = await fetchRemoteConfig(event.data.configUrl);
+                }
+                if (!yamlContent?.trim()) return;
+
+                const parsed = parseIndexerConfig(yamlContent);
+                await applyReload(hotReloadCtx, parsed.indexer.events);
+                log.info("config reloaded via HTTP worker");
+              } catch (err) {
+                log.error({ err }, "reload from HTTP worker failed");
+              }
+            })();
+          }
+        };
+
+        // Periodically send metrics to worker (every 500ms)
+        metricsInterval = setInterval(() => {
+          if (httpWorker) {
+            httpWorker.postMessage({
+              type: "metrics",
+              snapshot: metrics.snapshot(),
+              prometheus: metrics.prometheus(),
+            });
+          }
+        }, 500);
+
+        log.info({ port: options.serve.port }, "HTTP server worker starting");
       }
 
       // Checkpoint decoder pool (workers for CPU-bound decompress + decode)
@@ -747,7 +798,8 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       if (stopGapRepair) stopGapRepair();
       decoderPool.shutdown();
       await broadcastManager.shutdown();
-      if (httpServer) await httpServer.stop();
+      if (metricsInterval) clearInterval(metricsInterval);
+      if (httpWorker) httpWorker.terminate();
       await liveBuffer.stop();
       await backfillBuffer.stop();
       await this.shutdown();
