@@ -163,14 +163,14 @@ export function computeBalanceChangesFromArchive(
 
       let coinType: string;
       if (kind === "GasCoin") {
-        coinType = "0x2::sui::SUI";
+        coinType = normalizeCoinType("0x2::sui::SUI");
       } else if (kind === "Other" && type.Other?.module === "coin" && type.Other?.name === "Coin") {
-        coinType = extractCoinTypeFromTypeParam(type.Other.typeParams?.[0]);
+        coinType = normalizeCoinType(extractCoinTypeFromTypeParam(type.Other.typeParams?.[0]));
       } else {
         continue; // Not a coin
       }
 
-      // Apply filter
+      // Apply filter (both sides normalized)
       if (coinTypeFilter && !coinTypeFilter.has(coinType)) continue;
 
       // Extract balance: Coin BCS layout = UID (32 bytes) + Balance { value: u64 (8 bytes) }

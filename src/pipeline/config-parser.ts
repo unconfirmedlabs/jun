@@ -10,8 +10,7 @@ import { createGrpcLiveSource } from "./sources/grpc-live.ts";
 import { createArchiveSource } from "./sources/archive.ts";
 import { createEventDecoder } from "./processors/event-decoder.ts";
 import { createBalanceTracker } from "./processors/balance-tracker.ts";
-import { createPostgresStorage } from "./destinations/postgres.ts";
-import { createSqliteStorage } from "./destinations/sqlite.ts";
+import { createSqlStorage } from "./destinations/sql.ts";
 import { createSseBroadcast } from "./destinations/sse.ts";
 import { createNatsBroadcast } from "./destinations/nats.ts";
 import { createStdoutBroadcast } from "./destinations/stdout.ts";
@@ -104,7 +103,9 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
       grpcUrl: sourceConfig.live?.grpc,
       concurrency: sourceConfig.backfill.concurrency,
       workers: sourceConfig.backfill.workers,
-      balanceCoinTypes: config.processors?.balances?.coinTypes,
+      balanceCoinTypes: config.processors?.balances?.coinTypes === "*"
+        ? "*"
+        : config.processors?.balances?.coinTypes?.map((coinType: string) => normalizeCoinType(coinType)),
     }));
   }
 
@@ -159,12 +160,12 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
     }
   }
 
-  // Storage destinations
+  // Storage destinations (unified SQL backend)
   if (storageConfig.postgres) {
     const url = typeof storageConfig.postgres === "string"
       ? storageConfig.postgres
       : storageConfig.postgres.url;
-    storages.push(createPostgresStorage({
+    storages.push(createSqlStorage({
       url,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
@@ -175,8 +176,8 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
     const sqlitePath = typeof storageConfig.sqlite === "string"
       ? storageConfig.sqlite
       : storageConfig.sqlite.path;
-    storages.push(createSqliteStorage({
-      path: sqlitePath,
+    storages.push(createSqlStorage({
+      url: `sqlite:${sqlitePath}`,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
     }));

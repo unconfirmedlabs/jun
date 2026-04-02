@@ -109,9 +109,8 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
                 timestamp: timestampDate,
                 transactions: result.decoded.checkpoint.transactions,
                 source: "backfill",
-                // Pass balance changes from worker as a side channel
-                _balanceChanges: result.balanceChanges,
-              } as any);
+                precomputedBalanceChanges: result.balanceChanges ?? undefined,
+              });
             } catch (error) {
               log.error({ checkpoint: seq.toString(), error }, "failed to fetch/decode checkpoint");
             }

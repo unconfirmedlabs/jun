@@ -30,6 +30,12 @@ export function createBalanceTracker(config: BalanceTrackerConfig): Processor {
     process(checkpoint: Checkpoint): ProcessedCheckpoint {
       let changes: BalanceChange[];
 
+      // Use pre-computed balance changes from archive worker if available
+      if (checkpoint.precomputedBalanceChanges && checkpoint.precomputedBalanceChanges.length > 0) {
+        changes = checkpoint.precomputedBalanceChanges;
+        return { checkpoint, events: [], balanceChanges: changes };
+      }
+
       if (checkpoint.rawProto) {
         // Archive: compute from ObjectSet + effects
         changes = computeBalanceChangesFromArchive(

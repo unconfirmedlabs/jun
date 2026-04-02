@@ -22,6 +22,8 @@ export interface Checkpoint {
   source: "live" | "backfill";
   /** Raw protobuf (available from archive source, needed for balance computation) */
   rawProto?: any;
+  /** Pre-computed balance changes from archive worker (bypasses balance tracker) */
+  precomputedBalanceChanges?: BalanceChange[];
 }
 
 // ---------------------------------------------------------------------------
