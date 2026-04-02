@@ -272,10 +272,18 @@ export async function decodeCompressedCheckpoint(
       });
     }
 
+    // Extract balance changes from protobuf (field 8 on ExecutedTransaction)
+    const balanceChanges = (tx.balanceChanges ?? []).map((bc: any) => ({
+      address: bc.address ?? "",
+      coinType: bc.coinType ?? "",
+      amount: bc.amount ?? "0",
+    }));
+
     const txResult: any = {
       digest,
       transaction: sender ? { sender } : undefined,
       events: events.length > 0 ? { events } : null,
+      balanceChanges: balanceChanges.length > 0 ? balanceChanges : undefined,
     };
 
     // Attach effects metadata for SQLite writer

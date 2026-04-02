@@ -218,21 +218,24 @@ events:
 `)).toThrow('missing required field "network"');
   });
 
-  test("missing events throws", () => {
+  test("missing both events and balances throws", () => {
     expect(() => parseIndexerConfig(`
 network: testnet
 grpcUrl: fullnode.testnet.sui.io:443
 database: postgres://localhost/db
-`)).toThrow('missing required field "events"');
+`)).toThrow("must configure at least one of");
   });
 
-  test("empty events throws", () => {
-    expect(() => parseIndexerConfig(`
+  test("balances-only config is valid (no events required)", () => {
+    const { indexer } = parseIndexerConfig(`
 network: testnet
 grpcUrl: fullnode.testnet.sui.io:443
 database: postgres://localhost/db
-events: {}
-`)).toThrow("events must be a non-empty mapping");
+balances:
+  coinTypes: "*"
+`);
+    expect(Object.keys(indexer.events)).toEqual([]);
+    expect(indexer.balances?.coinTypes).toBe("*");
   });
 
   test("event missing type throws", () => {

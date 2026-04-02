@@ -97,19 +97,23 @@ export function parseIndexerConfig(yamlContent: string): ParsedIndexerConfig {
   const config = substituteDeep(raw);
 
   // Validate required fields
-  const required = ["network", "grpcUrl", "database", "events"];
+  const required = ["network", "grpcUrl", "database"];
   for (const field of required) {
     if (!config[field]) {
       throw new Error(`Invalid config: missing required field "${field}"`);
     }
   }
 
-  if (typeof config.events !== "object" || Object.keys(config.events).length === 0) {
-    throw new Error("Invalid config: events must be a non-empty mapping");
+  // Events or balances must be configured (at least one)
+  const hasEvents = config.events && typeof config.events === "object" && Object.keys(config.events).length > 0;
+  const hasBalances = config.balances && config.balances.coinTypes;
+
+  if (!hasEvents && !hasBalances) {
+    throw new Error("Invalid config: must configure at least one of 'events' or 'balances'");
   }
 
-  // Validate each event handler
-  for (const [name, handler] of Object.entries(config.events) as [string, any][]) {
+  // Validate each event handler (if any)
+  for (const [name, handler] of Object.entries(config.events ?? {}) as [string, any][]) {
     if (!handler.type) {
       throw new Error(`Invalid config: event "${name}" is missing "type"`);
     }
@@ -133,7 +137,7 @@ export function parseIndexerConfig(yamlContent: string): ParsedIndexerConfig {
     network: config.network,
     grpcUrl: config.grpcUrl,
     database: config.database,
-    events: config.events,
+    events: config.events ?? {},
     startCheckpoint,
     backfillConcurrency: config.backfillConcurrency,
     archiveUrl: config.archiveUrl,

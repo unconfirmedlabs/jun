@@ -39,11 +39,40 @@ function parseTimestamp(ts: { seconds: string; nanos: number } | null | undefine
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a Sui address: strip leading zeros after 0x prefix.
+ * "0x0000000000000000000000000000000000000000000000000000000000000002" → "0x2"
+ */
+function normalizeAddress(addr: string): string {
+  if (!addr.startsWith("0x")) return addr;
+  const hex = addr.slice(2).replace(/^0+/, "");
+  return `0x${hex || "0"}`;
+}
+
+/**
+ * Normalize a coin type string by normalizing the package address.
+ * "0x000...002::sui::SUI" → "0x2::sui::SUI"
+ */
+function normalizeCoinType(coinType: string): string {
+  const parts = coinType.split("::");
+  if (parts.length >= 3) {
+    parts[0] = normalizeAddress(parts[0]!);
+  }
+  return parts.join("::");
+}
+
+// ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
 
 export function createBalanceProcessor(coinTypes: string[] | "*"): BalanceProcessor {
-  let filter: Set<string> | null = coinTypes === "*" ? null : new Set(coinTypes);
+  // Normalize filter coin types for matching against full-address gRPC responses
+  let filter: Set<string> | null = coinTypes === "*"
+    ? null
+    : new Set(coinTypes.map(normalizeCoinType));
 
   return {
     extract(response: GrpcCheckpointResponse): BalanceChange[] {
@@ -59,14 +88,17 @@ export function createBalanceProcessor(coinTypes: string[] | "*"): BalanceProces
         if (!bcs?.length) continue;
 
         for (const balanceChange of bcs) {
+          // Normalize the coin type (gRPC returns full zero-padded addresses)
+          const normalizedCoinType = normalizeCoinType(balanceChange.coinType);
+
           // Apply coin type filter
-          if (filter && !filter.has(balanceChange.coinType)) continue;
+          if (filter && !filter.has(normalizedCoinType)) continue;
 
           changes.push({
             txDigest: tx.digest,
             checkpointSeq,
             address: balanceChange.address,
-            coinType: balanceChange.coinType,
+            coinType: normalizedCoinType,
             amount: balanceChange.amount,
             timestamp,
           });
@@ -81,7 +113,7 @@ export function createBalanceProcessor(coinTypes: string[] | "*"): BalanceProces
     },
 
     setCoinTypes(coinTypes: string[] | "*"): void {
-      filter = coinTypes === "*" ? null : new Set(coinTypes);
+      filter = coinTypes === "*" ? null : new Set(coinTypes.map(normalizeCoinType));
     },
   };
 }
