@@ -5,6 +5,7 @@
  * Each change records an address gaining or losing a specific coin type.
  */
 import type { GrpcCheckpointResponse } from "./grpc.ts";
+import { normalizeCoinType } from "./normalize.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,32 +37,6 @@ function parseTimestamp(ts: { seconds: string; nanos: number } | null | undefine
   if (!ts) return new Date(0);
   const ms = BigInt(ts.seconds) * 1000n + BigInt(Math.floor(ts.nanos / 1_000_000));
   return new Date(Number(ms));
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Normalize a Sui address: strip leading zeros after 0x prefix.
- * "0x0000000000000000000000000000000000000000000000000000000000000002" → "0x2"
- */
-function normalizeAddress(addr: string): string {
-  if (!addr.startsWith("0x")) return addr;
-  const hex = addr.slice(2).replace(/^0+/, "");
-  return `0x${hex || "0"}`;
-}
-
-/**
- * Normalize a coin type string by normalizing the package address.
- * "0x000...002::sui::SUI" → "0x2::sui::SUI"
- */
-function normalizeCoinType(coinType: string): string {
-  const parts = coinType.split("::");
-  if (parts.length >= 3) {
-    parts[0] = normalizeAddress(parts[0]!);
-  }
-  return parts.join("::");
 }
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@
  */
 import { bcs as suiBcs } from "@mysten/sui/bcs";
 import type { BalanceChange } from "./balance-processor.ts";
+import { normalizeSuiAddress, normalizeCoinType } from "./normalize.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -30,18 +31,11 @@ interface CoinSnapshot {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Normalize a Sui address: strip leading zeros after 0x prefix. */
-function normalizeAddress(address: string): string {
-  if (!address.startsWith("0x")) return address;
-  const hex = address.slice(2).replace(/^0+/, "");
-  return `0x${hex || "0"}`;
-}
-
 /** Extract coin type string from a StructTag type parameter. */
 function extractCoinTypeFromTypeParam(typeParam: any): string {
   if (typeParam?.$kind === "Struct") {
     const struct = typeParam.Struct;
-    return `${normalizeAddress(struct.address)}::${struct.module}::${struct.name}`;
+    return `${normalizeSuiAddress(struct.address)}::${struct.module}::${struct.name}`;
   }
   return "unknown";
 }
@@ -103,9 +97,10 @@ export function computeBalanceChangesFromArchive(
 
   function addDelta(owner: string | null, coinType: string, delta: bigint): void {
     if (!owner || delta === 0n) return;
-    const normalizedCoinType = coinType.split("::").map((part, i) => i === 0 ? normalizeAddress(part) : part).join("::");
-    if (coinTypeFilter && !coinTypeFilter.has(normalizedCoinType)) return;
-    const key = `${normalizeAddress(owner)}:${normalizedCoinType}`;
+    const normalizedCoin = normalizeCoinType(coinType);
+    if (coinTypeFilter && !coinTypeFilter.has(normalizedCoin)) return;
+    const normalizedOwner = normalizeSuiAddress(owner);
+    const key = `${normalizedOwner}:${normalizedCoin}`;
     aggregated.set(key, (aggregated.get(key) ?? 0n) + delta);
   }
 

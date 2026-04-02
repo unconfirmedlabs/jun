@@ -27,6 +27,7 @@ import yaml from "js-yaml";
 import type { IndexerConfig, RunOptions, RunMode } from "./index.ts";
 import type { ViewDef } from "./views.ts";
 import type { NATSConfig } from "./broadcast.ts";
+import { normalizeEventType, normalizeCoinType, validateEventTypeAddress } from "./normalize.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -112,12 +113,15 @@ export function parseIndexerConfig(yamlContent: string): ParsedIndexerConfig {
     throw new Error("Invalid config: must configure at least one of 'events' or 'balances'");
   }
 
-  // Validate each event handler (if any)
+  // Validate and normalize each event handler (if any)
   for (const [name, handler] of Object.entries(config.events ?? {}) as [string, any][]) {
     if (!handler.type) {
       throw new Error(`Invalid config: event "${name}" is missing "type"`);
     }
-    // fields is optional — auto-resolved from chain at startup if not provided
+    // Validate package address in event type
+    validateEventTypeAddress(handler.type, `event "${name}"`);
+    // Normalize the event type
+    handler.type = normalizeEventType(handler.type);
   }
 
   // Handle startCheckpoint: YAML number → bigint, string → string (for resolution)
@@ -218,14 +222,14 @@ export function parseIndexerConfig(yamlContent: string): ParsedIndexerConfig {
     }
   }
 
-  // Parse balances config
+  // Parse balances config (normalize coin types)
   let balances: BalancesConfig | undefined;
   if (config.balances) {
     const ct = config.balances.coinTypes;
     if (ct === "*") {
       balances = { coinTypes: "*" };
     } else if (Array.isArray(ct) && ct.length > 0) {
-      balances = { coinTypes: ct };
+      balances = { coinTypes: ct.map((coinType: string) => normalizeCoinType(coinType)) };
     } else if (ct !== undefined) {
       throw new Error('Invalid config: balances.coinTypes must be "*" or a non-empty array of coin type strings');
     }

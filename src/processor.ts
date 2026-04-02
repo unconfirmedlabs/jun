@@ -7,6 +7,7 @@
 import type { GrpcCheckpointResponse } from "./grpc.ts";
 import type { FieldDefs } from "./schema.ts";
 import { buildBcsSchema, formatRow } from "./schema.ts";
+import { normalizeEventType } from "./normalize.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -90,16 +91,18 @@ export interface EventProcessor {
  */
 export function createProcessor(handlers: Record<string, EventHandler>): EventProcessor {
   // Compile handlers: build BCS schemas and pre-compute stripped types
-  const compiled: CompiledHandler[] = Object.entries(handlers).map(([name, handler]) => ({
-    name,
-    type: handler.type,
-    strippedType: stripGenerics(handler.type),
-    fields: handler.fields!,
-    bcsSchema: buildBcsSchema(handler.fields!),
-  }));
+  const compiled: CompiledHandler[] = Object.entries(handlers).map(([name, handler]) => {
+    const normalizedType = normalizeEventType(handler.type);
+    return {
+      name,
+      type: normalizedType,
+      strippedType: stripGenerics(normalizedType),
+      fields: handler.fields!,
+      bcsSchema: buildBcsSchema(handler.fields!),
+    };
+  });
 
-  // Build lookup maps for fast matching
-  // Exact match first, then stripped match
+  // Build lookup maps for fast matching (all keys normalized)
   const exactMap = new Map<string, CompiledHandler>();
   const strippedMap = new Map<string, CompiledHandler>();
   for (const handler of compiled) {
@@ -108,12 +111,15 @@ export function createProcessor(handlers: Record<string, EventHandler>): EventPr
   }
 
   function matchHandler(eventType: string): CompiledHandler | undefined {
+    // Normalize incoming event type for consistent matching
+    const normalized = normalizeEventType(eventType);
+
     // Try exact match first
-    const exact = exactMap.get(eventType);
+    const exact = exactMap.get(normalized);
     if (exact) return exact;
 
     // Try stripping generics from the incoming event type
-    const stripped = stripGenerics(eventType);
+    const stripped = stripGenerics(normalized);
     return strippedMap.get(stripped);
   }
 

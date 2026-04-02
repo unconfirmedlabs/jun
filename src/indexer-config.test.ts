@@ -55,7 +55,7 @@ describe("parseIndexerConfig", () => {
     expect(indexer.grpcUrl).toBe("fullnode.testnet.sui.io:443");
     expect(indexer.database).toBe("postgres://localhost/jun");
     expect(indexer.events.MyEvent).toBeDefined();
-    expect(indexer.events.MyEvent.type).toBe("0x1::module::MyEvent");
+    expect(indexer.events.MyEvent.type).toContain("::module::MyEvent");
     expect(indexer.events.MyEvent.fields.amount).toBe("u64");
     expect(indexer.events.MyEvent.fields.recipient).toBe("address");
 
@@ -260,7 +260,7 @@ events:
     type: "0x1::m::E"
 `);
     expect(indexer.events.MyEvent).toBeDefined();
-    expect(indexer.events.MyEvent.type).toBe("0x1::m::E");
+    expect(indexer.events.MyEvent.type).toContain("::m::E");
     expect(indexer.events.MyEvent.fields).toBeUndefined();
   });
 

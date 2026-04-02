@@ -6,6 +6,8 @@
  * Non-primitive types (custom structs, enums) are flagged for manual handling.
  */
 import type { GrpcDatatypeDescriptor, GrpcOpenSignatureBody } from "./grpc.ts";
+import { normalizeSuiAddress } from "./normalize.ts";
+import { SUI_FRAMEWORK_ADDRESS, MOVE_STDLIB_ADDRESS } from "@mysten/sui/utils";
 
 // ---------------------------------------------------------------------------
 // Result type
@@ -29,19 +31,11 @@ export interface CodegenResult {
 // Address normalization
 // ---------------------------------------------------------------------------
 
-/** Strip leading zeros from a Sui address: 0x0000...0002 -> 0x2 */
-function normalizeAddress(addr: string): string {
-  if (!addr.startsWith("0x")) return addr;
-  const hex = addr.slice(2).replace(/^0+/, "");
-  return "0x" + (hex || "0");
-}
-
 /** Normalize the package address in a fully qualified type name */
 function normalizeTypeName(typeName: string): string {
-  // Format: 0xADDR::module::Name
   const parts = typeName.split("::");
-  if (parts.length >= 1 && parts[0].startsWith("0x")) {
-    parts[0] = normalizeAddress(parts[0]);
+  if (parts.length >= 1 && parts[0]!.startsWith("0x")) {
+    parts[0] = normalizeSuiAddress(parts[0]!);
   }
   return parts.join("::");
 }
@@ -94,16 +88,17 @@ export function mapSignatureToFieldType(sig: GrpcOpenSignatureBody): { type: str
     case "DATATYPE": {
       const typeName = normalizeTypeName(sig.typeName || "");
 
-      // Well-known types that map to primitives
-      if (typeName === "0x2::object::ID" || typeName === "0x2::object::UID") {
+      // Well-known types that map to primitives (SDK-provided canonical addresses)
+
+      if (typeName === `${SUI_FRAMEWORK_ADDRESS}::object::ID` || typeName === `${SUI_FRAMEWORK_ADDRESS}::object::UID`) {
         return { type: "address", rawType: typeName };
       }
 
-      if (typeName === "0x1::string::String" || typeName === "0x1::ascii::String") {
+      if (typeName === `${MOVE_STDLIB_ADDRESS}::string::String` || typeName === `${MOVE_STDLIB_ADDRESS}::ascii::String`) {
         return { type: "string", rawType: typeName };
       }
 
-      if (typeName === "0x1::option::Option") {
+      if (typeName === `${MOVE_STDLIB_ADDRESS}::option::Option`) {
         const inner = sig.typeParameterInstantiation?.[0];
         if (!inner) return { type: null, rawType: "Option<?>" };
         const mapped = mapSignatureToFieldType(inner);

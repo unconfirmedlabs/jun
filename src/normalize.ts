@@ -1,0 +1,68 @@
+/**
+ * Shared normalization utilities using @mysten/sui/utils.
+ *
+ * All Sui addresses, object IDs, and struct tags are normalized to their
+ * canonical forms before storage, comparison, or filtering.
+ */
+import {
+  normalizeSuiAddress,
+  isValidSuiAddress,
+  normalizeStructTag,
+} from "@mysten/sui/utils";
+
+export { normalizeSuiAddress, isValidSuiAddress, normalizeStructTag };
+
+/**
+ * Normalize a coin type string.
+ * "0x2::sui::SUI" → "0x0000...0002::sui::SUI"
+ * "0x0000...0002::sui::SUI" → "0x0000...0002::sui::SUI" (already normalized)
+ */
+export function normalizeCoinType(coinType: string): string {
+  try {
+    return normalizeStructTag(coinType);
+  } catch {
+    // If normalizeStructTag fails (malformed type), try manual normalization
+    const parts = coinType.split("::");
+    if (parts.length >= 3) {
+      parts[0] = normalizeSuiAddress(parts[0]!);
+    }
+    return parts.join("::");
+  }
+}
+
+/**
+ * Normalize a Move event type string (may include generics).
+ * "0x2::coin::Coin<0x2::sui::SUI>" → normalized form
+ */
+export function normalizeEventType(eventType: string): string {
+  try {
+    return normalizeStructTag(eventType);
+  } catch {
+    // Fallback for complex generics that normalizeStructTag can't handle
+    return eventType;
+  }
+}
+
+/**
+ * Validate that a string is a valid Sui address (with or without 0x prefix).
+ * Returns the normalized address if valid, throws if invalid.
+ */
+export function validateAndNormalizeAddress(address: string, context: string): string {
+  const normalized = normalizeSuiAddress(address);
+  if (!isValidSuiAddress(normalized)) {
+    throw new Error(`Invalid Sui address in ${context}: "${address}"`);
+  }
+  return normalized;
+}
+
+/**
+ * Extract and validate the package address from a Move type string.
+ * "0x10ad...::pressing::RecordPressedEvent" → validates 0x10ad..., returns normalized
+ */
+export function validateEventTypeAddress(eventType: string, context: string): void {
+  const parts = eventType.split("::");
+  if (parts.length < 3) {
+    throw new Error(`Invalid Move type in ${context}: "${eventType}". Expected format: 0xPKG::module::StructName`);
+  }
+  validateAndNormalizeAddress(parts[0]!, context);
+}
