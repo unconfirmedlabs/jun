@@ -26,6 +26,7 @@ import { createBroadcastManager, createNATSTarget, type BroadcastManager, type B
 import type { HotReloadContext } from "./hot-reload.ts";
 import { createBalanceProcessor, type BalanceProcessor } from "./balance-processor.ts";
 import { createBalanceWriter, type BalanceWriter } from "./output/balance-writer.ts";
+import { resolveEventHandlerFields } from "./resolve-fields.ts";
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -223,23 +224,32 @@ export function defineIndexer(config: IndexerConfig): Indexer {
   let _sql: any = null;
   let _grpcClient: GrpcClient | null = null;
 
-  // Build handler table mapping
-  const handlerTables: Record<string, { tableName: string; fields: EventHandler["fields"] }> = {};
-  for (const [name, handler] of Object.entries(events)) {
-    handlerTables[name] = {
-      tableName: toTableName(name),
-      fields: handler.fields,
-    };
-  }
+  // Mutable handler table mapping (rebuilt after field resolution)
+  let handlerTables: Record<string, { tableName: string; fields: FieldDefs }> = {};
 
   /** Initialize all services */
   async function init() {
     _sql = new SQL(database);
+    _grpcClient = createGrpcClient({ url: grpcUrl });
+
+    // Auto-resolve fields from chain for handlers that don't specify them
+    if (Object.keys(events).length > 0) {
+      await resolveEventHandlerFields(events, _grpcClient, log);
+    }
+
+    // Build handler table mapping (after fields are resolved)
+    handlerTables = {};
+    for (const [name, handler] of Object.entries(events)) {
+      handlerTables[name] = {
+        tableName: toTableName(name),
+        fields: handler.fields!,
+      };
+    }
+
     const state = await createStateManager(_sql);
     const output = createPostgresOutput(_sql, handlerTables);
     await output.migrate();
     const processor = createProcessor(events);
-    _grpcClient = createGrpcClient({ url: grpcUrl });
     log.info({ network, events: Object.keys(events) }, "initialized");
     return { sql: _sql, state, output, processor, grpcClient: _grpcClient };
   }

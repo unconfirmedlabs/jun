@@ -117,9 +117,7 @@ export function parseIndexerConfig(yamlContent: string): ParsedIndexerConfig {
     if (!handler.type) {
       throw new Error(`Invalid config: event "${name}" is missing "type"`);
     }
-    if (!handler.fields || typeof handler.fields !== "object") {
-      throw new Error(`Invalid config: event "${name}" is missing "fields"`);
-    }
+    // fields is optional — auto-resolved from chain at startup if not provided
   }
 
   // Handle startCheckpoint: YAML number → bigint, string → string (for resolution)

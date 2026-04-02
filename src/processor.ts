@@ -16,8 +16,10 @@ import { buildBcsSchema, formatRow } from "./schema.ts";
 export interface EventHandler {
   /** Fully-qualified Move event type, e.g. "0x...::module::EventStruct" */
   type: string;
-  /** Field definitions for BCS decoding */
-  fields: FieldDefs;
+  /** Start checkpoint for backfill (optional, overrides global startCheckpoint) */
+  startCheckpoint?: bigint | string;
+  /** Field definitions for BCS decoding. Auto-fetched from chain if not provided. */
+  fields?: FieldDefs;
 }
 
 /** A decoded event ready for output */
@@ -92,8 +94,8 @@ export function createProcessor(handlers: Record<string, EventHandler>): EventPr
     name,
     type: handler.type,
     strippedType: stripGenerics(handler.type),
-    fields: handler.fields,
-    bcsSchema: buildBcsSchema(handler.fields),
+    fields: handler.fields!,
+    bcsSchema: buildBcsSchema(handler.fields!),
   }));
 
   // Build lookup maps for fast matching

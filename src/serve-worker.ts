@@ -78,8 +78,11 @@ async function startServer(config: WorkerConfig): Promise<void> {
     async fetch(req) {
       const url = new URL(req.url);
 
-      if (url.pathname === "/query") {
-        return handleQuery(url, sql, config);
+      if (url.pathname === "/query" && req.method === "POST") {
+        return handleQuery(req, sql);
+      }
+      if (url.pathname === "/query" && req.method === "GET") {
+        return Response.json({ error: "use POST with JSON body: { sql, limit?, timeout? }" }, { status: 405 });
       }
       if (url.pathname === "/admin/reload" && req.method === "POST") {
         return handleReload(req, config);
@@ -97,13 +100,19 @@ async function startServer(config: WorkerConfig): Promise<void> {
 }
 
 async function handleQuery(
-  url: URL,
+  req: Request,
   sql: any,
-  config: WorkerConfig,
 ): Promise<Response> {
-  const rawSql = url.searchParams.get("sql");
-  if (!rawSql) {
-    return Response.json({ error: "missing ?sql= parameter" }, { status: 400 });
+  let body: { sql?: string; limit?: number; timeout?: number };
+  try {
+    body = await req.json();
+  } catch {
+    return Response.json({ error: "invalid JSON body. Expected: { sql, limit?, timeout? }" }, { status: 400 });
+  }
+
+  const rawSql = body.sql;
+  if (!rawSql || typeof rawSql !== "string") {
+    return Response.json({ error: "missing 'sql' field in request body" }, { status: 400 });
   }
 
   function stripComments(s: string): string {
@@ -115,10 +124,8 @@ async function handleQuery(
     return Response.json({ error: "only SELECT, WITH, and EXPLAIN queries are allowed" }, { status: 403 });
   }
 
-  const limitParam = parseInt(url.searchParams.get("limit") ?? "1000", 10);
-  const rowLimit = Math.min(Math.max(1, limitParam), 10000);
-  const timeoutParam = parseInt(url.searchParams.get("timeout") ?? "5000", 10);
-  const timeoutMs = Math.min(Math.max(100, timeoutParam), 30000);
+  const rowLimit = Math.min(Math.max(1, body.limit ?? 1000), 10000);
+  const timeoutMs = Math.min(Math.max(100, body.timeout ?? 5000), 30000);
 
   try {
     const rows = await sql.begin(async (transaction: any) => {

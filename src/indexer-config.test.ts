@@ -250,15 +250,18 @@ events:
 `)).toThrow('event "BadEvent" is missing "type"');
   });
 
-  test("event missing fields throws", () => {
-    expect(() => parseIndexerConfig(`
+  test("event without fields is valid (auto-resolved at startup)", () => {
+    const { indexer } = parseIndexerConfig(`
 network: testnet
 grpcUrl: fullnode.testnet.sui.io:443
 database: postgres://localhost/db
 events:
-  BadEvent:
+  MyEvent:
     type: "0x1::m::E"
-`)).toThrow('event "BadEvent" is missing "fields"');
+`);
+    expect(indexer.events.MyEvent).toBeDefined();
+    expect(indexer.events.MyEvent.type).toBe("0x1::m::E");
+    expect(indexer.events.MyEvent.fields).toBeUndefined();
   });
 
   test("parses views from config", () => {
