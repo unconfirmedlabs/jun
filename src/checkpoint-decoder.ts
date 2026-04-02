@@ -1,21 +1,70 @@
 /**
  * Worker thread for checkpoint decoding.
  *
- * Primary path (Zig FFI): single native call from compressed bytes →
- * balance changes + decoded events. No JS decompression or BCS parsing.
+ * Native path: Zig FFI processes compressed bytes, worker transfers the raw
+ * output buffer to main thread (zero structured clone — only flat bytes).
  *
- * Fallback path (JS): zstd decompress → proto parse → BCS decode.
- * Used when native lib unavailable or JUN_LEGACY_PARSERS=1.
+ * Legacy path: JS zstd + proto + BCS decode → structured clone of JS objects.
  */
 /// <reference lib="webworker" />
-import { processCheckpointCompressed, nativeProcessorAvailable } from "./checkpoint-processor-native.ts";
+import { dlopen, ptr, suffix, FFIType } from "bun:ffi";
+import { existsSync } from "fs";
+import { join } from "path";
 import { decodeCheckpointFromProto, getCheckpointType } from "./archive.ts";
 import { parseCheckpointProtoNative } from "./proto-parser-native.ts";
 import { computeBalanceChangesFromArchive } from "./archive-balance.ts";
 import { zstdDecompressSync } from "zlib";
 
 const USE_LEGACY = process.env.JUN_LEGACY_PARSERS === "1";
-const USE_NATIVE = nativeProcessorAvailable && !USE_LEGACY;
+
+// Load Zig lib directly in worker (avoid checkpoint-processor-native.ts overhead)
+const LIB_NAME = `libcheckpoint_processor.${suffix}`;
+const LIB_PATHS = [
+  join(import.meta.dir, "..", "native", LIB_NAME),
+  join(import.meta.dir, "..", LIB_NAME),
+];
+
+let zigProcess: ((cp: number, cl: number, op: number, oc: number, fp: number, fl: number) => number) | null = null;
+
+if (!USE_LEGACY) {
+  for (const libPath of LIB_PATHS) {
+    if (existsSync(libPath)) {
+      try {
+        const lib = dlopen(libPath, {
+          process_checkpoint_compressed: {
+            args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32],
+            returns: FFIType.u32,
+          },
+        });
+        zigProcess = lib.symbols.process_checkpoint_compressed;
+        break;
+      } catch {}
+    }
+  }
+}
+
+// Per-worker output buffer (2MB)
+const OUTPUT_CAP = 2 * 1024 * 1024;
+const outputBuf = new Uint8Array(OUTPUT_CAP);
+const outputPtr = ptr(outputBuf);
+
+// Pre-encode filter once per worker
+const emptyFilterPtr = ptr(new Uint8Array(1));
+let filterBuf: Uint8Array | null = null;
+let filterPtr = 0;
+let filterLen = 0;
+
+function encodeFilter(balanceCoinTypes: string[] | null): void {
+  if (!balanceCoinTypes || balanceCoinTypes.length === 0) {
+    filterPtr = emptyFilterPtr;
+    filterLen = 0;
+    return;
+  }
+  const encoded = new TextEncoder().encode(balanceCoinTypes.join("\0"));
+  filterBuf = encoded;
+  filterPtr = ptr(encoded);
+  filterLen = encoded.length;
+}
 
 declare var self: Worker;
 
@@ -28,50 +77,34 @@ self.onmessage = async (event: MessageEvent) => {
   };
 
   try {
-    const sequenceNumber = BigInt(seq);
     const compressedBytes = new Uint8Array(compressed);
-    const coinTypeFilter = balanceCoinTypes === null ? null
-      : balanceCoinTypes.length === 0 ? null
-      : new Set(balanceCoinTypes);
 
-    // --- Native path: single Zig call (zstd + proto + BCS + diff) ---
-    if (USE_NATIVE) {
-      const result = processCheckpointCompressed(compressedBytes, sequenceNumber, coinTypeFilter);
+    // --- Native path: Zig processes, transfer raw output bytes ---
+    if (zigProcess) {
+      encodeFilter(balanceCoinTypes);
 
-      if (result) {
-        const timestamp = result.timestampMs > 0
-          ? { seconds: String(Math.floor(result.timestampMs / 1000)), nanos: (result.timestampMs % 1000) * 1_000_000 }
-          : { seconds: "0", nanos: 0 };
+      const bytesWritten = zigProcess(
+        ptr(compressedBytes), compressedBytes.length,
+        outputPtr, OUTPUT_CAP,
+        filterPtr, filterLen,
+      );
 
-        // Build the same response shape as the JS path
-        const transactions = [{
-          digest: "",
-          events: result.events.length > 0 ? { events: result.events } : null,
-          effects: undefined,
-          balanceChanges: undefined,
-        }];
+      if (bytesWritten >= 16) {
+        // Copy output to a new buffer for transfer (outputBuf is reused)
+        const rawOutput = new Uint8Array(bytesWritten);
+        rawOutput.set(outputBuf.subarray(0, bytesWritten));
 
-        const decoded = {
-          cursor: seq,
-          checkpoint: {
-            sequenceNumber: seq,
-            summary: { timestamp },
-            transactions,
-          },
-        };
-
-        postMessage({
-          id,
-          decoded,
-          balanceChanges: balanceCoinTypes !== null ? result.balanceChanges : null,
-          error: null,
-        });
+        postMessage(
+          { id, raw: rawOutput, error: null },
+          [rawOutput.buffer], // transferable — zero-copy to main thread
+        );
         return;
       }
-      // Native failed — fall through to JS path
+      // Zig failed — fall through to JS
     }
 
     // --- JS fallback path ---
+    const sequenceNumber = BigInt(seq);
     const decompressed = zstdDecompressSync(Buffer.from(compressedBytes));
 
     let checkpointProto: any;
@@ -87,11 +120,11 @@ self.onmessage = async (event: MessageEvent) => {
 
     let balanceChanges: any[] | null = null;
     if (balanceCoinTypes !== null) {
+      const coinTypeFilter = balanceCoinTypes.length === 0 ? null : new Set(balanceCoinTypes);
       const timestamp = decoded.checkpoint.summary?.timestamp;
       const timestampDate = timestamp
         ? new Date(Number(BigInt(timestamp.seconds) * 1000n + BigInt(Math.floor(timestamp.nanos / 1_000_000))))
         : new Date(0);
-
       balanceChanges = computeBalanceChangesFromArchive(
         checkpointProto, sequenceNumber, timestampDate, coinTypeFilter,
       );
@@ -101,6 +134,7 @@ self.onmessage = async (event: MessageEvent) => {
   } catch (err) {
     postMessage({
       id,
+      raw: null,
       decoded: null,
       balanceChanges: null,
       error: err instanceof Error ? err.message : String(err),

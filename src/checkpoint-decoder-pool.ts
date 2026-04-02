@@ -40,6 +40,75 @@ interface PendingJob {
 }
 
 // ---------------------------------------------------------------------------
+// Raw output parser (reads Zig binary format on main thread)
+// ---------------------------------------------------------------------------
+
+function readStr(buf: Uint8Array, pos: number, len: number): string {
+  let s = "";
+  for (let i = 0; i < len; i++) s += String.fromCharCode(buf[pos + i]!);
+  return s;
+}
+
+function parseRawOutput(raw: Uint8Array): DecodeResult {
+  const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+
+  // Header: u32 numBal + u32 numEvents + u64 timestampMs
+  const numBal = view.getUint32(0, true);
+  const numEvents = view.getUint32(4, true);
+  const timestampMs = Number(view.getBigUint64(8, true));
+  const timestamp = new Date(timestampMs);
+  const seconds = String(Math.floor(timestampMs / 1000));
+  const nanos = (timestampMs % 1000) * 1_000_000;
+
+  let pos = 16;
+
+  // Balance changes
+  const balanceChanges: BalanceChange[] = new Array(numBal);
+  for (let i = 0; i < numBal; i++) {
+    const ownerLen = view.getUint16(pos, true); pos += 2;
+    const address = readStr(raw, pos, ownerLen); pos += ownerLen;
+    const ctLen = view.getUint16(pos, true); pos += 2;
+    const coinType = readStr(raw, pos, ctLen); pos += ctLen;
+    const amount = view.getBigInt64(pos, true); pos += 8;
+    balanceChanges[i] = {
+      txDigest: "", checkpointSeq: 0n, address, coinType,
+      amount: amount.toString(), timestamp,
+    };
+  }
+
+  // Events
+  const events: any[] = new Array(numEvents);
+  for (let i = 0; i < numEvents; i++) {
+    const pkgLen = view.getUint16(pos, true); pos += 2;
+    const packageId = readStr(raw, pos, pkgLen); pos += pkgLen;
+    const modLen = view.getUint16(pos, true); pos += 2;
+    const module = readStr(raw, pos, modLen); pos += modLen;
+    const sndLen = view.getUint16(pos, true); pos += 2;
+    const sender = readStr(raw, pos, sndLen); pos += sndLen;
+    const etLen = view.getUint16(pos, true); pos += 2;
+    const eventType = readStr(raw, pos, etLen); pos += etLen;
+    const contentsLen = view.getUint32(pos, true); pos += 4;
+    const value = raw.slice(pos, pos + contentsLen); pos += contentsLen;
+    events[i] = { packageId, module, sender, eventType, contents: { name: eventType, value } };
+  }
+
+  // Build GrpcCheckpointResponse shape
+  const decoded: GrpcCheckpointResponse = {
+    cursor: "0",
+    checkpoint: {
+      sequenceNumber: "0",
+      summary: { timestamp: { seconds, nanos } },
+      transactions: [{
+        digest: "",
+        events: events.length > 0 ? { events } : null,
+      }],
+    },
+  };
+
+  return { decoded, balanceChanges: numBal > 0 ? balanceChanges : null };
+}
+
+// ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
 
@@ -71,15 +140,19 @@ export function createCheckpointDecoderPool(
     const worker = new Worker(workerUrl);
 
     worker.onmessage = (event: MessageEvent) => {
-      const { id, decoded, balanceChanges, error } = event.data;
-      const job = pending.get(id);
+      const msg = event.data;
+      const job = pending.get(msg.id);
       if (!job) return;
-      pending.delete(id);
+      pending.delete(msg.id);
 
-      if (error) {
-        job.reject(new Error(error));
+      if (msg.error) {
+        job.reject(new Error(msg.error));
+      } else if (msg.raw) {
+        // Native path: raw Zig output buffer — parse on main thread
+        job.resolve(parseRawOutput(msg.raw));
       } else {
-        job.resolve({ decoded, balanceChanges });
+        // Legacy path: pre-parsed JS objects
+        job.resolve({ decoded: msg.decoded, balanceChanges: msg.balanceChanges });
       }
     };
 
