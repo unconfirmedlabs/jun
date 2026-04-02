@@ -27,17 +27,28 @@ let nativeLib: {
     output_ptr: number, output_capacity: number,
     filter_ptr: number, filter_len: number,
   ) => number;
+  compute_balance_changes_compressed: (
+    compressed_ptr: number, compressed_len: number,
+    output_ptr: number, output_capacity: number,
+    filter_ptr: number, filter_len: number,
+  ) => number;
 } | null = null;
+
+const ffiSymbols = {
+  compute_balance_changes: {
+    args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32] as const,
+    returns: FFIType.u32 as const,
+  },
+  compute_balance_changes_compressed: {
+    args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32] as const,
+    returns: FFIType.u32 as const,
+  },
+};
 
 for (const libPath of LIB_PATHS) {
   if (existsSync(libPath)) {
     try {
-      const lib = dlopen(libPath, {
-        compute_balance_changes: {
-          args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32],
-          returns: FFIType.u32,
-        },
-      });
+      const lib = dlopen(libPath, ffiSymbols);
       nativeLib = lib.symbols;
       break;
     } catch {}
@@ -128,6 +139,65 @@ export function computeBalanceChangesNative(
     pos += ctLen;
 
     // amount (i64)
+    const amount = outputView.getBigInt64(pos, true);
+    pos += 8;
+
+    changes[i] = {
+      txDigest: "",
+      checkpointSeq,
+      address: owner,
+      coinType,
+      amount: amount.toString(),
+      timestamp,
+    };
+  }
+
+  return changes;
+}
+
+/**
+ * Compute balance changes directly from compressed (.binpb.zst) bytes.
+ * Single FFI call: zstd decompress → proto parse → BCS parse → diff → aggregate.
+ * No JS decompression, no Buffer.from() copy.
+ */
+export function computeBalanceChangesCompressed(
+  compressed: Uint8Array,
+  checkpointSeq: bigint,
+  timestamp: Date,
+  coinTypeFilter: Set<string> | null,
+): BalanceChange[] | null {
+  if (!nativeLib) return null;
+
+  const filter = getFilterBuffer(coinTypeFilter);
+
+  const bytesWritten = nativeLib.compute_balance_changes_compressed(
+    ptr(compressed),
+    compressed.length,
+    outputPtr,
+    OUTPUT_CAPACITY,
+    filter.ptr,
+    filter.len,
+  );
+
+  if (bytesWritten === 0 || bytesWritten < 4) return null;
+
+  const numChanges = outputView.getUint32(0, true);
+  const changes: BalanceChange[] = new Array(numChanges);
+  let pos = 4;
+
+  for (let i = 0; i < numChanges; i++) {
+    const ownerLen = outputView.getUint16(pos, true);
+    pos += 2;
+    let owner = "";
+    for (let j = 0; j < ownerLen; j++) owner += String.fromCharCode(outputBuf[pos + j]!);
+    pos += ownerLen;
+
+    const ctLen = outputView.getUint16(pos, true);
+    pos += 2;
+    let coinType = "";
+    for (let j = 0; j < ctLen; j++) coinType += String.fromCharCode(outputBuf[pos + j]!);
+    pos += ctLen;
+
     const amount = outputView.getBigInt64(pos, true);
     pos += 8;
 

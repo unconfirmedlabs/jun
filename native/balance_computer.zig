@@ -1,6 +1,11 @@
-// Complete balance change computation from decompressed protobuf bytes.
-// Single FFI call: proto parse → effects BCS → coin BCS → diff → aggregate.
-// Zero heap allocations. All working memory is stack-based with fixed upper bounds.
+// Complete balance change computation from checkpoint data.
+// Single FFI call: [zstd decompress →] proto parse → effects BCS → coin BCS → diff → aggregate.
+//
+// Two entry points:
+//   compute_balance_changes            — takes decompressed protobuf bytes
+//   compute_balance_changes_compressed — takes zstd-compressed bytes, decompresses internally
+//
+// Zero heap allocations for the core pipeline. Decompression uses a fixed 4MB stack buffer.
 //
 // Output format:
 //   u32 num_changes
@@ -931,9 +936,42 @@ fn filterMatch(filter: []const u8, ct: []const u8) bool {
             start = i + 1;
         }
     }
-    // Check last entry (may not end with \0)
     if (start < filter.len) {
         if (std.mem.eql(u8, filter[start..], ct)) return true;
     }
     return false;
+}
+
+// --- Compressed entry point (links against system libzstd) ---
+
+const zstd_c = @cImport(@cInclude("zstd.h"));
+const DECOMPRESS_BUF_SIZE = 4 * 1024 * 1024; // 4MB max decompressed size
+
+export fn compute_balance_changes_compressed(
+    compressed_ptr: [*]const u8,
+    compressed_len: u32,
+    output_ptr: [*]u8,
+    output_capacity: u32,
+    filter_ptr: [*]const u8,
+    filter_len: u32,
+) u32 {
+    var decompress_buf: [DECOMPRESS_BUF_SIZE]u8 = undefined;
+
+    const result = zstd_c.ZSTD_decompress(
+        &decompress_buf,
+        DECOMPRESS_BUF_SIZE,
+        compressed_ptr,
+        compressed_len,
+    );
+
+    if (zstd_c.ZSTD_isError(result) != 0) return 0;
+
+    return compute_balance_changes(
+        &decompress_buf,
+        @intCast(result),
+        output_ptr,
+        output_capacity,
+        filter_ptr,
+        filter_len,
+    );
 }
