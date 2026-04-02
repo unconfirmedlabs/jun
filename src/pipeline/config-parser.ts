@@ -12,7 +12,6 @@ import { createEventDecoder } from "./processors/event-decoder.ts";
 import { createBalanceTracker } from "./processors/balance-tracker.ts";
 import { createPostgresDestination } from "./destinations/postgres.ts";
 import { createSqliteDestination } from "./destinations/sqlite.ts";
-import { createParquetDestination } from "./destinations/parquet.ts";
 import { createSseDestination } from "./destinations/sse.ts";
 import { createNatsDestination } from "./destinations/nats.ts";
 import { createStdoutDestination } from "./destinations/stdout.ts";
@@ -178,17 +177,6 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
       path: sqlitePath,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
-    }));
-  }
-
-  if (destinationConfig.parquet) {
-    destinations.push(createParquetDestination({
-      path: destinationConfig.parquet.path,
-      handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
-      partitionBy: destinationConfig.parquet.partitionBy,
-      flushInterval: destinationConfig.parquet.flushInterval,
-      flushSize: destinationConfig.parquet.flushSize,
-      s3: destinationConfig.parquet.s3,
     }));
   }
 

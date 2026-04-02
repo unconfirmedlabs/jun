@@ -6,7 +6,6 @@ Sui data pipeline for Bun. Composable Source → Processor → Destination archi
 Sui Fullnode ──gRPC──▶ Sources ──▶ Processors ──▶ Destinations
                        (live)     (events)        (Postgres)
                        (archive)  (balances)       (SQLite)
-                                                   (Parquet/S3)
                                                    (SSE)
                                                    (NATS)
 ```
@@ -113,7 +112,6 @@ processors:
 |-------------|-------------|
 | `postgres` | Batch inserts. Event tables + balance tables (ledger + running totals). |
 | `sqlite` | Local SQLite file with WAL mode. |
-| `parquet` | Day-partitioned Parquet files. Optional S3/R2 upload. |
 | `sse` | Server-Sent Events streaming with filtering. |
 | `nats` | NATS pub/sub with subject hierarchy. |
 | `stdout` | Console output (JSONL or formatted). |
@@ -125,13 +123,6 @@ destinations:
 
   sqlite:
     path: ./events.db
-
-  parquet:
-    path: ./data
-    flushInterval: 5m
-    s3:
-      bucket: my-bucket
-      endpoint: $S3_ENDPOINT
 
   sse:
     port: 8080
@@ -245,7 +236,6 @@ jun/pipeline/processors/event-decoder   createEventDecoder
 jun/pipeline/processors/balance-tracker createBalanceTracker
 jun/pipeline/destinations/postgres      createPostgresDestination
 jun/pipeline/destinations/sqlite        createSqliteDestination
-jun/pipeline/destinations/parquet       createParquetDestination
 jun/pipeline/destinations/sse           createSseDestination
 jun/pipeline/destinations/nats          createNatsDestination
 jun/pipeline/destinations/stdout        createStdoutDestination
@@ -278,7 +268,6 @@ src/
     destinations/
       postgres.ts         Batch inserts (events + balances)
       sqlite.ts           SQLite with WAL
-      parquet.ts          Partitioned Parquet + S3
       sse.ts              SSE streaming
       nats.ts             NATS publishing
       stdout.ts           Console output
