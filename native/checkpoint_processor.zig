@@ -1058,7 +1058,8 @@ export fn process_checkpoint(
 }
 
 /// Process a zstd-compressed checkpoint → balance changes + events.
-/// Decompresses internally, then calls the same core logic.
+/// Decompresses internally using a threadlocal buffer (safe in worker threads),
+/// then calls the same core logic.
 export fn process_checkpoint_compressed(
     compressed_ptr: [*]const u8,
     compressed_len: u32,
@@ -1067,11 +1068,14 @@ export fn process_checkpoint_compressed(
     filter_ptr: [*]const u8,
     filter_len: u32,
 ) u32 {
-    var decompress_buf: [DECOMPRESS_BUF_SIZE]u8 = undefined;
-    const result = zstd_c.ZSTD_decompress(&decompress_buf, DECOMPRESS_BUF_SIZE, compressed_ptr, compressed_len);
+    // threadlocal avoids 4MB stack allocation that overflows worker thread stacks
+    const S = struct {
+        threadlocal var decompress_buf: [DECOMPRESS_BUF_SIZE]u8 = undefined;
+    };
+    const result = zstd_c.ZSTD_decompress(&S.decompress_buf, DECOMPRESS_BUF_SIZE, compressed_ptr, compressed_len);
     if (zstd_c.ZSTD_isError(result) != 0) return 0;
 
-    const buf = decompress_buf[0..result];
+    const buf = S.decompress_buf[0..result];
     const out = output_ptr[0..output_capacity];
     const filter = if (filter_len > 0) filter_ptr[0..filter_len] else @as([]const u8, &.{});
     return processInternal(buf, out, filter);
