@@ -2707,6 +2707,7 @@ indexerCmd
   .option("--serve <port>", "start HTTP server on port")
   .option("--no-serve", "disable HTTP server even if set in config")
   .option("--workers <count>", "number of decoder worker threads (default: auto)")
+  .option("--verbose", "print every indexed event and balance change")
   .action(async (configFile: string | undefined, opts: {
     configUrl?: string;
     mode?: string;
@@ -2714,6 +2715,7 @@ indexerCmd
     serve?: string;
     noServe?: boolean;
     workers?: string;
+    verbose?: boolean;
   }) => {
     try {
       const { resolve } = await import("path");
@@ -2744,6 +2746,7 @@ indexerCmd
       }
       const runOpts = mergeRunOptions(yamlRunOpts, opts);
       if (configUrl) runOpts.configUrl = configUrl;
+      if (opts.verbose) runOpts.verbose = true;
 
       // Set up materialized views (separate sql connection)
       let viewManager: { stop(): void } | null = null;

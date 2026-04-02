@@ -13,7 +13,7 @@ import pMap from "p-map";
 import pRetry from "p-retry";
 import { createGrpcClient, type GrpcClient } from "./grpc.ts";
 import { createArchiveClient, cachedGetCheckpoint, fetchCompressed, type ArchiveClient } from "./archive.ts";
-import { createProcessor, type EventHandler, type EventProcessor } from "./processor.ts";
+import { createProcessor, type EventHandler, type EventProcessor, type DecodedEvent } from "./processor.ts";
 import { createPostgresOutput, type PostgresOutput } from "./output/postgres.ts";
 import { createStateManager, type StateManager } from "./state.ts";
 import { createWriteBuffer, type WriteBuffer } from "./buffer.ts";
@@ -24,7 +24,7 @@ import { createServer, createMetrics, type IndexerMetrics } from "./serve.ts";
 import { createCheckpointDecoderPool, defaultWorkerCount, type CheckpointDecoderPool } from "./checkpoint-decoder-pool.ts";
 import { createBroadcastManager, createNATSTarget, type BroadcastManager, type BroadcastTarget } from "./broadcast.ts";
 import type { HotReloadContext } from "./hot-reload.ts";
-import { createBalanceProcessor, type BalanceProcessor } from "./balance-processor.ts";
+import { createBalanceProcessor, type BalanceProcessor, type BalanceChange } from "./balance-processor.ts";
 import { createBalanceWriter, type BalanceWriter } from "./output/balance-writer.ts";
 import { resolveEventHandlerFields } from "./resolve-fields.ts";
 
@@ -78,6 +78,8 @@ export interface RunOptions {
   broadcastTargets?: BroadcastTarget[];
   /** Remote config URL for /admin/reload without body */
   configUrl?: string;
+  /** Print every indexed event and balance change to stdout */
+  verbose?: boolean;
 }
 
 export interface Indexer {
@@ -316,7 +318,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
           // Extract balance changes if enabled
           if (balanceProcessor) {
             const changes = balanceProcessor.extract(response);
-            buffer.pushBalances(changes);
+            buffer.pushBalanceChanges(changes);
           }
 
           await buffer.push(decoded, cursorKey, seq);
@@ -448,10 +450,10 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             // Balance changes: use worker-computed archive balances if available,
             // otherwise extract from gRPC balance_changes field (live mode)
             if (result.balanceChanges && result.balanceChanges.length > 0) {
-              buffer.pushBalances(result.balanceChanges);
+              buffer.pushBalanceChanges(result.balanceChanges);
             } else if (balanceProcessor) {
               const changes = balanceProcessor.extract(response);
-              buffer.pushBalances(changes);
+              buffer.pushBalanceChanges(changes);
             }
 
             pending.set(seq, decoded);
@@ -678,6 +680,48 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         log.info({ coinTypes: balancesConfig.coinTypes }, "balance indexing enabled");
       }
 
+      const verbose = options?.verbose ?? false;
+
+      // Verbose: print startup config summary
+      if (verbose) {
+        console.log("\n=== Jun Indexer ===");
+        console.log(`Network:    ${network}`);
+        console.log(`gRPC:       ${grpcUrl}`);
+        console.log(`Database:   ${database.replace(/\/\/.*:.*@/, "//***:***@")}`);
+        if (startSeq !== null) console.log(`Backfill:   from checkpoint ${startSeq}`);
+        console.log(`Mode:       ${mode}`);
+        if (Object.keys(events).length > 0) {
+          console.log(`\nEvents:`);
+          for (const [name, handler] of Object.entries(events)) {
+            console.log(`  ${name} → ${handler.type}`);
+          }
+        }
+        if (balancesConfig) {
+          console.log(`\nBalances:`);
+          if (balancesConfig.coinTypes === "*") {
+            console.log("  All coin types");
+          } else {
+            for (const coinType of balancesConfig.coinTypes) {
+              console.log(`  ${coinType}`);
+            }
+          }
+        }
+        console.log("");
+      }
+
+      // Verbose event/balance printer
+      function verboseEvent(event: DecodedEvent, source: string): void {
+        const shortAddr = event.sender.slice(0, 10) + "..." + event.sender.slice(-4);
+        console.log(`[${source}] EVENT  cp:${event.checkpointSeq} ${event.handlerName} sender:${shortAddr} ${JSON.stringify(event.data)}`);
+      }
+
+      function verboseBalance(change: BalanceChange, source: string): void {
+        const shortAddr = change.address.slice(0, 10) + "..." + change.address.slice(-4);
+        const sign = BigInt(change.amount) >= 0n ? "+" : "";
+        const shortType = change.coinType.split("::").pop();
+        console.log(`[${source}] BALANCE cp:${change.checkpointSeq} ${shortAddr} ${sign}${change.amount} ${shortType}`);
+      }
+
       // Create write buffers with different tuning
       const liveBufferLog = log.child({ component: "live:buffer" });
       const liveBuffer = createWriteBuffer(output, state, {
@@ -693,7 +737,11 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             );
           }
         },
-        onEvents: (events) => broadcastManager.broadcastDecodedEvents(events, "live"),
+        onEvents: (events) => {
+          broadcastManager.broadcastDecodedEvents(events, "live");
+          if (verbose) events.forEach(event => verboseEvent(event, "live"));
+        },
+        onBalanceChanges: verbose ? (changes) => changes.forEach(change => verboseBalance(change, "live")) : undefined,
       }, liveBufferLog, balanceWriter);
 
       const throttleLog = log.child({ component: "throttle" });
@@ -717,7 +765,11 @@ export function defineIndexer(config: IndexerConfig): Indexer {
             );
           }
         },
-        onEvents: (events) => broadcastManager.broadcastDecodedEvents(events, "backfill"),
+        onEvents: (events) => {
+          broadcastManager.broadcastDecodedEvents(events, "backfill");
+          if (verbose) events.forEach(event => verboseEvent(event, "backfill"));
+        },
+        onBalanceChanges: verbose ? (changes) => changes.forEach(change => verboseBalance(change, "backfill")) : undefined,
       }, backfillBufferLog, balanceWriter);
 
       // Start buffer timers

@@ -43,13 +43,15 @@ export interface WriteBufferConfig {
   onFlush?: (stats: FlushStats) => void;
   /** Callback invoked with decoded events after successful Postgres write. Used for SSE streaming. */
   onEvents?: (events: DecodedEvent[]) => void;
+  /** Callback invoked with balance changes after successful Postgres write. */
+  onBalanceChanges?: (changes: BalanceChange[]) => void;
 }
 
 export interface WriteBuffer {
   /** Enqueue events with associated cursor info. Applies backpressure when buffer is full. */
   push(events: DecodedEvent[], cursorKey: string, seq: bigint): Promise<void>;
   /** Enqueue balance changes. Flushed alongside events in the same flush cycle. */
-  pushBalances(changes: BalanceChange[]): void;
+  pushBalanceChanges(changes: BalanceChange[]): void;
   /** Force a flush of the current buffer. */
   flush(): Promise<void>;
   /** Start the interval timer. Must be called once. */
@@ -69,7 +71,7 @@ export function createWriteBuffer(
   log: Logger,
   balanceWriter?: BalanceWriter | null,
 ): WriteBuffer {
-  const { label, intervalMs, maxEvents, retries = 3, onFlush, onEvents } = config;
+  const { label, intervalMs, maxEvents, retries = 3, onFlush, onEvents, onBalanceChanges } = config;
 
   let buffer: DecodedEvent[] = [];
   let balanceBuffer: BalanceChange[] = [];
@@ -161,6 +163,15 @@ export function createWriteBuffer(
                 log.error({ err }, "onEvents callback failed");
               }
             }
+
+            // Notify balance change listeners
+            if (onBalanceChanges && balanceBatch.length > 0) {
+              try {
+                onBalanceChanges(balanceBatch);
+              } catch (err) {
+                log.error({ err }, "onBalanceChanges callback failed");
+              }
+            }
           },
           { retries, minTimeout: 1000 },
         );
@@ -214,7 +225,7 @@ export function createWriteBuffer(
       }
     },
 
-    pushBalances(changes: BalanceChange[]): void {
+    pushBalanceChanges(changes: BalanceChange[]): void {
       if (changes.length > 0) {
         balanceBuffer.push(...changes);
       }
