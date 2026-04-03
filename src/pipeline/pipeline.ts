@@ -116,8 +116,17 @@ export function createPipeline(): Pipeline {
         console.log("");
       }
 
+      // Shared write mutex — prevents concurrent storage writes from different sources (avoids deadlocks)
+      let writeLock: Promise<void> = Promise.resolve();
+      function acquireWriteLock(): Promise<() => void> {
+        let release: () => void;
+        const prev = writeLock;
+        writeLock = new Promise(resolve => { release = resolve; });
+        return prev.then(() => release!);
+      }
+
       // Run all sources concurrently
-      const sourcePromises = sources.map(source => runSource(source, processors, storages, broadcasts, config, log, humanOutput));
+      const sourcePromises = sources.map(source => runSource(source, processors, storages, broadcasts, config, log, humanOutput, acquireWriteLock));
       await Promise.all(sourcePromises);
 
       // Shutdown
@@ -155,6 +164,7 @@ async function runSource(
   config: PipelineConfig,
   log: Logger,
   humanOutput: boolean,
+  acquireWriteLock?: () => Promise<() => void>,
 ): Promise<void> {
   const bufferIntervalMs = config.buffer?.intervalMs ?? (source.name.includes("live") ? 200 : 1000);
   const maxBatchSize = config.buffer?.maxBatchSize ?? (source.name.includes("live") ? 50 : 500);
@@ -167,9 +177,14 @@ async function runSource(
     const toFlush = batch;
     batch = [];
 
-    // Write to all storage destinations in parallel (batched, retried)
     if (storages.length > 0) {
-      await Promise.all(storages.map(storage => storage.write(toFlush)));
+      // Acquire write lock to prevent concurrent storage writes (deadlock prevention)
+      const release = acquireWriteLock ? await acquireWriteLock() : () => {};
+      try {
+        await Promise.all(storages.map(storage => storage.write(toFlush)));
+      } finally {
+        release();
+      }
     }
     lastFlush = performance.now();
   }
