@@ -171,22 +171,28 @@ async function runSource(
 
   let batch: ProcessedCheckpoint[] = [];
   let lastFlush = performance.now();
+  let flushing = false; // prevents concurrent flushes within the same source
 
   async function flushStorage(): Promise<void> {
-    if (batch.length === 0) return;
+    if (batch.length === 0 || flushing) return;
+    flushing = true;
     const toFlush = batch;
     batch = [];
 
-    if (storages.length > 0) {
-      // Acquire write lock to prevent concurrent storage writes (deadlock prevention)
-      const release = acquireWriteLock ? await acquireWriteLock() : () => {};
-      try {
-        await Promise.all(storages.map(storage => storage.write(toFlush)));
-      } finally {
-        release();
+    try {
+      if (storages.length > 0) {
+        // Acquire write lock to prevent concurrent storage writes across sources (deadlock prevention)
+        const release = acquireWriteLock ? await acquireWriteLock() : () => {};
+        try {
+          await Promise.all(storages.map(storage => storage.write(toFlush)));
+        } finally {
+          release();
+        }
       }
+      lastFlush = performance.now();
+    } finally {
+      flushing = false;
     }
-    lastFlush = performance.now();
   }
 
   // Periodic storage flush timer

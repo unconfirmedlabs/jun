@@ -219,8 +219,12 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       if (!driver) return;
       const dialect = driver.dialect;
 
-      // Wrap entire batch in a transaction (single fsync for SQLite, single round-trip for Postgres)
-      if (dialect === "sqlite") await driver.exec("BEGIN");
+      // Wrap entire batch in a transaction
+      if (dialect === "sqlite") {
+        await driver.exec("BEGIN");
+      } else {
+        await driver.exec("BEGIN");
+      }
 
       // Collect events and balance changes
       const groupedEvents = new Map<string, DecodedEvent[]>();
@@ -271,7 +275,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         await writeBalanceChanges(driver, dialect, allBalanceChanges);
       }
 
-      if (dialect === "sqlite") await driver.exec("COMMIT");
+      await driver.exec("COMMIT");
     },
 
     async shutdown(): Promise<void> {
