@@ -80,6 +80,8 @@ export interface RunOptions {
   broadcastTargets?: BroadcastTarget[];
   /** Remote config URL for /admin/reload without body */
   configUrl?: string;
+  /** Auto-reload interval in milliseconds. Requires configUrl. Periodically fetches and applies config. */
+  autoReloadIntervalMs?: number;
   /** Suppress human-readable output to stdout */
   quiet?: boolean;
   /** Enable JSON logs to stderr. true for info, or a level string. */
@@ -813,7 +815,8 @@ export function defineIndexer(config: IndexerConfig): Indexer {
               try {
                 let yamlContent = event.data.body;
                 if (!yamlContent?.trim() && event.data.configUrl) {
-                  yamlContent = await fetchRemoteConfig(event.data.configUrl);
+                  const result = await fetchRemoteConfig(event.data.configUrl);
+                  yamlContent = result?.content;
                 }
                 if (!yamlContent?.trim()) return;
 
@@ -839,6 +842,38 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         }, 500);
 
         log.info({ port: options.serve.port }, "HTTP server worker starting");
+      }
+
+      // Auto-reload timer (periodically fetch + apply remote config)
+      let autoReloadInterval: Timer | null = null;
+      if (options?.autoReloadIntervalMs && options.configUrl) {
+        const reloadLog = log.child({ component: "auto-reload" });
+        reloadLog.info({ intervalMs: options.autoReloadIntervalMs, configUrl: options.configUrl }, "auto-reload enabled");
+
+        let lastEtag: string | undefined;
+        autoReloadInterval = setInterval(async () => {
+          try {
+            const fetchResult = await fetchRemoteConfig(options.configUrl!, { etag: lastEtag });
+            if (!fetchResult) {
+              reloadLog.debug("config unchanged (etag match)");
+              return;
+            }
+            lastEtag = fetchResult.etag;
+
+            const parsed = parseIndexerConfig(fetchResult.content);
+            const result = await applyReload(hotReloadCtx, parsed.indexer.events);
+            const changed = result.added.length + result.removed.length + result.altered.length;
+            if (changed > 0) {
+              reloadLog.info({ added: result.added, removed: result.removed, altered: result.altered }, "config reloaded");
+            } else {
+              reloadLog.debug("no handler changes");
+            }
+          } catch (err) {
+            reloadLog.error({ err }, "auto-reload failed");
+          }
+        }, options.autoReloadIntervalMs);
+      } else if (options?.autoReloadIntervalMs && !options.configUrl) {
+        log.warn("autoReloadIntervalMs requires configUrl — auto-reload disabled");
       }
 
       // Checkpoint decoder pool (workers for CPU-bound decompress + decode)
@@ -873,6 +908,7 @@ export function defineIndexer(config: IndexerConfig): Indexer {
       await Promise.all(tasks);
 
       // Cleanup
+      if (autoReloadInterval) clearInterval(autoReloadInterval);
       if (stopGapRepair) stopGapRepair();
       decoderPool.shutdown();
       await broadcastManager.shutdown();

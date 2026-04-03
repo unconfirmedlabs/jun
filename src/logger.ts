@@ -3,7 +3,7 @@
  *
  * Log level controlled via LOG_LEVEL env var (default: "info").
  * Pipe through pino-pretty for human-readable output in development:
- *   LOG_LEVEL=debug bun run examples/sona.ts | bunx pino-pretty
+ *   LOG_LEVEL=debug jun run config.yml | bunx pino-pretty
  */
 import pino from "pino";
 

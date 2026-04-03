@@ -358,7 +358,8 @@ async function handleReload(
     } else if (hotReload.configUrl) {
       // No body — re-fetch from configured remote URL
       const { fetchRemoteConfig } = await import("./remote-config.ts");
-      yamlContent = await fetchRemoteConfig(hotReload.configUrl);
+      const result = await fetchRemoteConfig(hotReload.configUrl);
+      yamlContent = result!.content;
       log.info({ url: hotReload.configUrl }, "fetched remote config");
     } else {
       return Response.json({ error: "request body must contain YAML config (or set configUrl for remote fetch)" }, { status: 400 });

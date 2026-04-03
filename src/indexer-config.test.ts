@@ -181,14 +181,14 @@ events:
 network: testnet
 grpcUrl: fullnode.testnet.sui.io:443
 database: postgres://localhost/db
-startCheckpoint: "package:0x10ad578f"
+startCheckpoint: "package:0xabcd1234"
 events:
   E:
     type: "0x1::m::E"
     fields:
       f: u64
 `);
-    expect(indexer.startCheckpoint).toBe("package:0x10ad578f");
+    expect(indexer.startCheckpoint).toBe("package:0xabcd1234");
   });
 
   test("serve as port number shorthand", () => {

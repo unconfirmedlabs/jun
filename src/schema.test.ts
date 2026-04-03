@@ -4,7 +4,7 @@ import { buildBcsSchema, generateDDL, formatValue, formatRow, type FieldDefs } f
 describe("buildBcsSchema", () => {
   test("creates schema for primitive fields", () => {
     const fields: FieldDefs = {
-      pressing_id: "address",
+      item_id: "address",
       edition: "u16",
       paid_value: "u64",
       name: "string",
@@ -52,21 +52,21 @@ describe("buildBcsSchema", () => {
 
   test("BCS round-trip with address fields", () => {
     const fields: FieldDefs = {
-      pressing_id: "address",
+      item_id: "address",
       edition: "u16",
     };
     const schema = buildBcsSchema(fields);
 
     const addr = "0x" + "ab".repeat(32);
     const original = {
-      pressing_id: addr,
+      item_id: addr,
       edition: 1,
     };
 
     const bytes = schema.serialize(original).toBytes();
     const decoded = schema.parse(bytes) as Record<string, unknown>;
 
-    expect(decoded.pressing_id).toBe(addr);
+    expect(decoded.item_id).toBe(addr);
     expect(decoded.edition).toBe(1);
   });
 
@@ -114,7 +114,7 @@ describe("buildBcsSchema", () => {
 describe("generateDDL", () => {
   test("generates CREATE TABLE with metadata columns", () => {
     const fields: FieldDefs = {
-      pressing_id: "address",
+      item_id: "address",
       edition: "u16",
       paid_value: "u64",
     };
@@ -127,7 +127,7 @@ describe("generateDDL", () => {
     expect(ddl).toContain("sender TEXT NOT NULL");
     expect(ddl).toContain("sui_timestamp TIMESTAMPTZ NOT NULL");
     expect(ddl).toContain("indexed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()");
-    expect(ddl).toContain("pressing_id TEXT NOT NULL");
+    expect(ddl).toContain("item_id TEXT NOT NULL");
     expect(ddl).toContain("edition INTEGER NOT NULL");
     expect(ddl).toContain("paid_value NUMERIC NOT NULL");
     expect(ddl).toContain("UNIQUE (tx_digest, event_seq)");
@@ -200,20 +200,20 @@ describe("formatValue", () => {
 describe("formatRow", () => {
   test("formats all fields in a decoded struct", () => {
     const fields: FieldDefs = {
-      pressing_id: "address",
+      item_id: "address",
       edition: "u16",
       paid_value: "u64",
       active: "bool",
     };
     const decoded = {
-      pressing_id: "0x" + "ab".repeat(32),
+      item_id: "0x" + "ab".repeat(32),
       edition: 42,
       paid_value: 1000000n,
       active: true,
     };
     const row = formatRow(decoded, fields);
 
-    expect(row.pressing_id).toBe("0x" + "ab".repeat(32));
+    expect(row.item_id).toBe("0x" + "ab".repeat(32));
     expect(row.edition).toBe(42);
     expect(row.paid_value).toBe("1000000");
     expect(row.active).toBe(true);

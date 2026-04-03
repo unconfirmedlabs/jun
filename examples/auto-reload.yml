@@ -1,0 +1,30 @@
+# Auto-reload example: starts tracking SUI, then add WAL via config update.
+#
+# Usage:
+#   1. Host this file at an HTTPS URL or S3 bucket
+#   2. Run: DATABASE_URL=postgres://... jun run examples/auto-reload.yml
+#   3. Update the remote config to add WAL under balances.coinTypes
+#   4. Within 30s the indexer picks up the change and starts tracking WAL
+#
+# To test locally, use the /admin/reload endpoint instead:
+#   curl -X POST http://localhost:8080/admin/reload
+
+sources:
+  live:
+    grpc: fullnode.testnet.sui.io:443
+
+processors:
+  balances:
+    coinTypes:
+      - "0x2::sui::SUI"
+
+storage:
+  postgres:
+    url: $DATABASE_URL
+
+serve:
+  port: 8080
+
+# Fetch config from remote URL every 30s and apply changes
+# configUrl: https://example.com/config.yml
+# configAutoReloadMs: 30000

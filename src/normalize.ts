@@ -57,7 +57,7 @@ export function validateAndNormalizeAddress(address: string, context: string): s
 
 /**
  * Extract and validate the package address from a Move type string.
- * "0x10ad...::pressing::RecordPressedEvent" → validates 0x10ad..., returns normalized
+ * "0xPKG::module::MyEvent" → validates 0xPKG..., returns normalized
  */
 export function validateEventTypeAddress(eventType: string, context: string): void {
   const parts = eventType.split("::");

@@ -455,7 +455,7 @@ serve:
 
 events:
   MyEvent:
-    type: "0xPKG5b202fd137546f2e7bc12c319dfef98871feeb429506c4b3d62bf702::pressing::MyEventEvent"
+    type: "0xPKG::module::MyEvent"
     # Fields auto-resolved from chain at startup
 
 balances:

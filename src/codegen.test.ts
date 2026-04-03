@@ -140,12 +140,12 @@ describe("mapSignatureToFieldType", () => {
     expect(result.type).toBe("vector<u8>");
   });
 
-  test("non-primitive DATATYPE (BPS) returns null with short name", () => {
+  test("non-primitive DATATYPE (Level) returns null with short name", () => {
     const result = mapSignatureToFieldType(
-      sig("DATATYPE", { typeName: "0x0000000000000000000000000000000000000000000000000000000000abcd::interest_bps::BPS" }),
+      sig("DATATYPE", { typeName: "0x0000000000000000000000000000000000000000000000000000000000abcd::priority::Level" }),
     );
     expect(result.type).toBeNull();
-    expect(result.rawType).toBe("BPS");
+    expect(result.rawType).toBe("Level");
   });
 
   test("non-primitive DATATYPE (VecSet) returns null", () => {
@@ -186,26 +186,26 @@ describe("mapSignatureToFieldType", () => {
 
 describe("generateFieldDSL", () => {
   test("simple event with all primitives", () => {
-    const desc = descriptor("RecordPressedEvent", [
-      field("pressing_id", 0, sig("ADDRESS")),
-      field("release_id", 1, sig("ADDRESS")),
+    const desc = descriptor("ItemCreatedEvent", [
+      field("item_id", 0, sig("ADDRESS")),
+      field("collection_id", 1, sig("ADDRESS")),
       field("edition", 2, sig("U16")),
-      field("record_id", 3, sig("ADDRESS")),
-      field("record_number", 4, sig("U64")),
+      field("token_id", 3, sig("ADDRESS")),
+      field("token_number", 4, sig("U64")),
       field("quantity", 5, sig("U64")),
-      field("pressed_by", 6, sig("ADDRESS")),
+      field("created_by", 6, sig("ADDRESS")),
       field("paid_value", 7, sig("U64")),
       field("timestamp_ms", 8, sig("U64")),
     ]);
 
     const result = generateFieldDSL(desc);
 
-    expect(result.name).toBe("RecordPressedEvent");
+    expect(result.name).toBe("ItemCreatedEvent");
     expect(result.allPrimitive).toBe(true);
     expect(result.fields).toHaveLength(9);
-    expect(result.fields[0]).toEqual({ name: "pressing_id", type: "address", rawType: "address" });
+    expect(result.fields[0]).toEqual({ name: "item_id", type: "address", rawType: "address" });
     expect(result.fields[2]).toEqual({ name: "edition", type: "u16", rawType: "u16" });
-    expect(result.fields[4]).toEqual({ name: "record_number", type: "u64", rawType: "u64" });
+    expect(result.fields[4]).toEqual({ name: "token_number", type: "u64", rawType: "u64" });
   });
 
   test("event with Option<U64> field", () => {
@@ -252,17 +252,17 @@ describe("generateFieldDSL", () => {
   });
 
   test("event with non-primitive fields", () => {
-    const desc = descriptor("CompositionPublishedEvent", [
-      field("composition_id", 0, sig("ADDRESS")),
+    const desc = descriptor("OrderPlacedEvent", [
+      field("order_id", 0, sig("ADDRESS")),
       field("title", 1, sig("DATATYPE", {
         typeName: "0x0000000000000000000000000000000000000000000000000000000000000001::string::String",
       })),
-      field("split_bps", 2, sig("DATATYPE", {
-        typeName: "0x000000000000000000000000000000000000000000000000000000000000abcd::interest_bps::BPS",
+      field("priority", 2, sig("DATATYPE", {
+        typeName: "0x000000000000000000000000000000000000000000000000000000000000abcd::priority::Level",
       })),
-      field("has_lyrics", 3, sig("BOOL")),
-      field("credits", 4, sig("DATATYPE", {
-        typeName: "0x000000000000000000000000000000000000000000000000000000000000abcd::credit::Credit",
+      field("is_active", 3, sig("BOOL")),
+      field("metadata", 4, sig("DATATYPE", {
+        typeName: "0x000000000000000000000000000000000000000000000000000000000000abcd::meta::Metadata",
       })),
     ]);
 
@@ -272,10 +272,10 @@ describe("generateFieldDSL", () => {
     expect(result.fields[0].type).toBe("address");
     expect(result.fields[1].type).toBe("string");
     expect(result.fields[2].type).toBeNull();
-    expect(result.fields[2].rawType).toBe("BPS");
+    expect(result.fields[2].rawType).toBe("Level");
     expect(result.fields[3].type).toBe("bool");
     expect(result.fields[4].type).toBeNull();
-    expect(result.fields[4].rawType).toBe("Credit");
+    expect(result.fields[4].rawType).toBe("Metadata");
   });
 });
 
@@ -286,37 +286,37 @@ describe("generateFieldDSL", () => {
 describe("formatCodegenResult", () => {
   test("all-primitive event output", () => {
     const output = formatCodegenResult({
-      name: "RecordPressedEvent",
+      name: "ItemCreatedEvent",
       allPrimitive: true,
       fields: [
-        { name: "pressing_id", type: "address", rawType: "address" },
+        { name: "item_id", type: "address", rawType: "address" },
         { name: "edition", type: "u16", rawType: "u16" },
         { name: "paid_value", type: "u64", rawType: "u64" },
       ],
     });
 
-    expect(output).toContain("RecordPressedEvent");
+    expect(output).toContain("ItemCreatedEvent");
     expect(output).toContain("all fields are primitive");
-    expect(output).toContain('pressing_id: "address"');
+    expect(output).toContain('item_id: "address"');
     expect(output).toContain('edition: "u16"');
     expect(output).toContain('paid_value: "u64"');
   });
 
   test("non-primitive event output shows comments", () => {
     const output = formatCodegenResult({
-      name: "CompositionPublishedEvent",
+      name: "OrderFilledEvent",
       allPrimitive: false,
       fields: [
-        { name: "composition_id", type: "address", rawType: "address" },
-        { name: "split_bps", type: null, rawType: "BPS" },
-        { name: "has_lyrics", type: "bool", rawType: "bool" },
+        { name: "order_id", type: "address", rawType: "address" },
+        { name: "metadata", type: null, rawType: "OrderMeta" },
+        { name: "is_complete", type: "bool", rawType: "bool" },
       ],
     });
 
     expect(output).toContain("1 field is not primitive");
-    expect(output).toContain('composition_id: "address"');
-    expect(output).toContain("// split_bps: BPS");
-    expect(output).toContain('has_lyrics: "bool"');
+    expect(output).toContain('order_id: "address"');
+    expect(output).toContain("// metadata: OrderMeta");
+    expect(output).toContain('is_complete: "bool"');
   });
 
   test("multiple non-primitive fields use plural", () => {

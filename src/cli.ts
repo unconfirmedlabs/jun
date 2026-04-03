@@ -2057,7 +2057,8 @@ pipelineCmd
 
       if (configUrl) {
         const { fetchRemoteConfig } = await import("./remote-config.ts");
-        yamlContent = await fetchRemoteConfig(configUrl);
+        const result = await fetchRemoteConfig(configUrl);
+        yamlContent = result!.content;
       } else if (configFile) {
         const { readFileSync } = require("fs");
         yamlContent = readFileSync(resolve(configFile), "utf-8");

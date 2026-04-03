@@ -189,6 +189,18 @@ export function parseIndexerConfig(yamlContent: string): ParsedIndexerConfig {
     }
   }
 
+  if (config.configUrl) {
+    run.configUrl = String(config.configUrl);
+  }
+
+  if (config.configAutoReloadMs !== undefined) {
+    const val = Number(config.configAutoReloadMs);
+    if (!Number.isFinite(val) || val < 100) {
+      throw new Error("Invalid config: configAutoReloadMs must be a number >= 100");
+    }
+    run.autoReloadIntervalMs = val;
+  }
+
   // Parse views
   let views: Record<string, ViewDef> | undefined;
   if (config.views && typeof config.views === "object") {
@@ -263,6 +275,7 @@ export function mergeRunOptions(
     repairGaps?: boolean;
     serve?: string;
     noServe?: boolean;
+    configAutoReloadMs?: string;
   },
 ): RunOptions {
   const merged = { ...yamlOpts };
@@ -279,6 +292,10 @@ export function mergeRunOptions(
     merged.serve = undefined;
   } else if (cliOpts.serve) {
     merged.serve = { port: parseInt(cliOpts.serve, 10) };
+  }
+
+  if (cliOpts.configAutoReloadMs) {
+    merged.autoReloadIntervalMs = parseInt(cliOpts.configAutoReloadMs, 10);
   }
 
   return merged;
