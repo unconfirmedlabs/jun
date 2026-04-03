@@ -365,11 +365,14 @@ async function handleReload(
       return Response.json({ error: "request body must contain YAML config (or set configUrl for remote fetch)" }, { status: 400 });
     }
 
-    const { parseIndexerConfig } = await import("./indexer-config.ts");
+    const { parsePipelineConfig } = await import("./pipeline/config-parser.ts");
     const { applyReload } = await import("./hot-reload.ts");
 
-    const parsed = parseIndexerConfig(yamlContent);
-    const result = await applyReload(hotReload, parsed.indexer.events);
+    const parsed = parsePipelineConfig(yamlContent);
+    // Extract event handlers from parsed processors
+    const eventProc = parsed.processors.find(p => p.name === "event-decoder");
+    const events = eventProc ? (eventProc as any)._reloadConfig ?? {} : {};
+    const result = await applyReload(hotReload, events);
 
     log.info({ added: result.added, removed: result.removed, altered: result.altered }, "config reloaded");
 

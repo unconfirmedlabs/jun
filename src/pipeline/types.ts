@@ -149,6 +149,14 @@ export interface PipelineConfig {
   };
   /** Remote config URL for hot reload */
   configUrl?: string;
+  /** Auto-reload interval in milliseconds. Requires configUrl. */
+  configAutoReloadMs?: number;
+  /** Database URL (extracted from storage config). Needed for StateManager + HTTP /query. */
+  database?: string;
+  /** Network name (e.g. "testnet", "mainnet"). Used as cursor key namespace. */
+  network?: string;
+  /** Display format for human-readable output */
+  display?: string;
 }
 
 export interface Pipeline {

@@ -589,40 +589,27 @@ Each SSE message is a JSON object with \`event\` (handler name) and \`data\` (ev
     { yaml_content: z.string().describe("Raw YAML config content to validate") },
     async ({ yaml_content }) => {
       try {
-        const { parseIndexerConfig } = await import("./indexer-config.ts");
-        const parsed = parseIndexerConfig(yaml_content);
-
-        const eventNames = Object.keys(parsed.indexer.events);
-        const viewNames = parsed.views ? Object.keys(parsed.views) : [];
+        const { parsePipelineConfig } = await import("./pipeline/config-parser.ts");
+        const parsed = parsePipelineConfig(yaml_content);
 
         const summary = [
           `Config is valid.`,
           ``,
-          `Network: ${parsed.indexer.network}`,
-          `gRPC: ${parsed.indexer.grpcUrl}`,
-          `Database: ${parsed.indexer.database.replace(/\/\/.*:.*@/, "//***:***@")}`,
-          `Start checkpoint: ${parsed.indexer.startCheckpoint ?? "none (live-only)"}`,
-          `Events: ${eventNames.join(", ")} (${eventNames.length} handler${eventNames.length === 1 ? "" : "s"})`,
+          `Sources: ${parsed.sources.map(s => s.name).join(", ")}`,
+          `Processors: ${parsed.processors.map(p => p.name).join(", ") || "none"}`,
+          `Storage: ${parsed.storages.map(s => s.name).join(", ") || "none"}`,
+          `Broadcasts: ${parsed.broadcasts.map(b => b.name).join(", ") || "none"}`,
         ];
 
-        for (const name of eventNames) {
-          const handler = parsed.indexer.events[name]!;
-          const fieldCount = handler.fields ? Object.keys(handler.fields).length : 0;
-          summary.push(`  ${name}: ${handler.type}${fieldCount > 0 ? ` (${fieldCount} fields)` : ' (fields auto-resolved)'}`);
+        if (parsed.pipelineConfig.serve) {
+          summary.push(`Serve: port ${parsed.pipelineConfig.serve.port}`);
         }
-
-        if (parsed.balances) {
-          const ct = parsed.balances.coinTypes;
-          summary.push(`Balances: ${ct === '*' ? 'all coin types' : (ct as string[]).join(', ')}`);
+        if (parsed.pipelineConfig.configUrl) {
+          summary.push(`Config URL: ${parsed.pipelineConfig.configUrl}`);
         }
-
-        if (viewNames.length > 0) {
-          summary.push(`Views: ${viewNames.join(", ")}`);
+        if (parsed.pipelineConfig.configAutoReloadMs) {
+          summary.push(`Auto-reload: ${parsed.pipelineConfig.configAutoReloadMs}ms`);
         }
-
-        if (parsed.run.mode) summary.push(`Mode: ${parsed.run.mode}`);
-        if (parsed.run.repairGaps) summary.push(`Gap repair: enabled`);
-        if (parsed.run.serve) summary.push(`Serve: port ${parsed.run.serve.port}`);
 
         return { content: [{ type: "text" as const, text: summary.join("\n") }] };
       } catch (err) {

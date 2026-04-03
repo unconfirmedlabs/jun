@@ -3,7 +3,7 @@
  *
  * Creates Postgres materialized views on startup and refreshes them
  * on a configurable timer. YAML-config-only feature — not part of
- * the programmatic defineIndexer() API.
+ * the programmatic pipeline API.
  *
  * @example YAML config
  * ```yaml

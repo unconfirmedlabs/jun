@@ -4,23 +4,23 @@
  * Composable Source → Processor → Destination pipeline for indexing
  * Sui blockchain data.
  *
- * @example Pipeline API (recommended)
+ * @example Pipeline API
  * ```ts
  * import { createPipeline } from "jun";
  * import { createGrpcLiveSource } from "jun/pipeline/sources/grpc-live";
  * import { createBalanceTracker } from "jun/pipeline/processors/balance-tracker";
- * import { createPostgresDestination } from "jun/pipeline/destinations/postgres";
+ * import { createSqlStorage } from "jun/pipeline/destinations/sql";
  *
  * const pipeline = createPipeline()
  *   .source(createGrpcLiveSource({ url: "fullnode.testnet.sui.io:443" }))
  *   .processor(createBalanceTracker({ coinTypes: ["0x2::sui::SUI"] }))
- *   .destination(createPostgresDestination({ url: process.env.DATABASE_URL! }))
+ *   .storage(createSqlStorage({ url: process.env.DATABASE_URL! }))
  *   .run();
  * ```
  *
  * @example YAML config
  * ```bash
- * jun pipeline run config.yml
+ * jun run config.yml
  * ```
  */
 
@@ -42,10 +42,6 @@ export type {
 // Config parser
 export { parsePipelineConfig } from "./src/pipeline/config-parser.ts";
 export type { ParsedPipelineConfig } from "./src/pipeline/config-parser.ts";
-
-// Legacy API (defineIndexer — still functional, will be deprecated)
-export { defineIndexer } from "./src/index.ts";
-export type { IndexerConfig, Indexer, RunOptions, RunMode } from "./src/index.ts";
 
 // Schema types
 export type { FieldDefs, FieldType, PrimitiveFieldType } from "./src/schema.ts";

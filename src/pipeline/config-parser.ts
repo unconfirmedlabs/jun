@@ -129,10 +129,13 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
         startCheckpoint: handler.startCheckpoint,
       };
     }
-    processors.push(createEventDecoder({
+    const proc = createEventDecoder({
       handlers,
       grpcUrl: sourceConfig.live?.grpc,
-    }));
+    });
+    // Attach reload config so auto-reload can extract it
+    (proc as any)._reloadConfig = handlers;
+    processors.push(proc);
   }
 
   if (processorConfig?.balances) {
@@ -143,7 +146,10 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
     const normalizedCoinTypes = coinTypes === "*"
       ? "*" as const
       : (coinTypes as string[]).map(normalizeCoinType);
-    processors.push(createBalanceTracker({ coinTypes: normalizedCoinTypes }));
+    const balanceConfig = { coinTypes: normalizedCoinTypes };
+    const proc = createBalanceTracker(balanceConfig);
+    (proc as any)._reloadConfig = balanceConfig;
+    processors.push(proc);
   }
 
   // --- Destinations ---
@@ -218,6 +224,42 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
     };
   }
   if (config.display) pipelineConfig.display = config.display;
+  if (config.configUrl) pipelineConfig.configUrl = String(config.configUrl);
+  if (config.configAutoReloadMs !== undefined) {
+    const val = Number(config.configAutoReloadMs);
+    if (!Number.isFinite(val) || val < 100) {
+      throw new Error("Invalid config: configAutoReloadMs must be a number >= 100");
+    }
+    pipelineConfig.configAutoReloadMs = val;
+  }
+  if (config.network) pipelineConfig.network = String(config.network);
+  if (config.gapRepair) {
+    pipelineConfig.gapRepair = {
+      enabled: config.gapRepair === true || config.gapRepair?.enabled === true,
+      intervalMs: typeof config.gapRepair === "object" ? config.gapRepair.intervalMs : undefined,
+    };
+  }
+  if (config.throttle) {
+    pipelineConfig.throttle = {
+      initialConcurrency: config.throttle.initialConcurrency,
+      minConcurrency: config.throttle.minConcurrency,
+      maxConcurrency: config.throttle.maxConcurrency,
+    };
+  }
+
+  // Extract database URL from postgres storage config
+  if (storageConfig.postgres) {
+    pipelineConfig.database = typeof storageConfig.postgres === "string"
+      ? storageConfig.postgres
+      : storageConfig.postgres.url;
+  }
+
+  // Infer network from gRPC URL if not explicit
+  if (!pipelineConfig.network && sourceConfig.live?.grpc) {
+    const grpc: string = sourceConfig.live.grpc;
+    if (grpc.includes("testnet")) pipelineConfig.network = "testnet";
+    else if (grpc.includes("mainnet")) pipelineConfig.network = "mainnet";
+  }
 
   return { sources, processors, storages, broadcasts, pipelineConfig };
 }

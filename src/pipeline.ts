@@ -1,31 +1,16 @@
 /**
- * jun/pipeline — Internal indexing pipeline components.
+ * jun/pipeline — Internal pipeline components.
  *
- * These are the building blocks that `defineIndexer().run()` uses internally.
- * Import them directly when you need custom control over write buffering,
- * backfill throttling, or gap repair.
+ * Low-level building blocks for custom pipeline control.
+ * Most users should use `createPipeline()` from "jun" instead.
  *
- * @example Custom pipeline with manual buffer control
+ * @example
  * ```ts
- * import { createWriteBuffer, createAdaptiveThrottle, createGapDetector } from "jun/pipeline";
- * import { createPostgresOutput } from "jun/output/postgres";
- * import { createStateManager } from "jun/cursor";
- * import { createLogger } from "jun/logger";
- *
- * const log = createLogger();
- * const buffer = createWriteBuffer(output, state, {
- *   label: "custom",
- *   intervalMs: 500,
- *   maxEvents: 200,
- * }, log);
- *
- * buffer.start();
- * // ... push events from your own source
- * await buffer.stop();
+ * import { createAdaptiveThrottle, createGapDetector } from "jun/pipeline";
  * ```
  */
 
-// Write buffer — batched Postgres writes with backpressure
+// Write buffer — batched writes with backpressure
 export { createWriteBuffer } from "./buffer.ts";
 export type { WriteBuffer, WriteBufferConfig, FlushStats } from "./buffer.ts";
 
