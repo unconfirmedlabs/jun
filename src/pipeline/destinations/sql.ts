@@ -31,6 +31,8 @@ type Dialect = "postgres" | "sqlite";
 interface SqlDriver {
   dialect: Dialect;
   exec(query: string, params?: unknown[]): Promise<any>;
+  /** Execute multiple statements inside a transaction. */
+  transaction(fn: (exec: (query: string, params?: unknown[]) => Promise<any>) => Promise<void>): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -44,6 +46,13 @@ function createPostgresDriver(url: string): SqlDriver {
     dialect: "postgres",
     async exec(query: string, params?: unknown[]) {
       return params ? sql.unsafe(query, params) : sql.unsafe(query);
+    },
+    async transaction(fn) {
+      await sql.begin(async (tx: any) => {
+        await fn((query: string, params?: unknown[]) =>
+          params ? tx.unsafe(query, params) : tx.unsafe(query)
+        );
+      });
     },
     async close() {
       await sql.close();
@@ -65,6 +74,20 @@ function createSqliteDriver(path: string): SqlDriver {
         return database.prepare(query).all(...params);
       }
       return database.exec(query);
+    },
+    async transaction(fn) {
+      database.exec("BEGIN");
+      try {
+        const exec = async (query: string, params?: unknown[]) => {
+          if (params && params.length > 0) return database.prepare(query).all(...params);
+          return database.exec(query);
+        };
+        await fn(exec);
+        database.exec("COMMIT");
+      } catch (e) {
+        database.exec("ROLLBACK");
+        throw e;
+      }
     },
     async close() {
       database.close();
@@ -217,14 +240,8 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
     async write(batch: ProcessedCheckpoint[]): Promise<void> {
       if (!driver) return;
-      const dialect = driver.dialect;
-
-      // Wrap entire batch in a transaction
-      if (dialect === "sqlite") {
-        await driver.exec("BEGIN");
-      } else {
-        await driver.exec("BEGIN");
-      }
+      const d = driver; // capture for closure
+      const dialect = d.dialect;
 
       // Collect events and balance changes
       const groupedEvents = new Map<string, DecodedEvent[]>();
@@ -238,6 +255,9 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         }
         allBalanceChanges.push(...processed.balanceChanges);
       }
+
+      // Wrap all writes in a single transaction
+      await d.transaction(async (exec) => {
 
       // Write events
       for (const [handlerName, events] of groupedEvents) {
@@ -263,7 +283,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
           const conflictClause = dialect === "postgres"
             ? "ON CONFLICT (tx_digest, event_seq) DO NOTHING"
             : "ON CONFLICT (tx_digest, event_seq) DO NOTHING";
-          await driver.exec(
+          await exec(
             `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES ${rowClauses.join(", ")} ${conflictClause}`,
             values,
           );
@@ -272,10 +292,9 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
       // Write balance changes
       if (config.balances && allBalanceChanges.length > 0) {
-        await writeBalanceChanges(driver, dialect, allBalanceChanges);
+        await writeBalanceChangesWithExec(exec, dialect, allBalanceChanges);
       }
-
-      await driver.exec("COMMIT");
+      }); // end transaction
     },
 
     async shutdown(): Promise<void> {
@@ -292,8 +311,8 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 // Balance change writer (shared between Postgres and SQLite)
 // ---------------------------------------------------------------------------
 
-async function writeBalanceChanges(
-  driver: SqlDriver,
+async function writeBalanceChangesWithExec(
+  exec: (query: string, params?: unknown[]) => Promise<any>,
   dialect: Dialect,
   changes: BalanceChange[],
 ): Promise<void> {
@@ -314,7 +333,7 @@ async function writeBalanceChanges(
     );
   }
 
-  await driver.exec(
+  await exec(
     `INSERT INTO balance_changes (tx_digest, checkpoint_seq, address, coin_type, amount, sui_timestamp) VALUES ${ledgerRows.join(", ")} ON CONFLICT (tx_digest, address, coin_type) DO NOTHING`,
     ledgerValues,
   );
@@ -355,13 +374,13 @@ async function writeBalanceChanges(
 
   if (balanceRows.length > 0) {
     if (dialect === "postgres") {
-      await driver.exec(
+      await exec(
         `INSERT INTO balances (address, coin_type, balance, last_checkpoint) VALUES ${balanceRows.join(", ")} ON CONFLICT (address, coin_type) DO UPDATE SET balance = balances.balance + EXCLUDED.balance, last_checkpoint = GREATEST(balances.last_checkpoint, EXCLUDED.last_checkpoint), last_updated = NOW()`,
         balanceValues,
       );
     } else {
       // SQLite: CAST for numeric addition on TEXT columns
-      await driver.exec(
+      await exec(
         `INSERT INTO balances (address, coin_type, balance, last_checkpoint) VALUES ${balanceRows.join(", ")} ON CONFLICT (address, coin_type) DO UPDATE SET balance = CAST(CAST(balances.balance AS INTEGER) + CAST(excluded.balance AS INTEGER) AS TEXT), last_checkpoint = MAX(balances.last_checkpoint, excluded.last_checkpoint)`,
         balanceValues,
       );
