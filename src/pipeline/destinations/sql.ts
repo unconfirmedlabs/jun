@@ -54,6 +54,10 @@ function createPostgresDriver(url: string): SqlDriver {
 function createSqliteDriver(path: string): SqlDriver {
   const database = new Database(path);
   database.exec("PRAGMA journal_mode = WAL;");
+  database.exec("PRAGMA synchronous = NORMAL;");   // safe with WAL, avoids fsync per commit
+  database.exec("PRAGMA temp_store = MEMORY;");     // temp tables in memory
+  database.exec("PRAGMA mmap_size = 268435456;");   // 256MB mmap for reads
+  database.exec("PRAGMA cache_size = -64000;");     // 64MB page cache
   return {
     dialect: "sqlite",
     async exec(query: string, params?: unknown[]) {
@@ -215,6 +219,9 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       if (!driver) return;
       const dialect = driver.dialect;
 
+      // Wrap entire batch in a transaction (single fsync for SQLite, single round-trip for Postgres)
+      if (dialect === "sqlite") await driver.exec("BEGIN");
+
       // Collect events and balance changes
       const groupedEvents = new Map<string, DecodedEvent[]>();
       const allBalanceChanges: BalanceChange[] = [];
@@ -263,6 +270,8 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       if (config.balances && allBalanceChanges.length > 0) {
         await writeBalanceChanges(driver, dialect, allBalanceChanges);
       }
+
+      if (dialect === "sqlite") await driver.exec("COMMIT");
     },
 
     async shutdown(): Promise<void> {
