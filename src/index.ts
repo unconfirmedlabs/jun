@@ -23,7 +23,9 @@ import { createLogger } from "./logger.ts";
 import { createServer, createMetrics, type IndexerMetrics } from "./serve.ts";
 import { createCheckpointDecoderPool, defaultWorkerCount, type CheckpointDecoderPool } from "./checkpoint-decoder-pool.ts";
 import { createBroadcastManager, createNATSTarget, type BroadcastManager, type BroadcastTarget } from "./broadcast.ts";
-import type { HotReloadContext } from "./hot-reload.ts";
+import { applyReload, type HotReloadContext } from "./hot-reload.ts";
+import { parseIndexerConfig } from "./indexer-config.ts";
+import { fetchRemoteConfig } from "./remote-config.ts";
 import { createBalanceProcessor, type BalanceProcessor, type BalanceChange } from "./balance-processor.ts";
 import { createBalanceWriter, type BalanceWriter } from "./output/balance-writer.ts";
 import { resolveEventHandlerFields } from "./resolve-fields.ts";
@@ -807,10 +809,6 @@ export function defineIndexer(config: IndexerConfig): Indexer {
         // Forward reload messages from worker to hot reload
         httpWorker.onmessage = (event: MessageEvent) => {
           if (event.data.type === "reload" && hotReloadCtx) {
-            const { applyReload } = require("./hot-reload.ts");
-            const { parseIndexerConfig } = require("./indexer-config.ts");
-            const { fetchRemoteConfig } = require("./remote-config.ts");
-
             (async () => {
               try {
                 let yamlContent = event.data.body;
