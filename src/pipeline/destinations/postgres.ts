@@ -4,7 +4,6 @@
  * Creates event tables (one per handler) and balance tables (balance_changes + balances).
  * Uses parameterized queries with ON CONFLICT DO NOTHING for idempotency.
  */
-import { SQL } from "bun";
 import type { Storage, ProcessedCheckpoint, DecodedEvent, BalanceChange } from "../types.ts";
 import type { FieldDefs } from "../../schema.ts";
 import { generateDDL } from "../../schema.ts";
@@ -32,7 +31,7 @@ export function createPostgresStorage(config: PostgresDestinationConfig): Storag
     name: "postgres",
 
     async initialize(): Promise<void> {
-      sql = new SQL(config.url);
+      sql = new Bun.SQL(config.url);
 
       // Create event tables
       if (config.handlers) {

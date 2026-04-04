@@ -4,7 +4,6 @@
  * Single implementation, two dialects. Handles event tables, balance tables,
  * and running totals identically for both databases.
  */
-import { SQL } from "bun";
 import { Database } from "bun:sqlite";
 import type { Storage, ProcessedCheckpoint, DecodedEvent, BalanceChange } from "../types.ts";
 import type { FieldDefs, FieldType } from "../../schema.ts";
@@ -41,7 +40,7 @@ interface SqlDriver {
 // ---------------------------------------------------------------------------
 
 function createPostgresDriver(url: string): SqlDriver {
-  const sql = new SQL(url);
+  const sql = new Bun.SQL(url);
   return {
     dialect: "postgres",
     async exec(query: string, params?: unknown[]) {

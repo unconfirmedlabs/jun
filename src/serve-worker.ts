@@ -11,7 +11,6 @@
  * The worker creates its own Postgres connection for /query and /admin/reload.
  */
 /// <reference lib="webworker" />
-import { SQL } from "bun";
 import type { Logger } from "./logger.ts";
 import { createLogger } from "./logger.ts";
 import { createMetrics, type IndexerMetrics, type MetricsSnapshot } from "./serve.ts";
@@ -53,7 +52,7 @@ self.onmessage = async (event: MessageEvent) => {
 };
 
 async function startServer(config: WorkerConfig): Promise<void> {
-  const sql = new SQL(config.database);
+  const sql = new Bun.SQL(config.database);
 
   // SQL safety helpers (same as serve.ts)
   function stripComments(sqlStr: string): string {
