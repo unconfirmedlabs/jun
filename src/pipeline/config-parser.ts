@@ -58,6 +58,7 @@ export interface CanonicalConfig {
     sqlite?: string;
     postgres?: string;
     deferIndexes?: boolean;
+    pgUnlogged?: boolean;
     // Legacy shorthands
     type?: string;
     path?: string;
@@ -447,6 +448,7 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
       balances: !!processorConfig?.balances,
       transactions: !!processorConfig?.transactionBlocks,
       deferIndexes: !!storageConfig.deferIndexes,
+      pgUnlogged: !!storageConfig.pgUnlogged,
     }));
   }
 

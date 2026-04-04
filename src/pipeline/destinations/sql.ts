@@ -28,6 +28,8 @@ export interface SqlStorageConfig {
   transactions?: boolean;
   /** Defer index creation until shutdown (faster bulk inserts for snapshots) */
   deferIndexes?: boolean;
+  /** Use UNLOGGED tables for Postgres (no WAL during inserts, faster bulk load) */
+  pgUnlogged?: boolean;
 }
 
 type Dialect = "postgres" | "sqlite";
@@ -410,6 +412,8 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
   // Snapshot optimization: use aggressive SQLite pragmas + skip conflict checks
   const snapshotMode = !!config.deferIndexes;
+  // UNLOGGED tables for Postgres bulk loading (no WAL writes)
+  const pgUnlogged = !!(config.pgUnlogged || (snapshotMode && isPostgres));
 
   // Pre-computed table configs
   const tables = new Map<string, { name: string; columns: string[] }>();
@@ -424,7 +428,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         : createSqliteDriver(sqlitePath);
 
       // Snapshot mode: drop existing tables to avoid stale constraints
-      if (snapshotMode) {
+      if (snapshotMode || pgUnlogged) {
         await driver.exec("DROP TABLE IF EXISTS transactions");
         await driver.exec("DROP TABLE IF EXISTS move_calls");
         await driver.exec("DROP TABLE IF EXISTS balance_changes");
@@ -467,62 +471,33 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
       // Create balance tables
       if (config.balances) {
-        const pgUnlogged = snapshotMode && isPostgres ? "UNLOGGED" : "";
+        const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
         if (driver.dialect === "postgres") {
-          if (snapshotMode) {
-            // Snapshot: UNLOGGED table, no PK/UNIQUE — constraints deferred to shutdown
-            await driver.exec(`
-              CREATE ${pgUnlogged} TABLE IF NOT EXISTS balance_changes (
-                tx_digest TEXT NOT NULL,
-                checkpoint_seq NUMERIC NOT NULL,
-                address TEXT NOT NULL,
-                coin_type TEXT NOT NULL,
-                amount NUMERIC NOT NULL,
-                sui_timestamp TIMESTAMPTZ NOT NULL
-              );
-            `);
-            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bc_unique ON balance_changes(tx_digest, address, coin_type)`);
-          } else {
-            await driver.exec(`
-              CREATE TABLE IF NOT EXISTS balance_changes (
-                id SERIAL PRIMARY KEY,
-                tx_digest TEXT NOT NULL,
-                checkpoint_seq NUMERIC NOT NULL,
-                address TEXT NOT NULL,
-                coin_type TEXT NOT NULL,
-                amount NUMERIC NOT NULL,
-                sui_timestamp TIMESTAMPTZ NOT NULL,
-                UNIQUE (tx_digest, address, coin_type)
-              );
-            `);
-          }
+          await driver.exec(`
+            CREATE ${unloggedKw} TABLE IF NOT EXISTS balance_changes (
+              id SERIAL PRIMARY KEY,
+              tx_digest TEXT NOT NULL,
+              checkpoint_seq NUMERIC NOT NULL,
+              address TEXT NOT NULL,
+              coin_type TEXT NOT NULL,
+              amount NUMERIC NOT NULL,
+              sui_timestamp TIMESTAMPTZ NOT NULL,
+              UNIQUE (tx_digest, address, coin_type)
+            );
+          `);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_address ON balance_changes(address)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_coin_type ON balance_changes(coin_type)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_checkpoint ON balance_changes(checkpoint_seq)`);
-          if (snapshotMode) {
-            // Snapshot: balances materialized at shutdown, just create the table
-            await driver.exec(`
-              CREATE ${pgUnlogged} TABLE IF NOT EXISTS balances (
-                address TEXT NOT NULL,
-                coin_type TEXT NOT NULL,
-                balance NUMERIC NOT NULL DEFAULT 0,
-                last_checkpoint NUMERIC NOT NULL DEFAULT 0,
-                last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW()
-              );
-            `);
-            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_balances_pk ON balances(address, coin_type)`);
-          } else {
-            await driver.exec(`
-              CREATE TABLE IF NOT EXISTS balances (
-                address TEXT NOT NULL,
-                coin_type TEXT NOT NULL,
-                balance NUMERIC NOT NULL DEFAULT 0,
-                last_checkpoint NUMERIC NOT NULL DEFAULT 0,
-                last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (address, coin_type)
-              );
-            `);
-          }
+          await driver.exec(`
+            CREATE ${unloggedKw} TABLE IF NOT EXISTS balances (
+              address TEXT NOT NULL,
+              coin_type TEXT NOT NULL,
+              balance NUMERIC NOT NULL DEFAULT 0,
+              last_checkpoint NUMERIC NOT NULL DEFAULT 0,
+              last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              PRIMARY KEY (address, coin_type)
+            );
+          `);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_balances_coin ON balances(coin_type, balance DESC)`);
         } else {
           if (snapshotMode) {
@@ -570,68 +545,35 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
       // Create transaction tables
       if (config.transactions) {
-        const pgUnlogged = snapshotMode && isPostgres ? "UNLOGGED" : "";
+        const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
         if (driver.dialect === "postgres") {
-          if (snapshotMode) {
-            // Snapshot: UNLOGGED, no PK — deferred to shutdown
-            await driver.exec(`
-              CREATE ${pgUnlogged} TABLE IF NOT EXISTS transactions (
-                digest TEXT NOT NULL,
-                sender TEXT NOT NULL,
-                success BOOLEAN NOT NULL,
-                computation_cost NUMERIC NOT NULL,
-                storage_cost NUMERIC NOT NULL,
-                storage_rebate NUMERIC NOT NULL,
-                move_call_count INTEGER NOT NULL DEFAULT 0,
-                checkpoint_seq NUMERIC NOT NULL,
-                sui_timestamp TIMESTAMPTZ NOT NULL
-              );
-            `);
-            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_digest ON transactions(digest)`);
-          } else {
-            await driver.exec(`
-              CREATE TABLE IF NOT EXISTS transactions (
-                digest TEXT PRIMARY KEY,
-                sender TEXT NOT NULL,
-                success BOOLEAN NOT NULL,
-                computation_cost NUMERIC NOT NULL,
-                storage_cost NUMERIC NOT NULL,
-                storage_rebate NUMERIC NOT NULL,
-                move_call_count INTEGER NOT NULL DEFAULT 0,
-                checkpoint_seq NUMERIC NOT NULL,
-                sui_timestamp TIMESTAMPTZ NOT NULL
-              );
-            `);
-          }
+          await driver.exec(`
+            CREATE ${unloggedKw} TABLE IF NOT EXISTS transactions (
+              digest TEXT PRIMARY KEY,
+              sender TEXT NOT NULL,
+              success BOOLEAN NOT NULL,
+              computation_cost NUMERIC NOT NULL,
+              storage_cost NUMERIC NOT NULL,
+              storage_rebate NUMERIC NOT NULL,
+              move_call_count INTEGER NOT NULL DEFAULT 0,
+              checkpoint_seq NUMERIC NOT NULL,
+              sui_timestamp TIMESTAMPTZ NOT NULL
+            );
+          `);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_checkpoint ON transactions(checkpoint_seq)`);
-          if (snapshotMode) {
-            await driver.exec(`
-              CREATE ${pgUnlogged} TABLE IF NOT EXISTS move_calls (
-                tx_digest TEXT NOT NULL,
-                call_index INTEGER NOT NULL,
-                package TEXT NOT NULL,
-                module TEXT NOT NULL,
-                function TEXT NOT NULL,
-                checkpoint_seq NUMERIC NOT NULL,
-                sui_timestamp TIMESTAMPTZ NOT NULL
-              );
-            `);
-            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mc_pk ON move_calls(tx_digest, call_index)`);
-          } else {
-            await driver.exec(`
-              CREATE TABLE IF NOT EXISTS move_calls (
-                tx_digest TEXT NOT NULL,
-                call_index INTEGER NOT NULL,
-                package TEXT NOT NULL,
-                module TEXT NOT NULL,
-                function TEXT NOT NULL,
-                checkpoint_seq NUMERIC NOT NULL,
-                sui_timestamp TIMESTAMPTZ NOT NULL,
-                PRIMARY KEY (tx_digest, call_index)
-              );
-            `);
-          }
+          await driver.exec(`
+            CREATE ${unloggedKw} TABLE IF NOT EXISTS move_calls (
+              tx_digest TEXT NOT NULL,
+              call_index INTEGER NOT NULL,
+              package TEXT NOT NULL,
+              module TEXT NOT NULL,
+              function TEXT NOT NULL,
+              checkpoint_seq NUMERIC NOT NULL,
+              sui_timestamp TIMESTAMPTZ NOT NULL,
+              PRIMARY KEY (tx_digest, call_index)
+            );
+          `);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_package ON move_calls(package)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_module ON move_calls(package, module)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_function ON move_calls(package, module, function)`);

@@ -2152,9 +2152,13 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
         baseConfig.storage = baseConfig.storage ?? {};
         baseConfig.storage.postgres = opts.postgres;
       }
-      // Defer indexes in snapshot mode for faster bulk inserts
+      // Snapshot optimizations: SQLite defers indexes, Postgres uses UNLOGGED tables
       if (baseConfig.storage && backfillOnly) {
-        baseConfig.storage.deferIndexes = true;
+        if (baseConfig.storage.postgres) {
+          baseConfig.storage.pgUnlogged = true;
+        } else {
+          baseConfig.storage.deferIndexes = true;
+        }
       }
 
       // S3 export validation — check creds before pipeline starts
