@@ -2006,6 +2006,7 @@ pipelineCmd
   .option("--end-checkpoint <seq>", "backfill ending checkpoint (inclusive)")
   .option("--concurrency <n>", "archive fetch concurrency (default: 200)")
   .option("--workers <n>", "checkpoint decoder workers (default: CPU count)")
+  .option("-y, --yes", "skip confirmation prompt")
   .option("--network <network>", "network name (mainnet, testnet, devnet)")
   // Processors
   .option("--transaction-blocks", "enable transaction block indexing")
@@ -2030,6 +2031,7 @@ pipelineCmd
     endCheckpoint?: string;
     concurrency?: string;
     workers?: string;
+    yes?: boolean;
     network?: string;
     transactionBlocks?: boolean;
     coinType?: string[];
@@ -2087,8 +2089,10 @@ pipelineCmd
       const archiveUrl = opts.archiveUrl ?? baseConfig.sources?.backfill?.archiveUrl ?? baseConfig.sources?.backfill?.archive ?? networkDefaults[net];
 
       // Source overrides
+      const backfillOnly = (opts.epoch || opts.startCheckpoint) && !opts.grpcUrl;
       if (opts.epoch || opts.startCheckpoint) {
         baseConfig.sources = baseConfig.sources ?? {};
+        // Always set live.grpcUrl — needed for epoch resolution
         baseConfig.sources.live = { grpcUrl };
         baseConfig.sources.backfill = baseConfig.sources.backfill ?? {};
         baseConfig.sources.backfill.archiveUrl = archiveUrl;
@@ -2226,12 +2230,57 @@ pipelineCmd
 
       pipeline.configure(pipelineConfig);
 
-      for (const source of sources) pipeline.source(source);
+      // If backfill-only (--epoch or --start-checkpoint without --grpc-url), skip live sources
+      const filteredSources = backfillOnly
+        ? sources.filter((s) => s.name !== "live")
+        : sources;
+      for (const source of filteredSources) pipeline.source(source);
       for (const processor of processors) pipeline.processor(processor);
       for (const storage of storages) pipeline.storage(storage);
       for (const broadcast of broadcasts) pipeline.broadcast(broadcast);
 
+      // Print summary and confirm
+      const backfill = baseConfig.sources?.backfill;
+      const startCp = backfill?.startCheckpoint ?? backfill?.from;
+      const endCp = backfill?.endCheckpoint ?? backfill?.to;
+      const enabledProcessors: string[] = [];
+      if (baseConfig.processors?.transactionBlocks) enabledProcessors.push("transaction-blocks");
+      if (baseConfig.processors?.balanceChanges) enabledProcessors.push("balance-changes");
+      if (baseConfig.processors?.events) enabledProcessors.push(`events (${Object.keys(baseConfig.processors.events).length} handlers)`);
+
+      console.error("");
+      console.error("  Pipeline Summary");
+      console.error("  ────────────────");
+      if (backfill?.epoch) console.error(`  epoch           ${backfill.epoch}`);
+      if (startCp && endCp) {
+        const count = BigInt(endCp) - BigInt(startCp) + 1n;
+        console.error(`  checkpoints     ${startCp} → ${endCp} (${count.toLocaleString()})`);
+      }
+      if (enabledProcessors.length > 0) console.error(`  processors      ${enabledProcessors.join(", ")}`);
+      if (opts.sqlite) console.error(`  sqlite          ${opts.sqlite}`);
+      if (opts.postgres) console.error(`  postgres        ${opts.postgres}`);
+      if (opts.sqliteExport) console.error(`  export          ${opts.sqliteExport}`);
+      if (opts.stdout) console.error(`  broadcast       stdout`);
+      if (backfill?.concurrency) console.error(`  concurrency     ${backfill.concurrency}`);
+      if (backfill?.workers) console.error(`  workers         ${backfill.workers}`);
+      console.error("");
+
+      if (!opts.yes) {
+        process.stderr.write("  Proceed? [Y/n] ");
+        const reader = Bun.stdin.stream().getReader();
+        const { value } = await reader.read();
+        reader.releaseLock();
+        const answer = new TextDecoder().decode(value).trim().toLowerCase();
+        if (answer && answer !== "y" && answer !== "yes") {
+          console.error("  Aborted.");
+          process.exit(0);
+        }
+      }
+
+      const pipelineStart = performance.now();
       await pipeline.run();
+      const pipelineElapsed = ((performance.now() - pipelineStart) / 1000).toFixed(1);
+      console.error(`[jun] pipeline completed in ${pipelineElapsed}s`);
 
       // Post-pipeline: S3 export
       if (s3ExportConfig && opts.sqlite) {
