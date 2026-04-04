@@ -2004,6 +2004,8 @@ pipelineCmd
   .option("--epoch <number>", "backfill a specific completed epoch")
   .option("--start-checkpoint <seq>", "backfill starting checkpoint (inclusive)")
   .option("--end-checkpoint <seq>", "backfill ending checkpoint (inclusive)")
+  .option("--concurrency <n>", "archive fetch concurrency (default: 200)")
+  .option("--workers <n>", "checkpoint decoder workers (default: CPU count)")
   .option("--network <network>", "network name (mainnet, testnet, devnet)")
   // Processors
   .option("--transaction-blocks", "enable transaction block indexing")
@@ -2026,6 +2028,8 @@ pipelineCmd
     epoch?: string;
     startCheckpoint?: string;
     endCheckpoint?: string;
+    concurrency?: string;
+    workers?: string;
     network?: string;
     transactionBlocks?: boolean;
     coinType?: string[];
@@ -2095,6 +2099,8 @@ pipelineCmd
           if (opts.startCheckpoint) baseConfig.sources.backfill.startCheckpoint = opts.startCheckpoint;
           if (opts.endCheckpoint) baseConfig.sources.backfill.endCheckpoint = opts.endCheckpoint;
         }
+        if (opts.concurrency) baseConfig.sources.backfill.concurrency = parseInt(opts.concurrency);
+        if (opts.workers) baseConfig.sources.backfill.workers = parseInt(opts.workers);
       }
 
       // Processor overrides
