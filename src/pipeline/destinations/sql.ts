@@ -291,10 +291,14 @@ async function writeMoveCallsPgBulk(
   }
 }
 
-function isUniqueConstraintError(error: unknown): error is Error {
-  return error instanceof Error && error.message.includes("UNIQUE constraint failed:");
+function isDuplicateIndexError(error: unknown): error is Error {
+  if (!(error instanceof Error)) return false;
+  // SQLite: "UNIQUE constraint failed: table.column"
+  // Postgres: "could not create unique index"
+  return error.message.includes("UNIQUE constraint failed:") || error.message.includes("could not create unique index");
 }
 
+/** Repair duplicate rows for SQLite (uses rowid). */
 async function repairSqliteSnapshotDuplicates(
   driver: SqlDriver,
   error: Error,
@@ -335,6 +339,43 @@ async function repairSqliteSnapshotDuplicates(
   return true;
 }
 
+/** Repair duplicate rows for Postgres (uses ctid). */
+async function repairPostgresSnapshotDuplicates(
+  driver: SqlDriver,
+  error: Error,
+  log: Logger,
+): Promise<boolean> {
+  // Extract index name from error: 'could not create unique index "idx_tx_digest"'
+  const indexMatch = error.message.match(/could not create unique index "(\w+)"/);
+  if (!indexMatch) return false;
+  const indexName = indexMatch[1];
+
+  const repairs: Record<string, { table: string; sql: string }> = {
+    idx_tx_digest: {
+      table: "transactions",
+      sql: `DELETE FROM transactions a USING transactions b
+            WHERE a.ctid > b.ctid AND a.digest = b.digest`,
+    },
+    idx_bc_unique: {
+      table: "balance_changes",
+      sql: `DELETE FROM balance_changes a USING balance_changes b
+            WHERE a.ctid > b.ctid AND a.tx_digest = b.tx_digest AND a.address = b.address AND a.coin_type = b.coin_type`,
+    },
+    idx_mc_pk: {
+      table: "move_calls",
+      sql: `DELETE FROM move_calls a USING move_calls b
+            WHERE a.ctid > b.ctid AND a.tx_digest = b.tx_digest AND a.call_index = b.call_index`,
+    },
+  };
+
+  const repair = repairs[indexName];
+  if (!repair) return false;
+
+  log.warn({ table: repair.table }, "repairing duplicate snapshot rows before retrying unique index");
+  await driver.exec(repair.sql);
+  return true;
+}
+
 async function createDeferredIndexes(
   driver: SqlDriver,
   indexes: string[],
@@ -345,8 +386,10 @@ async function createDeferredIndexes(
     try {
       await driver.exec(sql);
     } catch (error) {
-      if (!allowSnapshotRepair || !isUniqueConstraintError(error)) throw error;
-      const repaired = await repairSqliteSnapshotDuplicates(driver, error, log);
+      if (!allowSnapshotRepair || !isDuplicateIndexError(error)) throw error;
+      const repaired = driver.dialect === "postgres"
+        ? await repairPostgresSnapshotDuplicates(driver, error as Error, log)
+        : await repairSqliteSnapshotDuplicates(driver, error as Error, log);
       if (!repaired) throw error;
       await driver.exec(sql);
     }
@@ -765,7 +808,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         log.info({ count: otherIndexes.length }, "creating deferred indexes...");
         const startTime = performance.now();
         if (otherIndexes.length > 0) {
-          await createDeferredIndexes(driver, otherIndexes, log, snapshotMode && isSqlite);
+          await createDeferredIndexes(driver, otherIndexes, log, snapshotMode);
         }
         const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
         log.info({ elapsed: `${elapsed}s` }, "deferred indexes created");
