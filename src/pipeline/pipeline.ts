@@ -452,7 +452,8 @@ async function runSource(
       const elapsedSecs = (performance.now() - startTime) / 1000;
       const elapsed = elapsedSecs.toFixed(1);
       const rate = Math.round(checkpointCount / (elapsedSecs || 1));
-      const total = config.totalCheckpoints ? Number(config.totalCheckpoints) : undefined;
+      const isBackfill = source.name !== "live";
+      const total = (config.totalCheckpoints && isBackfill) ? Number(config.totalCheckpoints) : undefined;
 
       if (config.onProgress) {
         config.onProgress({ source: source.name, checkpoints: checkpointCount, total, rate, elapsedSecs });
@@ -471,7 +472,7 @@ async function runSource(
   }
 
   // Clear progress bar line
-  if (config.totalCheckpoints && humanOutput && !config.onProgress) {
+  if (config.totalCheckpoints && source.name !== "live" && humanOutput && !config.onProgress) {
     const elapsedSecs = (performance.now() - startTime) / 1000;
     const rate = Math.round(checkpointCount / (elapsedSecs || 1));
     process.stderr.write(`\r[${source.name}] ${progressBar(100)} 100% | ${checkpointCount.toLocaleString()} checkpoints | ${rate}/s | ${elapsedSecs.toFixed(1)}s\n`);
