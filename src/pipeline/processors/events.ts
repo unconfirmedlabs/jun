@@ -51,11 +51,7 @@ function stripGenerics(type: string): string {
   return index === -1 ? type : type.slice(0, index);
 }
 
-function parseTimestamp(timestamp: { seconds: string; nanos: number } | null | undefined): Date {
-  if (!timestamp) return new Date(0);
-  const milliseconds = BigInt(timestamp.seconds) * 1000n + BigInt(Math.floor(timestamp.nanos / 1_000_000));
-  return new Date(Number(milliseconds));
-}
+import { parseTimestamp } from "../../timestamp.ts";
 
 // ---------------------------------------------------------------------------
 // Implementation

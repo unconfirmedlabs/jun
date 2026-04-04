@@ -5,8 +5,8 @@
  * No effects table — status and gas are on the transactions table.
  * Uses bun:sqlite with WAL mode and prepared statements for write performance.
  */
-import { Database } from "bun:sqlite";
 import type { GrpcEvent } from "../grpc.ts";
+import { createSqliteConnection } from "../db.ts";
 
 export interface SqliteWriterOptions {
   path: string;
@@ -33,9 +33,7 @@ export interface SqliteWriter {
 }
 
 export function createSqliteWriter(opts: SqliteWriterOptions): SqliteWriter {
-  const db = new Database(opts.path);
-  db.run("PRAGMA journal_mode = WAL");
-  db.run("PRAGMA synchronous = NORMAL");
+  const db = createSqliteConnection(opts.path);
 
   // Transactions table — always created (join key for events + balance changes)
   db.run(`

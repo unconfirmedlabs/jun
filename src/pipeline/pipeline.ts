@@ -41,6 +41,7 @@ import { createMetrics, type IndexerMetrics } from "../serve.ts";
 import { createStateManager, type StateManager } from "../state.ts";
 import { createAdaptiveThrottle, type AdaptiveThrottle } from "../throttle.ts";
 import { fetchRemoteConfig } from "../remote-config.ts";
+import { createPostgresConnection } from "../db.ts";
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -120,7 +121,7 @@ export function createPipeline(): Pipeline {
       let state: StateManager | null = null;
       let sql: any = null;
       if (config.database && config.database.startsWith("postgres")) {
-        sql = new Bun.SQL(config.database);
+        sql = createPostgresConnection(config.database);
         state = await createStateManager(sql);
         log.info("state manager initialized");
       }

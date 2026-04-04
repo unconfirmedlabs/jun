@@ -33,11 +33,7 @@ export interface BalanceProcessor {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function parseTimestamp(ts: { seconds: string; nanos: number } | null | undefined): Date {
-  if (!ts) return new Date(0);
-  const ms = BigInt(ts.seconds) * 1000n + BigInt(Math.floor(ts.nanos / 1_000_000));
-  return new Date(Number(ms));
-}
+import { parseTimestamp } from "./timestamp.ts";
 
 // ---------------------------------------------------------------------------
 // Implementation

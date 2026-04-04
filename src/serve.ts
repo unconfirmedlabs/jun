@@ -17,6 +17,7 @@ import type { StateManager } from "./state.ts";
 import type { FlushStats } from "./buffer.ts";
 import type { BroadcastManager, SSEStreamType, SSEClient } from "./broadcast.ts";
 import type { HotReloadContext } from "./hot-reload.ts";
+import { stripComments, isReadOnly } from "./sql-helpers.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -260,20 +261,6 @@ function handleSSEStream(
 // ---------------------------------------------------------------------------
 // Query handler
 // ---------------------------------------------------------------------------
-
-/** Strip SQL comments to prevent prefix check bypass */
-function stripComments(sql: string): string {
-  return sql
-    .replace(/\/\*[\s\S]*?\*\//g, "")  // block comments
-    .replace(/^--[^\n]*$/gm, "")        // line comments
-    .trim();
-}
-
-/** Check if a query is read-only (SELECT, WITH, EXPLAIN) */
-function isReadOnly(sql: string): boolean {
-  const upper = stripComments(sql).toUpperCase();
-  return upper.startsWith("SELECT") || upper.startsWith("WITH") || upper.startsWith("EXPLAIN");
-}
 
 async function handleQuery(
   url: URL,

@@ -8,6 +8,7 @@ import { createGrpcClient, type GrpcClient } from "../../grpc.ts";
 import type { Source, Checkpoint } from "../types.ts";
 import type { Logger } from "../../logger.ts";
 import { createLogger } from "../../logger.ts";
+import { parseTimestamp } from "../../timestamp.ts";
 
 export interface GrpcLiveSourceConfig {
   /** gRPC endpoint URL (host:port) */
@@ -40,10 +41,7 @@ export function createGrpcLiveSource(config: GrpcLiveSourceConfig): Source {
           for await (const response of grpcStream) {
             if (stopped) break;
 
-            const timestamp = response.checkpoint.summary?.timestamp;
-            const timestampDate = timestamp
-              ? new Date(Number(BigInt(timestamp.seconds) * 1000n + BigInt(Math.floor(timestamp.nanos / 1_000_000))))
-              : new Date(0);
+            const timestampDate = parseTimestamp(response.checkpoint.summary?.timestamp);
 
             yield {
               sequenceNumber: BigInt(response.cursor),

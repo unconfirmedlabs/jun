@@ -10,6 +10,7 @@ import { generateDDL } from "../../schema.ts";
 import { validateIdentifier } from "../../output/storage.ts";
 import type { Logger } from "../../logger.ts";
 import { createLogger } from "../../logger.ts";
+import { createPostgresConnection } from "../../db.ts";
 
 export interface PostgresDestinationConfig {
   /** Postgres connection string */
@@ -31,7 +32,7 @@ export function createPostgresStorage(config: PostgresDestinationConfig): Storag
     name: "postgres",
 
     async initialize(): Promise<void> {
-      sql = new Bun.SQL(config.url);
+      sql = createPostgresConnection(config.url);
 
       // Create event tables
       if (config.handlers) {

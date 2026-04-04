@@ -8,7 +8,7 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite"; // readonly open — not using createSqliteConnection
 import { z } from "zod";
 import { jsonReplacer } from "./cli-helpers.ts";
 import { getSuiClient } from "./rpc.ts";

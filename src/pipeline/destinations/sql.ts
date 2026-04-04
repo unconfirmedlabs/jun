@@ -4,13 +4,14 @@
  * Single implementation, two dialects. Handles event tables, balance tables,
  * and running totals identically for both databases.
  */
-import { Database } from "bun:sqlite";
 import type { Storage, ProcessedCheckpoint, DecodedEvent, BalanceChange, TransactionRecord, MoveCallRecord } from "../types.ts";
-import type { FieldDefs, FieldType } from "../../schema.ts";
+import type { FieldDefs } from "../../schema.ts";
 import { generateDDL } from "../../schema.ts";
 import { validateIdentifier } from "../../output/storage.ts";
 import type { Logger } from "../../logger.ts";
 import { createLogger } from "../../logger.ts";
+import { createPostgresConnection, createSqliteConnection } from "../../db.ts";
+import { fieldTypeToSqlite, generateSqliteDDL } from "../../sql-helpers.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -42,7 +43,7 @@ interface SqlDriver {
 // ---------------------------------------------------------------------------
 
 function createPostgresDriver(url: string): SqlDriver {
-  const sql = new Bun.SQL(url);
+  const sql = createPostgresConnection(url);
   return {
     dialect: "postgres",
     async exec(query: string, params?: unknown[]) {
@@ -62,12 +63,8 @@ function createPostgresDriver(url: string): SqlDriver {
 }
 
 function createSqliteDriver(path: string): SqlDriver {
-  const database = new Database(path);
-  database.exec("PRAGMA journal_mode = WAL;");
-  database.exec("PRAGMA synchronous = NORMAL;");   // safe with WAL, avoids fsync per commit
+  const database = createSqliteConnection(path);
   database.exec("PRAGMA temp_store = MEMORY;");     // temp tables in memory
-  database.exec("PRAGMA mmap_size = 268435456;");   // 256MB mmap for reads
-  database.exec("PRAGMA cache_size = -64000;");     // 64MB page cache
   return {
     dialect: "sqlite",
     async exec(query: string, params?: unknown[]) {
@@ -100,36 +97,7 @@ function createSqliteDriver(path: string): SqlDriver {
 // SQL dialect helpers
 // ---------------------------------------------------------------------------
 
-function fieldTypeToSqlite(type: FieldType): string {
-  if (type.startsWith("option<")) return fieldTypeToSqlite(type.slice(7, -1) as FieldType);
-  if (type.startsWith("vector<")) return "TEXT";
-  switch (type) {
-    case "address": case "string": return "TEXT";
-    case "bool": return "INTEGER";
-    case "u8": case "u16": case "u32": return "INTEGER";
-    case "u64": case "u128": case "u256": return "TEXT";
-    default: return "TEXT";
-  }
-}
-
-function generateSqliteDDL(tableName: string, fields: FieldDefs): string {
-  const columns = [
-    "id INTEGER PRIMARY KEY AUTOINCREMENT",
-    "tx_digest TEXT NOT NULL",
-    "event_seq INTEGER NOT NULL",
-    "sender TEXT NOT NULL",
-    "sui_timestamp TEXT NOT NULL",
-    "indexed_at TEXT NOT NULL DEFAULT (datetime('now'))",
-  ];
-  for (const [name, type] of Object.entries(fields)) {
-    const nullable = type.startsWith("option<") ? "" : " NOT NULL";
-    columns.push(`${name} ${fieldTypeToSqlite(type)}${nullable}`);
-  }
-  columns.push("UNIQUE (tx_digest, event_seq)");
-  return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${columns.join(",\n  ")}\n);`;
-}
-
-/** Build placeholder string: Postgres uses $1,$2 — SQLite uses ?,? */
+/** Build placeholder string: Postgres uses $1,$2 -- SQLite uses ?,? */
 function placeholders(dialect: Dialect, count: number, offset = 0): string[] {
   if (dialect === "postgres") {
     return Array.from({ length: count }, (_, i) => `$${offset + i + 1}`);

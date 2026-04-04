@@ -14,6 +14,8 @@
 import type { Logger } from "./logger.ts";
 import { createLogger } from "./logger.ts";
 import { createMetrics, type IndexerMetrics, type MetricsSnapshot } from "./serve.ts";
+import { createPostgresConnection } from "./db.ts";
+import { stripComments, isReadOnly } from "./sql-helpers.ts";
 
 declare var self: Worker;
 
@@ -52,17 +54,7 @@ self.onmessage = async (event: MessageEvent) => {
 };
 
 async function startServer(config: WorkerConfig): Promise<void> {
-  const sql = new Bun.SQL(config.database);
-
-  // SQL safety helpers (same as serve.ts)
-  function stripComments(sqlStr: string): string {
-    return sqlStr.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^--[^\n]*$/gm, "").trim();
-  }
-
-  function isReadOnly(sqlStr: string): boolean {
-    const upper = stripComments(sqlStr).toUpperCase();
-    return upper.startsWith("SELECT") || upper.startsWith("WITH") || upper.startsWith("EXPLAIN");
-  }
+  const sql = createPostgresConnection(config.database);
 
   server = Bun.serve({
     port: config.port,
@@ -114,12 +106,7 @@ async function handleQuery(
     return Response.json({ error: "missing 'sql' field in request body" }, { status: 400 });
   }
 
-  function stripComments(s: string): string {
-    return s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^--[^\n]*$/gm, "").trim();
-  }
-
-  const normalized = stripComments(rawSql).toUpperCase();
-  if (!normalized.startsWith("SELECT") && !normalized.startsWith("WITH") && !normalized.startsWith("EXPLAIN")) {
+  if (!isReadOnly(rawSql)) {
     return Response.json({ error: "only SELECT, WITH, and EXPLAIN queries are allowed" }, { status: 403 });
   }
 

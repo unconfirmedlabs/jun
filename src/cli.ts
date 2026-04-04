@@ -10,6 +10,7 @@ import { createArchiveClient, cachedGetCheckpoint } from "./archive.ts";
 import { generateFieldDSL, formatCodegenResult } from "./codegen.ts";
 import { createSqliteWriter, type SqliteWriter } from "./output/sqlite.ts";
 import { loadConfig } from "./config.ts";
+import { parseTimestampMs } from "./timestamp.ts";
 
 const cfg = loadConfig();
 
@@ -155,7 +156,7 @@ async function resolveEpochRange(
 
 function getTimestampMs(summary: GrpcCheckpointResponse["checkpoint"]["summary"]): number {
   if (!summary?.timestamp) return Date.now();
-  return Number(BigInt(summary.timestamp.seconds) * 1000n + BigInt(Math.floor(summary.timestamp.nanos / 1_000_000)));
+  return parseTimestampMs(summary.timestamp);
 }
 
 function formatTimestamp(ms: number): string {

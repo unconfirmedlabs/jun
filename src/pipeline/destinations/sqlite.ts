@@ -4,9 +4,11 @@
  * Uses WAL mode for performance. Auto-creates event tables from field definitions.
  * Idempotent via INSERT OR IGNORE.
  */
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import type { Storage, ProcessedCheckpoint, DecodedEvent } from "../types.ts";
-import type { FieldDefs, FieldType } from "../../schema.ts";
+import type { FieldDefs } from "../../schema.ts";
+import { createSqliteConnection } from "../../db.ts";
+import { fieldTypeToSqlite } from "../../sql-helpers.ts";
 
 export interface SqliteDestinationConfig {
   /** Path to SQLite database file */
@@ -15,18 +17,6 @@ export interface SqliteDestinationConfig {
   handlers?: Record<string, { tableName: string; fields: FieldDefs }>;
   /** Enable balance change tables */
   balances?: boolean;
-}
-
-function fieldTypeToSqlite(type: FieldType): string {
-  if (type.startsWith("option<")) return fieldTypeToSqlite(type.slice(7, -1) as FieldType);
-  if (type.startsWith("vector<")) return "TEXT";
-  switch (type) {
-    case "address": case "string": return "TEXT";
-    case "bool": return "INTEGER";
-    case "u8": case "u16": case "u32": return "INTEGER";
-    case "u64": case "u128": case "u256": return "TEXT";
-    default: return "TEXT";
-  }
 }
 
 export function createSqliteStorage(config: SqliteDestinationConfig): Storage {
@@ -38,8 +28,7 @@ export function createSqliteStorage(config: SqliteDestinationConfig): Storage {
     name: "sqlite",
 
     async initialize(): Promise<void> {
-      database = new Database(config.path);
-      database.exec("PRAGMA journal_mode = WAL;");
+      database = createSqliteConnection(config.path);
 
       // Create event tables
       if (config.handlers) {

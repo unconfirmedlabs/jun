@@ -95,12 +95,7 @@ export interface BroadcastManager {
   shutdown(): Promise<void>;
 }
 
-/** Helper: parse checkpoint timestamp to ISO string */
-function parseTimestampISO(ts: { seconds: string; nanos: number } | null | undefined): string | null {
-  if (!ts) return null;
-  const ms = Number(BigInt(ts.seconds) * 1000n + BigInt(Math.floor(ts.nanos / 1_000_000)));
-  return new Date(ms).toISOString();
-}
+import { parseTimestampISO } from "./timestamp.ts";
 
 /** Helper: Uint8Array to base64 */
 function toBase64(data: Uint8Array): string {

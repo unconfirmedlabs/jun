@@ -21,6 +21,7 @@ import { createCheckpointDecoderPool, type CheckpointDecoderPool } from "../../c
 import type { Source, Checkpoint } from "../types.ts";
 import { createLogger } from "../../logger.ts";
 import type { Logger } from "../../logger.ts";
+import { parseTimestamp } from "../../timestamp.ts";
 
 export interface ArchiveSourceConfig {
   /** Archive base URL */
@@ -128,10 +129,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           const result = await pool.decode(seq, compressed);
           if (stopped) return;
 
-          const timestamp = result.decoded.checkpoint.summary?.timestamp;
-          const timestampDate = timestamp
-            ? new Date(Number(BigInt(timestamp.seconds) * 1000n + BigInt(Math.floor(timestamp.nanos / 1_000_000))))
-            : new Date(0);
+          const timestampDate = parseTimestamp(result.decoded.checkpoint.summary?.timestamp);
 
           pending.set(seq, {
             sequenceNumber: seq,

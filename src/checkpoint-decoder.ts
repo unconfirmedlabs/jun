@@ -13,6 +13,7 @@ import { join } from "path";
 import { decodeCheckpointFromProto, getCheckpointType } from "./archive.ts";
 import { parseCheckpointProtoNative } from "./proto-parser-native.ts";
 import { computeBalanceChangesFromArchive } from "./archive-balance.ts";
+import { parseTimestamp } from "./timestamp.ts";
 import { zstdDecompressSync } from "zlib";
 
 const USE_LEGACY = process.env.JUN_LEGACY_PARSERS === "1";
@@ -121,10 +122,7 @@ self.onmessage = async (event: MessageEvent) => {
     let balanceChanges: any[] | null = null;
     if (balanceCoinTypes !== null) {
       const coinTypeFilter = balanceCoinTypes.length === 0 ? null : new Set(balanceCoinTypes);
-      const timestamp = decoded.checkpoint.summary?.timestamp;
-      const timestampDate = timestamp
-        ? new Date(Number(BigInt(timestamp.seconds) * 1000n + BigInt(Math.floor(timestamp.nanos / 1_000_000))))
-        : new Date(0);
+      const timestampDate = parseTimestamp(decoded.checkpoint.summary?.timestamp);
       balanceChanges = computeBalanceChangesFromArchive(
         checkpointProto, sequenceNumber, timestampDate, coinTypeFilter,
       );

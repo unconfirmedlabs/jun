@@ -64,15 +64,8 @@ function stripGenerics(type: string): string {
   return idx === -1 ? type : type.slice(0, idx);
 }
 
-/**
- * Parse a protobuf Timestamp to a JS Date.
- * The timestamp has `seconds` (string) and `nanos` (number).
- */
-function parseTimestamp(ts: { seconds: string; nanos: number } | null | undefined): Date {
-  if (!ts) return new Date(0);
-  const ms = BigInt(ts.seconds) * 1000n + BigInt(Math.floor(ts.nanos / 1_000_000));
-  return new Date(Number(ms));
-}
+// Re-export shared timestamp parser
+import { parseTimestamp } from "./timestamp.ts";
 
 // ---------------------------------------------------------------------------
 // Processor
