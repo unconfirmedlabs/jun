@@ -120,7 +120,7 @@ export function createPipeline(): Pipeline {
       let state: StateManager | null = null;
       let sql: any = null;
       if (config.database && config.database.startsWith("postgres")) {
-        sql = new (await import("bun")).default.sql(config.database);
+        sql = new Bun.SQL(config.database);
         state = await createStateManager(sql);
         log.info("state manager initialized");
       }
