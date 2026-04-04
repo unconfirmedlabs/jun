@@ -97,7 +97,7 @@ export function createSqliteWriterChannel(config: SqlStorageConfig): WriterChann
         };
       });
 
-      worker.postMessage({ type: "init", config });
+      worker.postMessage({ type: "init", config, logLevel: process.env.LOG_LEVEL ?? "silent" });
       await initPromise;
     },
 

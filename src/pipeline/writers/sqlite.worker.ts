@@ -20,6 +20,8 @@ self.onmessage = async (event: MessageEvent) => {
 
   if (msg.type === "init") {
     try {
+      // Inherit log level from main thread
+      if (msg.logLevel) process.env.LOG_LEVEL = msg.logLevel;
       storage = createSqlStorage(msg.config);
       await storage.initialize();
       postMessage({ type: "initialized" });
