@@ -2135,13 +2135,11 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       // Storage overrides
       if (opts.sqlite) {
         baseConfig.storage = baseConfig.storage ?? {};
-        baseConfig.storage.type = "sqlite";
-        baseConfig.storage.path = opts.sqlite;
+        baseConfig.storage.sqlite = opts.sqlite;
       }
       if (opts.postgres) {
         baseConfig.storage = baseConfig.storage ?? {};
-        baseConfig.storage.type = "postgres";
-        baseConfig.storage.url = opts.postgres;
+        baseConfig.storage.postgres = opts.postgres;
       }
       // Auto-enable storage tables matching enabled processors
       if (baseConfig.storage) {
