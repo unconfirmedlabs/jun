@@ -107,6 +107,68 @@ function placeholders(dialect: Dialect, count: number, offset = 0): string[] {
   return Array.from({ length: count }, () => "?");
 }
 
+function isUniqueConstraintError(error: unknown): error is Error {
+  return error instanceof Error && error.message.includes("UNIQUE constraint failed:");
+}
+
+async function repairSqliteSnapshotDuplicates(
+  driver: SqlDriver,
+  error: Error,
+  log: Logger,
+): Promise<boolean> {
+  const repairs: Array<{ match: string; sql: string; table: string }> = [
+    {
+      match: "transactions.digest",
+      table: "transactions",
+      sql: `DELETE FROM transactions
+            WHERE rowid NOT IN (
+              SELECT MIN(rowid) FROM transactions GROUP BY digest
+            )`,
+    },
+    {
+      match: "balance_changes.tx_digest, balance_changes.address, balance_changes.coin_type",
+      table: "balance_changes",
+      sql: `DELETE FROM balance_changes
+            WHERE rowid NOT IN (
+              SELECT MIN(rowid) FROM balance_changes GROUP BY tx_digest, address, coin_type
+            )`,
+    },
+    {
+      match: "move_calls.tx_digest, move_calls.call_index",
+      table: "move_calls",
+      sql: `DELETE FROM move_calls
+            WHERE rowid NOT IN (
+              SELECT MIN(rowid) FROM move_calls GROUP BY tx_digest, call_index
+            )`,
+    },
+  ];
+
+  const repair = repairs.find(candidate => error.message.includes(candidate.match));
+  if (!repair) return false;
+
+  log.warn({ table: repair.table }, "repairing duplicate snapshot rows before retrying unique index");
+  await driver.exec(repair.sql);
+  return true;
+}
+
+async function createDeferredIndexes(
+  driver: SqlDriver,
+  indexes: string[],
+  log: Logger,
+  allowSnapshotRepair = false,
+): Promise<void> {
+  for (const sql of indexes) {
+    try {
+      await driver.exec(sql);
+    } catch (error) {
+      if (!allowSnapshotRepair || !isUniqueConstraintError(error)) throw error;
+      const repaired = await repairSqliteSnapshotDuplicates(driver, error, log);
+      if (!repaired) throw error;
+      await driver.exec(sql);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
@@ -431,6 +493,27 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
     },
 
     async shutdown(): Promise<void> {
+      if (driver && deferredIndexes.length > 0) {
+        const balanceIndexes = deferredIndexes.filter(sql => /\bON balances\b/i.test(sql));
+        const otherIndexes = deferredIndexes.filter(sql => !/\bON balances\b/i.test(sql));
+
+        log.info({ count: otherIndexes.length }, "creating deferred indexes...");
+        const startTime = performance.now();
+        if (otherIndexes.length > 0) {
+          await createDeferredIndexes(driver, otherIndexes, log, snapshotMode && isSqlite);
+        }
+        const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+        log.info({ elapsed: `${elapsed}s` }, "deferred indexes created");
+
+        if (balanceIndexes.length > 0) {
+          log.info({ count: balanceIndexes.length }, "creating balances indexes...");
+          const balancesStartTime = performance.now();
+          await createDeferredIndexes(driver, balanceIndexes, log, false);
+          const balancesElapsed = ((performance.now() - balancesStartTime) / 1000).toFixed(1);
+          log.info({ elapsed: `${balancesElapsed}s` }, "balances indexes created");
+        }
+      }
+
       // Materialize balances from balance_changes (snapshot mode)
       if (driver && snapshotMode && config.balances) {
         log.info("materializing balances from balance_changes...");
@@ -446,17 +529,10 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
         log.info({ elapsed: `${elapsed}s` }, "balances materialized");
       }
-
-      if (driver && deferredIndexes.length > 0) {
-        log.info({ count: deferredIndexes.length }, "creating deferred indexes...");
-        const startTime = performance.now();
-        for (const sql of deferredIndexes) {
-          await driver.exec(sql);
-        }
-        const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
-        log.info({ elapsed: `${elapsed}s` }, "deferred indexes created");
-      }
       if (driver) {
+        if (snapshotMode && isSqlite) {
+          await driver.exec("PRAGMA locking_mode = NORMAL");
+        }
         await driver.close();
         driver = null;
       }
