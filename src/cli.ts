@@ -2119,8 +2119,8 @@ pipelineCmd
   .option("--coin-type <type...>", "coin types to track balances for (repeatable, or \"*\" for all)")
   .option("--event <type...>", "Move event types to index (repeatable)")
   // Storage
-  .option("--sqlite-path <path>", "write to SQLite database at path")
-  .option("--postgres-url <url>", "write to Postgres database at URL")
+  .option("--sqlite <path>", "write to SQLite database at path")
+  .option("--postgres <url>", "write to Postgres database at URL")
   // Broadcast
   .option("--stdout", "broadcast events to stdout as JSONL")
   .option("--sse <port>", "broadcast events via SSE on port")
@@ -2138,8 +2138,8 @@ pipelineCmd
     transactionBlocks?: boolean;
     coinType?: string[];
     event?: string[];
-    sqlitePath?: string;
-    postgresUrl?: string;
+    sqlite?: string;
+    postgres?: string;
     stdout?: boolean;
     sse?: string;
     nats?: string;
@@ -2231,15 +2231,15 @@ pipelineCmd
       }
 
       // Storage overrides
-      if (opts.sqlitePath) {
+      if (opts.sqlite) {
         baseConfig.storage = baseConfig.storage ?? {};
         baseConfig.storage.type = "sqlite";
-        baseConfig.storage.path = opts.sqlitePath;
+        baseConfig.storage.path = opts.sqlite;
       }
-      if (opts.postgresUrl) {
+      if (opts.postgres) {
         baseConfig.storage = baseConfig.storage ?? {};
         baseConfig.storage.type = "postgres";
-        baseConfig.storage.url = opts.postgresUrl;
+        baseConfig.storage.url = opts.postgres;
       }
       // Auto-enable storage tables matching enabled processors
       if (baseConfig.storage) {
