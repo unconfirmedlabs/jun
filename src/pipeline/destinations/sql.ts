@@ -119,6 +119,9 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
   const isSqlite = config.url.startsWith("sqlite:");
   const sqlitePath = isSqlite ? config.url.slice(7) : "";
 
+  // Snapshot optimization: use aggressive SQLite pragmas + skip conflict checks
+  const snapshotMode = !!config.deferIndexes;
+
   // Pre-computed table configs
   const tables = new Map<string, { name: string; columns: string[] }>();
   const deferredIndexes: string[] = [];
@@ -130,6 +133,16 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       driver = isPostgres
         ? createPostgresDriver(config.url)
         : createSqliteDriver(sqlitePath);
+
+      // Aggressive SQLite pragmas for snapshot mode (bulk insert optimization)
+      if (snapshotMode && isSqlite) {
+        await driver.exec("PRAGMA synchronous = OFF");
+        await driver.exec("PRAGMA journal_mode = OFF");
+        await driver.exec("PRAGMA locking_mode = EXCLUSIVE");
+        await driver.exec("PRAGMA temp_store = MEMORY");
+        await driver.exec("PRAGMA page_size = 32768");
+        log.info("snapshot mode: aggressive SQLite pragmas enabled");
+      }
 
       // Create event tables
       if (config.handlers) {
@@ -335,9 +348,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         }
 
         if (rowClauses.length > 0) {
-          const conflictClause = dialect === "postgres"
-            ? "ON CONFLICT (tx_digest, event_seq) DO NOTHING"
-            : "ON CONFLICT (tx_digest, event_seq) DO NOTHING";
+          const conflictClause = snapshotMode ? "" : "ON CONFLICT (tx_digest, event_seq) DO NOTHING";
           await exec(
             `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES ${rowClauses.join(", ")} ${conflictClause}`,
             values,
@@ -347,17 +358,17 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
       // Write balance changes
       if (config.balances && allBalanceChanges.length > 0) {
-        await writeBalanceChangesWithExec(exec, dialect, allBalanceChanges);
+        await writeBalanceChangesWithExec(exec, dialect, allBalanceChanges, snapshotMode);
       }
 
       // Write transactions
       if (config.transactions && allTransactions.length > 0) {
-        await writeTransactionsWithExec(exec, dialect, allTransactions);
+        await writeTransactionsWithExec(exec, dialect, allTransactions, snapshotMode);
       }
 
       // Write move calls
       if (config.transactions && allMoveCalls.length > 0) {
-        await writeMoveCallsWithExec(exec, dialect, allMoveCalls);
+        await writeMoveCallsWithExec(exec, dialect, allMoveCalls, snapshotMode);
       }
       }); // end transaction
     },
@@ -389,6 +400,7 @@ async function writeBalanceChangesWithExec(
   exec: (query: string, params?: unknown[]) => Promise<any>,
   dialect: Dialect,
   changes: BalanceChange[],
+  snapshotMode = false,
 ): Promise<void> {
   // 1. Insert into balance_changes ledger
   const ledgerValues: unknown[] = [];
@@ -407,8 +419,9 @@ async function writeBalanceChangesWithExec(
     );
   }
 
+  const conflictClause = snapshotMode ? "" : "ON CONFLICT (tx_digest, address, coin_type) DO NOTHING";
   await exec(
-    `INSERT INTO balance_changes (tx_digest, checkpoint_seq, address, coin_type, amount, sui_timestamp) VALUES ${ledgerRows.join(", ")} ON CONFLICT (tx_digest, address, coin_type) DO NOTHING`,
+    `INSERT INTO balance_changes (tx_digest, checkpoint_seq, address, coin_type, amount, sui_timestamp) VALUES ${ledgerRows.join(", ")} ${conflictClause}`,
     ledgerValues,
   );
 
@@ -470,6 +483,7 @@ async function writeTransactionsWithExec(
   exec: (query: string, params?: unknown[]) => Promise<any>,
   dialect: Dialect,
   transactions: TransactionRecord[],
+  snapshotMode = false,
 ): Promise<void> {
   const values: unknown[] = [];
   const rows: string[] = [];
@@ -492,7 +506,7 @@ async function writeTransactionsWithExec(
 
   if (rows.length > 0) {
     await exec(
-      `INSERT INTO transactions (digest, sender, success, computation_cost, storage_cost, storage_rebate, move_call_count, checkpoint_seq, sui_timestamp) VALUES ${rows.join(", ")} ON CONFLICT (digest) DO NOTHING`,
+      `INSERT ${snapshotMode ? "" : "OR IGNORE "}INTO transactions (digest, sender, success, computation_cost, storage_cost, storage_rebate, move_call_count, checkpoint_seq, sui_timestamp) VALUES ${rows.join(", ")}`,
       values,
     );
   }
@@ -506,6 +520,7 @@ async function writeMoveCallsWithExec(
   exec: (query: string, params?: unknown[]) => Promise<any>,
   dialect: Dialect,
   moveCalls: MoveCallRecord[],
+  snapshotMode = false,
 ): Promise<void> {
   const values: unknown[] = [];
   const rows: string[] = [];
@@ -526,7 +541,7 @@ async function writeMoveCallsWithExec(
 
   if (rows.length > 0) {
     await exec(
-      `INSERT INTO move_calls (tx_digest, call_index, package, module, function, checkpoint_seq, sui_timestamp) VALUES ${rows.join(", ")} ON CONFLICT (tx_digest, call_index) DO NOTHING`,
+      `INSERT ${snapshotMode ? "" : "OR IGNORE "}INTO move_calls (tx_digest, call_index, package, module, function, checkpoint_seq, sui_timestamp) VALUES ${rows.join(", ")}`,
       values,
     );
   }
