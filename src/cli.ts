@@ -2116,7 +2116,7 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
 
         if (opts.coinType) {
           const coinTypes = opts.coinType.includes("*") ? "*" : opts.coinType;
-          baseConfig.processors.balanceChanges = { coinTypes };
+          baseConfig.processors.balances = { coinTypes };
         }
 
         if (opts.eventType) {
@@ -2148,7 +2148,7 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
         if (opts.transactionBlocks || baseConfig.processors?.transactionBlocks) {
           baseConfig.storage.transactions = true;
         }
-        if (opts.coinType || baseConfig.processors?.balanceChanges) {
+        if (opts.coinType || baseConfig.processors?.balances) {
           baseConfig.storage.balances = true;
         }
         // Defer indexes in snapshot mode for faster bulk inserts
