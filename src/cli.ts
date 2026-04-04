@@ -2107,30 +2107,42 @@ pipelineCmd
   .option("--config-url <url>", "fetch config from S3 or HTTPS URL")
   .option("--quiet", "suppress human-readable output to stdout")
   .option("--log [level]", "enable JSON logs to stderr (default: info)")
+  // Sources
+  .option("--grpc-url <url>", "gRPC endpoint URL for live streaming")
+  .option("--archive-url <url>", "archive base URL for backfill")
   .option("--epoch <number>", "backfill a specific completed epoch")
-  .option("--from <checkpoint>", "backfill starting checkpoint")
-  .option("--to <checkpoint>", "backfill ending checkpoint")
-  .option("--archive-url <url>", "archive base URL")
-  .option("--grpc-url <url>", "gRPC endpoint URL")
-  .option("--output <path>", "SQLite output path")
+  .option("--start-checkpoint <seq>", "backfill starting checkpoint")
+  .option("--end-checkpoint <seq>", "backfill ending checkpoint")
   .option("--network <network>", "network name (mainnet, testnet, devnet)")
+  // Processors
   .option("--transaction-blocks", "enable transaction block indexing")
   .option("--coin-type <type...>", "coin types to track balances for (repeatable, or \"*\" for all)")
   .option("--event <type...>", "Move event types to index (repeatable)")
+  // Storage
+  .option("--sqlite-path <path>", "write to SQLite database at path")
+  .option("--postgres-url <url>", "write to Postgres database at URL")
+  // Broadcast
+  .option("--stdout", "broadcast events to stdout as JSONL")
+  .option("--sse <port>", "broadcast events via SSE on port")
+  .option("--nats <url>", "broadcast events to NATS server")
   .action(async (configFile: string | undefined, opts: {
     configUrl?: string;
     quiet?: boolean;
     log?: string | boolean;
-    epoch?: string;
-    from?: string;
-    to?: string;
-    archiveUrl?: string;
     grpcUrl?: string;
-    output?: string;
+    archiveUrl?: string;
+    epoch?: string;
+    startCheckpoint?: string;
+    endCheckpoint?: string;
     network?: string;
     transactionBlocks?: boolean;
     coinType?: string[];
     event?: string[];
+    sqlitePath?: string;
+    postgresUrl?: string;
+    stdout?: boolean;
+    sse?: string;
+    nats?: string;
   }) => {
     try {
       const { resolve } = await import("path");
@@ -2147,11 +2159,11 @@ pipelineCmd
       } else if (configFile) {
         const { readFileSync } = require("fs");
         yamlContent = readFileSync(resolve(configFile), "utf-8");
-      } else if (opts.epoch || opts.from) {
+      } else if (opts.epoch || opts.startCheckpoint) {
         // Generate config entirely from CLI flags
         yamlContent = "";
       } else {
-        console.error("[jun] error: provide a config file, --config-url, or --epoch/--from flags");
+        console.error("[jun] error: provide a config file, --config-url, or --epoch/--start-checkpoint flags");
         process.exit(1);
       }
 
@@ -2187,8 +2199,8 @@ pipelineCmd
         if (opts.epoch) {
           baseConfig.sources.backfill.epoch = opts.epoch;
         } else {
-          if (opts.from) baseConfig.sources.backfill.from = opts.from;
-          if (opts.to) baseConfig.sources.backfill.to = opts.to;
+          if (opts.startCheckpoint) baseConfig.sources.backfill.from = opts.startCheckpoint;
+          if (opts.endCheckpoint) baseConfig.sources.backfill.to = opts.endCheckpoint;
         }
       }
 
@@ -2219,18 +2231,38 @@ pipelineCmd
       }
 
       // Storage overrides
-      if (opts.output) {
+      if (opts.sqlitePath) {
         baseConfig.storage = baseConfig.storage ?? {};
         baseConfig.storage.type = "sqlite";
-        baseConfig.storage.path = opts.output;
-
-        // Enable storage tables matching enabled processors
+        baseConfig.storage.path = opts.sqlitePath;
+      }
+      if (opts.postgresUrl) {
+        baseConfig.storage = baseConfig.storage ?? {};
+        baseConfig.storage.type = "postgres";
+        baseConfig.storage.url = opts.postgresUrl;
+      }
+      // Auto-enable storage tables matching enabled processors
+      if (baseConfig.storage) {
         if (opts.transactionBlocks || baseConfig.processors?.transactionBlocks) {
           baseConfig.storage.transactions = true;
         }
         if (opts.coinType || baseConfig.processors?.balanceChanges) {
           baseConfig.storage.balances = true;
         }
+      }
+
+      // Broadcast overrides
+      if (opts.stdout) {
+        baseConfig.broadcast = baseConfig.broadcast ?? {};
+        baseConfig.broadcast.stdout = true;
+      }
+      if (opts.sse) {
+        baseConfig.broadcast = baseConfig.broadcast ?? {};
+        baseConfig.broadcast.sse = { port: parseInt(opts.sse) };
+      }
+      if (opts.nats) {
+        baseConfig.broadcast = baseConfig.broadcast ?? {};
+        baseConfig.broadcast.nats = { url: opts.nats };
       }
 
       // Re-serialize to YAML for the parser
