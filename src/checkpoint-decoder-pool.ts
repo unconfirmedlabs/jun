@@ -198,7 +198,14 @@ export function createCheckpointDecoderPool(
         job.reject(new Error(msg.error));
       } else if (msg.raw) {
         // Native path: raw Zig output buffer — parse on main thread
-        job.resolve(parseRawOutput(msg.raw, BigInt(msg.seq)));
+        try {
+          job.resolve(parseRawOutput(msg.raw, BigInt(msg.seq)));
+        } catch (e) {
+          const view = new DataView(msg.raw.buffer, msg.raw.byteOffset, msg.raw.byteLength);
+          console.error(`[jun] Zig output parse error at checkpoint ${msg.seq} (${msg.raw.length} bytes)`);
+          console.error(`[jun]   header: numBal=${view.getUint32(0, true)} numEvents=${view.getUint32(4, true)} numTx=${view.getUint32(8, true)} ts=${view.getBigUint64(12, true)}`);
+          job.reject(e);
+        }
       } else {
         // Legacy path: pre-parsed JS objects
         job.resolve({ decoded: msg.decoded, balanceChanges: msg.balanceChanges });
