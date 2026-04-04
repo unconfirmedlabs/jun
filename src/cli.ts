@@ -2110,10 +2110,13 @@ pipelineCmd
   .option("--epoch <number>", "backfill a specific completed epoch")
   .option("--from <checkpoint>", "backfill starting checkpoint")
   .option("--to <checkpoint>", "backfill ending checkpoint")
-  .option("--archive <url>", "archive base URL")
-  .option("--grpc <url>", "gRPC endpoint URL")
+  .option("--archive-url <url>", "archive base URL")
+  .option("--grpc-url <url>", "gRPC endpoint URL")
   .option("--output <path>", "SQLite output path")
   .option("--network <network>", "network name (mainnet, testnet, devnet)")
+  .option("--transaction-blocks", "enable transaction block indexing")
+  .option("--coin-type <type...>", "coin types to track balances for (repeatable, or \"*\" for all)")
+  .option("--event <type...>", "Move event types to index (repeatable)")
   .action(async (configFile: string | undefined, opts: {
     configUrl?: string;
     quiet?: boolean;
@@ -2121,10 +2124,13 @@ pipelineCmd
     epoch?: string;
     from?: string;
     to?: string;
-    archive?: string;
-    grpc?: string;
+    archiveUrl?: string;
+    grpcUrl?: string;
     output?: string;
     network?: string;
+    transactionBlocks?: boolean;
+    coinType?: string[];
+    event?: string[];
   }) => {
     try {
       const { resolve } = await import("path");
@@ -2162,15 +2168,16 @@ pipelineCmd
       const baseConfig = yamlContent ? (yaml.load(yamlContent) as Record<string, any>) ?? {} : {};
 
       // CLI flags override config file
-      const grpcUrl = opts.grpc ?? baseConfig.sources?.live?.grpc ?? "hayabusa.mainnet.unconfirmed.cloud:443";
+      const grpcUrl = opts.grpcUrl ?? baseConfig.sources?.live?.grpc ?? "hayabusa.mainnet.unconfirmed.cloud:443";
       const networkDefaults: Record<string, string> = {
         mainnet: "https://checkpoints.mainnet.sui.io",
         testnet: "https://checkpoints.testnet.sui.io",
         devnet: "https://checkpoints.devnet.sui.io",
       };
       const net = opts.network ?? baseConfig.network ?? "mainnet";
-      const archiveUrl = opts.archive ?? baseConfig.sources?.backfill?.archive ?? networkDefaults[net];
+      const archiveUrl = opts.archiveUrl ?? baseConfig.sources?.backfill?.archive ?? networkDefaults[net];
 
+      // Source overrides
       if (opts.epoch || opts.from) {
         baseConfig.sources = baseConfig.sources ?? {};
         baseConfig.sources.live = { grpc: grpcUrl };
@@ -2185,10 +2192,45 @@ pipelineCmd
         }
       }
 
+      // Processor overrides
+      if (opts.transactionBlocks || opts.coinType || opts.event) {
+        baseConfig.processors = baseConfig.processors ?? {};
+
+        if (opts.transactionBlocks) {
+          baseConfig.processors.transactionBlocks = true;
+        }
+
+        if (opts.coinType) {
+          const coinTypes = opts.coinType.includes("*") ? "*" : opts.coinType;
+          baseConfig.processors.balanceChanges = { coinTypes };
+        }
+
+        if (opts.event) {
+          baseConfig.processors.events = baseConfig.processors.events ?? {};
+          for (const eventType of opts.event) {
+            // Auto-generate handler name from event type: 0x...::module::Event → module_event
+            const parts = eventType.split("::");
+            const name = parts.length >= 3
+              ? `${parts[parts.length - 2]}_${parts[parts.length - 1]}`.toLowerCase()
+              : eventType.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase();
+            baseConfig.processors.events[name] = { type: eventType };
+          }
+        }
+      }
+
+      // Storage overrides
       if (opts.output) {
         baseConfig.storage = baseConfig.storage ?? {};
         baseConfig.storage.type = "sqlite";
         baseConfig.storage.path = opts.output;
+
+        // Enable storage tables matching enabled processors
+        if (opts.transactionBlocks || baseConfig.processors?.transactionBlocks) {
+          baseConfig.storage.transactions = true;
+        }
+        if (opts.coinType || baseConfig.processors?.balanceChanges) {
+          baseConfig.storage.balances = true;
+        }
       }
 
       // Re-serialize to YAML for the parser
