@@ -16,6 +16,7 @@ import { createSseBroadcast } from "./destinations/sse.ts";
 import { createNatsBroadcast } from "./destinations/nats.ts";
 import { createStdoutBroadcast } from "./destinations/stdout.ts";
 import { normalizeEventType, normalizeCoinType, validateEventTypeAddress } from "../normalize.ts";
+import { createLogger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -58,10 +59,104 @@ function substituteDeep(obj: any): any {
 }
 
 // ---------------------------------------------------------------------------
+// Epoch resolution
+// ---------------------------------------------------------------------------
+
+const configLog = createLogger().child({ component: "config-parser" });
+
+/**
+ * Resolve an epoch number to its checkpoint range via gRPC.
+ * Validates the epoch has completed (not the current epoch).
+ */
+async function resolveEpochCheckpointRange(
+  grpcUrl: string,
+  epoch: bigint,
+): Promise<{ start: bigint; end: bigint }> {
+  const { createGrpcClient } = await import("../grpc.ts");
+  const client = createGrpcClient({ url: grpcUrl });
+
+  try {
+    // Get current epoch from service info
+    const serviceInfo = await client.getServiceInfo();
+    const currentEpoch = BigInt(serviceInfo.epoch ?? "0");
+
+    if (epoch === currentEpoch) {
+      throw new Error(
+        `Epoch ${epoch} is the current epoch and has not completed yet`,
+      );
+    }
+    if (epoch > currentEpoch) {
+      throw new Error(
+        `Epoch ${epoch} has not started yet (current epoch: ${currentEpoch})`,
+      );
+    }
+
+    // Get checkpoint range for the requested epoch
+    const epochInfo = await client.getEpoch(epoch);
+
+    const first = epochInfo.firstCheckpoint;
+    const last = epochInfo.lastCheckpoint;
+
+    if (first == null || last == null) {
+      throw new Error(
+        `Epoch ${epoch} has not completed yet (missing checkpoint range)`,
+      );
+    }
+
+    const start = BigInt(first);
+    const end = BigInt(last);
+
+    configLog.info(
+      { epoch: epoch.toString(), start: start.toString(), end: end.toString() },
+      "resolved epoch checkpoint range",
+    );
+
+    return { start, end };
+  } finally {
+    client.close();
+  }
+}
+
+/**
+ * Verify the archive has checkpoints for the given range by HEAD-requesting
+ * the first and last checkpoint URLs.
+ */
+async function verifyArchiveAvailability(
+  archiveUrl: string,
+  start: bigint,
+  end: bigint,
+): Promise<void> {
+  const firstUrl = `${archiveUrl}/${start}.binpb.zst`;
+  const lastUrl = `${archiveUrl}/${end}.binpb.zst`;
+
+  const [firstResp, lastResp] = await Promise.all([
+    fetch(firstUrl, { method: "HEAD" }),
+    fetch(lastUrl, { method: "HEAD" }),
+  ]);
+
+  if (!firstResp.ok) {
+    throw new Error(
+      `Archive checkpoint ${start} not available at ${firstUrl} (${firstResp.status})`,
+    );
+  }
+
+  if (!lastResp.ok) {
+    throw new Error(
+      `Archive checkpoint ${end} not available at ${lastUrl} (${lastResp.status})`,
+    );
+  }
+
+  configLog.info(
+    { start: start.toString(), end: end.toString() },
+    "archive availability verified",
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
 
-export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
+export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPipelineConfig> {
   const raw = yaml.load(yamlContent) as any;
   if (!raw || typeof raw !== "object") {
     throw new Error("Invalid config: YAML must be a mapping");
@@ -85,11 +180,23 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
 
   if (sourceConfig.backfill?.archive) {
     let from: bigint;
-    if (typeof sourceConfig.backfill.from === "number") {
+    let to: bigint | undefined;
+
+    // Epoch-based archive source: resolve checkpoint range from epoch number
+    if (sourceConfig.backfill.epoch != null) {
+      const grpcUrl = sourceConfig.live?.grpc;
+      if (!grpcUrl) {
+        throw new Error("Epoch-based archive source requires a gRPC URL (sources.live.grpc) to resolve the epoch's checkpoint range");
+      }
+      const resolved = await resolveEpochCheckpointRange(grpcUrl, BigInt(sourceConfig.backfill.epoch));
+      from = resolved.start;
+      to = resolved.end;
+      await verifyArchiveAvailability(sourceConfig.backfill.archive, from, to);
+    } else if (typeof sourceConfig.backfill.from === "number") {
       from = BigInt(Math.floor(sourceConfig.backfill.from));
     } else if (typeof sourceConfig.backfill.from === "string") {
-      // Could be "epoch:N", "timestamp:ISO", "package:0x...", or numeric string
-      // For now, handle numeric strings. Resolution of epoch/timestamp/package
+      // Could be "timestamp:ISO", "package:0x...", or numeric string
+      // For now, handle numeric strings. Resolution of timestamp/package
       // happens at runtime in the archive source or pipeline.
       from = /^\d+$/.test(sourceConfig.backfill.from)
         ? BigInt(sourceConfig.backfill.from)
@@ -101,6 +208,7 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
     sources.push(createArchiveSource({
       archiveUrl: sourceConfig.backfill.archive,
       from,
+      to,
       grpcUrl: sourceConfig.live?.grpc,
       concurrency: sourceConfig.backfill.concurrency,
       workers: sourceConfig.backfill.workers,

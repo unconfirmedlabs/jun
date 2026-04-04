@@ -590,7 +590,7 @@ Each SSE message is a JSON object with \`event\` (handler name) and \`data\` (ev
     async ({ yaml_content }) => {
       try {
         const { parsePipelineConfig } = await import("./pipeline/config-parser.ts");
-        const parsed = parsePipelineConfig(yaml_content);
+        const parsed = await parsePipelineConfig(yaml_content);
 
         const summary = [
           `Config is valid.`,

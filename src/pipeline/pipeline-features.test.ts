@@ -205,8 +205,8 @@ describe("config parse + reload", () => {
     try { unlinkSync(tmpFile); } catch {}
   });
 
-  test("parsePipelineConfig produces processors with reload()", () => {
-    const config = parsePipelineConfig(`
+  test("parsePipelineConfig produces processors with reload()", async () => {
+    const config = await parsePipelineConfig(`
 sources:
   live:
     grpc: fullnode.testnet.sui.io:443
@@ -223,8 +223,8 @@ storage:
     expect(typeof balanceProc!.reload).toBe("function");
   });
 
-  test("event decoder processor has reload()", () => {
-    const config = parsePipelineConfig(`
+  test("event decoder processor has reload()", async () => {
+    const config = await parsePipelineConfig(`
 sources:
   live:
     grpc: fullnode.testnet.sui.io:443

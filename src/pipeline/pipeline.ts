@@ -207,7 +207,7 @@ export function createPipeline(): Pipeline {
                 if (!yamlContent?.trim()) return;
 
                 const { parsePipelineConfig } = await import("./config-parser.ts");
-                const parsed = parsePipelineConfig(yamlContent);
+                const parsed = await parsePipelineConfig(yamlContent);
                 for (const processor of processors) {
                   if (processor.reload) {
                     const matchingNew = parsed.processors.find(p => p.name === processor.name);
@@ -255,7 +255,7 @@ export function createPipeline(): Pipeline {
             lastEtag = fetchResult.etag;
 
             const { parsePipelineConfig } = await import("./config-parser.ts");
-            const parsed = parsePipelineConfig(fetchResult.content);
+            const parsed = await parsePipelineConfig(fetchResult.content);
 
             for (const processor of processors) {
               if (processor.reload) {

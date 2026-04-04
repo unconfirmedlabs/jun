@@ -2140,7 +2140,7 @@ pipelineCmd
         process.env.LOG_LEVEL = "silent";
       }
 
-      const { sources, processors, storages, broadcasts, pipelineConfig } = parsePipelineConfig(yamlContent);
+      const { sources, processors, storages, broadcasts, pipelineConfig } = await parsePipelineConfig(yamlContent);
 
       const pipeline = createPipeline();
 

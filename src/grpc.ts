@@ -188,6 +188,22 @@ export interface GrpcClientOptions {
   readMask?: string[];
 }
 
+/** Service info response from GetServiceInfo */
+export interface GrpcServiceInfo {
+  chainId?: string;
+  chain?: string;
+  epoch?: string;
+  checkpointHeight?: string;
+  lowestAvailableCheckpoint?: string;
+}
+
+/** Epoch info response from GetEpoch */
+export interface GrpcEpochInfo {
+  epoch?: string;
+  firstCheckpoint?: string;
+  lastCheckpoint?: string;
+}
+
 export interface GrpcClient {
   /**
    * Subscribe to live checkpoints. Returns an async iterable that yields
@@ -205,6 +221,16 @@ export interface GrpcClient {
    * Uses the MovePackageService.GetDatatype RPC.
    */
   getDatatype(packageId: string, moduleName: string, name: string): Promise<GrpcDatatypeDescriptor>;
+
+  /**
+   * Get service info (current epoch, checkpoint height, etc).
+   */
+  getServiceInfo(): Promise<GrpcServiceInfo>;
+
+  /**
+   * Get epoch info. If no epoch is provided, returns the current epoch.
+   */
+  getEpoch(epoch?: bigint): Promise<GrpcEpochInfo>;
 
   /** Close the underlying gRPC connections */
   close(): void;
@@ -343,6 +369,40 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
             resolve(response.datatype);
           },
         );
+      });
+    },
+
+    getServiceInfo(): Promise<GrpcServiceInfo> {
+      return new Promise((resolve, reject) => {
+        ledgerClient.GetServiceInfo({}, (err: any, response: any) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve(response);
+        });
+      });
+    },
+
+    getEpoch(epoch?: bigint): Promise<GrpcEpochInfo> {
+      return new Promise((resolve, reject) => {
+        const request: any = {
+          readMask: { paths: ["epoch", "first_checkpoint", "last_checkpoint"] },
+        };
+        if (epoch !== undefined) {
+          request.epoch = epoch.toString();
+        }
+        ledgerClient.GetEpoch(request, (err: any, response: any) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          if (!response?.epoch) {
+            reject(new Error(`Epoch not found${epoch !== undefined ? `: ${epoch}` : ""}`));
+            return;
+          }
+          resolve(response.epoch);
+        });
       });
     },
 

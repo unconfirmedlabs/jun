@@ -69,7 +69,7 @@ describe("auto-reload with file://", () => {
 
     // Parse initial state
     const initial = await fetchRemoteConfig(configUrl);
-    const parsed = parsePipelineConfig(initial!.content);
+    const parsed = await parsePipelineConfig(initial!.content);
     const initialBalanceProc = parsed.processors.find(p => p.name === "balanceChanges");
     expect(initialBalanceProc).toBeDefined();
 
@@ -90,7 +90,7 @@ describe("auto-reload with file://", () => {
       if (!result) return; // unchanged
       lastEtag = result.etag;
 
-      const newParsed = parsePipelineConfig(result.content);
+      const newParsed = await parsePipelineConfig(result.content);
       const newBalanceProc = newParsed.processors.find(p => p.name === "balanceChanges");
       if (newBalanceProc && initialBalanceProc?.reload) {
         initialBalanceProc.reload({ coinTypes: ["0x2::sui::SUI", "0x9f992cc2430a1f442ca7a5ca7638169f5d5c00e0ebc3977a65e9ac6e497fe5ef::wal::WAL"] });
