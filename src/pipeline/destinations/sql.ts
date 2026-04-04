@@ -198,18 +198,33 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
           `);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_balances_coin ON balances(coin_type, balance DESC)`);
         } else {
-          await driver.exec(`
-            CREATE TABLE IF NOT EXISTS balance_changes (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              tx_digest TEXT NOT NULL,
-              checkpoint_seq TEXT NOT NULL,
-              address TEXT NOT NULL,
-              coin_type TEXT NOT NULL,
-              amount TEXT NOT NULL,
-              sui_timestamp TEXT NOT NULL,
-              UNIQUE (tx_digest, address, coin_type)
-            );
-          `);
+          if (snapshotMode) {
+            await driver.exec(`
+              CREATE TABLE IF NOT EXISTS balance_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tx_digest TEXT NOT NULL,
+                checkpoint_seq TEXT NOT NULL,
+                address TEXT NOT NULL,
+                coin_type TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                sui_timestamp TEXT NOT NULL
+              );
+            `);
+            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bc_unique ON balance_changes(tx_digest, address, coin_type)`);
+          } else {
+            await driver.exec(`
+              CREATE TABLE IF NOT EXISTS balance_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tx_digest TEXT NOT NULL,
+                checkpoint_seq TEXT NOT NULL,
+                address TEXT NOT NULL,
+                coin_type TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                sui_timestamp TEXT NOT NULL,
+                UNIQUE (tx_digest, address, coin_type)
+              );
+            `);
+          }
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_address ON balance_changes(address)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_coin_type ON balance_changes(coin_type)`);
           await driver.exec(`
@@ -260,33 +275,67 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_module ON move_calls(package, module)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_function ON move_calls(package, module, function)`);
         } else {
-          await driver.exec(`
-            CREATE TABLE IF NOT EXISTS transactions (
-              digest TEXT PRIMARY KEY,
-              sender TEXT NOT NULL,
-              success INTEGER NOT NULL,
-              computation_cost TEXT NOT NULL,
-              storage_cost TEXT NOT NULL,
-              storage_rebate TEXT NOT NULL,
-              move_call_count INTEGER NOT NULL DEFAULT 0,
-              checkpoint_seq TEXT NOT NULL,
-              sui_timestamp TEXT NOT NULL
-            );
-          `);
+          if (snapshotMode) {
+            // Snapshot: no primary keys during bulk insert — added as deferred indexes
+            await driver.exec(`
+              CREATE TABLE IF NOT EXISTS transactions (
+                digest TEXT NOT NULL,
+                sender TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                computation_cost TEXT NOT NULL,
+                storage_cost TEXT NOT NULL,
+                storage_rebate TEXT NOT NULL,
+                move_call_count INTEGER NOT NULL DEFAULT 0,
+                checkpoint_seq TEXT NOT NULL,
+                sui_timestamp TEXT NOT NULL
+              );
+            `);
+            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_digest ON transactions(digest)`);
+          } else {
+            await driver.exec(`
+              CREATE TABLE IF NOT EXISTS transactions (
+                digest TEXT PRIMARY KEY,
+                sender TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                computation_cost TEXT NOT NULL,
+                storage_cost TEXT NOT NULL,
+                storage_rebate TEXT NOT NULL,
+                move_call_count INTEGER NOT NULL DEFAULT 0,
+                checkpoint_seq TEXT NOT NULL,
+                sui_timestamp TEXT NOT NULL
+              );
+            `);
+          }
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_checkpoint ON transactions(checkpoint_seq)`);
-          await driver.exec(`
-            CREATE TABLE IF NOT EXISTS move_calls (
-              tx_digest TEXT NOT NULL,
-              call_index INTEGER NOT NULL,
-              package TEXT NOT NULL,
-              module TEXT NOT NULL,
-              function TEXT NOT NULL,
-              checkpoint_seq TEXT NOT NULL,
-              sui_timestamp TEXT NOT NULL,
-              PRIMARY KEY (tx_digest, call_index)
-            );
-          `);
+          if (snapshotMode) {
+            // Snapshot: no primary key during bulk insert
+            await driver.exec(`
+              CREATE TABLE IF NOT EXISTS move_calls (
+                tx_digest TEXT NOT NULL,
+                call_index INTEGER NOT NULL,
+                package TEXT NOT NULL,
+                module TEXT NOT NULL,
+                function TEXT NOT NULL,
+                checkpoint_seq TEXT NOT NULL,
+                sui_timestamp TEXT NOT NULL
+              );
+            `);
+            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mc_pk ON move_calls(tx_digest, call_index)`);
+          } else {
+            await driver.exec(`
+              CREATE TABLE IF NOT EXISTS move_calls (
+                tx_digest TEXT NOT NULL,
+                call_index INTEGER NOT NULL,
+                package TEXT NOT NULL,
+                module TEXT NOT NULL,
+                function TEXT NOT NULL,
+                checkpoint_seq TEXT NOT NULL,
+                sui_timestamp TEXT NOT NULL,
+                PRIMARY KEY (tx_digest, call_index)
+              );
+            `);
+          }
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_package ON move_calls(package)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_module ON move_calls(package, module)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_function ON move_calls(package, module, function)`);
