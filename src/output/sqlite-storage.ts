@@ -6,7 +6,7 @@
  * Idempotent via ON CONFLICT (tx_digest, event_seq) DO NOTHING.
  */
 import type { Database } from "bun:sqlite";
-import type { DecodedEvent } from "../processor.ts";
+import type { DecodedEvent } from "../pipeline/types.ts";
 import type { FieldDefs } from "../schema.ts";
 import type { StorageBackend, HandlerTableConfig } from "./storage.ts";
 import { createSqliteConnection } from "../db.ts";

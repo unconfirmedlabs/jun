@@ -276,19 +276,6 @@ export function createPipeline(): Pipeline {
         log.warn("configAutoReloadMs requires configUrl — auto-reload disabled");
       }
 
-      // --- Gap repair ---
-      let stopGapRepair: (() => void) | null = null;
-      if (config.gapRepair?.enabled && state && sql) {
-        const { createGapDetector } = await import("../gaps.ts");
-        const gapLog = log.child({ component: "gaps" });
-        const network = config.network ?? "default";
-        const gapDetector = createGapDetector(sql, state, network, gapLog, config.gapRepair.intervalMs);
-        // Gap repair needs a processor and archive URL — pass null processor for now
-        // (gap repair re-fetches and re-processes checkpoints from archive)
-        // TODO: wire gap repair processor getter once archive source exposes single-checkpoint fetch
-        log.info("gap repair enabled");
-      }
-
       // --- Create write buffers per source ---
       const writeBuffers: Map<string, PipelineWriteBuffer> = new Map();
       for (const source of sources) {
@@ -354,7 +341,6 @@ export function createPipeline(): Pipeline {
 
       // --- Cleanup ---
       if (autoReloadInterval) clearInterval(autoReloadInterval);
-      if (stopGapRepair) stopGapRepair();
       if (metricsInterval) clearInterval(metricsInterval);
       if (httpWorker) httpWorker.terminate();
 

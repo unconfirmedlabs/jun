@@ -14,10 +14,17 @@
  */
 import type { Logger } from "./logger.ts";
 import type { StateManager } from "./state.ts";
-import type { FlushStats } from "./buffer.ts";
 import type { BroadcastManager, SSEStreamType, SSEClient } from "./broadcast.ts";
-import type { HotReloadContext } from "./hot-reload.ts";
 import { stripComments, isReadOnly } from "./sql-helpers.ts";
+
+/** Stats emitted after each successful flush. Defined here to avoid coupling to legacy buffer. */
+export interface FlushStats {
+  eventsWritten: number;
+  tablesWritten: number;
+  flushDurationMs: number;
+  cursorKeys: Map<string, bigint>;
+  bufferSizeAfter: number;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,7 +42,6 @@ export interface ServeContext {
   state: StateManager;
   metrics: IndexerMetrics;
   broadcast: BroadcastManager;
-  hotReload?: HotReloadContext;
   log: Logger;
 }
 
@@ -308,75 +314,8 @@ async function handleQuery(
 // Server
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Admin reload handler
-// ---------------------------------------------------------------------------
-
-async function handleReload(
-  req: Request,
-  hotReload: HotReloadContext | undefined,
-  log: Logger,
-): Promise<Response> {
-  const token = process.env.JUN_ADMIN_TOKEN;
-  if (token) {
-    const auth = req.headers.get("authorization");
-    if (auth !== `Bearer ${token}`) {
-      return Response.json({ error: "unauthorized" }, { status: 401 });
-    }
-  }
-
-  if (!hotReload) {
-    return Response.json({ error: "hot reload not available (run mode only)" }, { status: 501 });
-  }
-
-  try {
-    // Limit request body to 1MB to prevent DoS
-    const contentLength = parseInt(req.headers.get("content-length") ?? "0", 10);
-    if (contentLength > 1_000_000) {
-      return Response.json({ error: "request body too large (max 1MB)" }, { status: 413 });
-    }
-
-    const body = await req.text();
-
-    let yamlContent: string;
-    if (body.trim()) {
-      // Body provided — use it directly
-      yamlContent = body;
-    } else if (hotReload.configUrl) {
-      // No body — re-fetch from configured remote URL
-      const { fetchRemoteConfig } = await import("./remote-config.ts");
-      const result = await fetchRemoteConfig(hotReload.configUrl);
-      yamlContent = result!.content;
-      log.info({ url: hotReload.configUrl }, "fetched remote config");
-    } else {
-      return Response.json({ error: "request body must contain YAML config (or set configUrl for remote fetch)" }, { status: 400 });
-    }
-
-    const { parsePipelineConfig } = await import("./pipeline/config-parser.ts");
-    const { applyReload } = await import("./hot-reload.ts");
-
-    const parsed = parsePipelineConfig(yamlContent);
-    // Extract event handlers from parsed processors
-    const eventProc = parsed.processors.find(p => p.name === "events");
-    const events = eventProc ? (eventProc as any)._reloadConfig ?? {} : {};
-    const result = await applyReload(hotReload, events);
-
-    log.info({ added: result.added, removed: result.removed, altered: result.altered }, "config reloaded");
-
-    return Response.json(result);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log.error({ err: message }, "reload failed");
-    return Response.json({ error: message }, { status: 400 });
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Server
-// ---------------------------------------------------------------------------
-
 export function createServer(config: ServeConfig, ctx: ServeContext): IndexerServer {
-  const { sql, metrics, broadcast, hotReload, log: parentLog } = ctx;
+  const { sql, metrics, broadcast, log: parentLog } = ctx;
   const log = parentLog.child({ component: "serve" });
 
   const server = Bun.serve({
@@ -405,9 +344,6 @@ export function createServer(config: ServeConfig, ctx: ServeContext): IndexerSer
       }
       if (url.pathname === "/broadcast/events") {
         return handleSSEStream("broadcast/events", url, broadcast, log);
-      }
-      if (url.pathname === "/admin/reload" && req.method === "POST") {
-        return handleReload(req, hotReload, log);
       }
       return Response.json({ error: "not found" }, { status: 404 });
     },

@@ -5,7 +5,7 @@
  * Users choose one SQL backend (Postgres or SQLite) as primary, with optional Parquet
  * as a secondary best-effort output.
  */
-import type { DecodedEvent } from "../processor.ts";
+import type { DecodedEvent } from "../pipeline/types.ts";
 import type { FieldDefs } from "../schema.ts";
 
 /** Validate a SQL identifier (table name, column name, view name). Prevents SQL injection. */

@@ -2,7 +2,7 @@ import { test, expect, describe, afterEach } from "bun:test";
 import { createSqliteStorageBackend } from "./sqlite-storage.ts";
 import { Database } from "bun:sqlite";
 import { unlinkSync } from "fs";
-import type { DecodedEvent } from "../processor.ts";
+import type { DecodedEvent } from "../pipeline/types.ts";
 
 const TEST_DB = "/tmp/jun-sqlite-storage-test.db";
 

@@ -5,10 +5,19 @@
  * via gRPC and generates the BCS schema automatically.
  */
 import type { GrpcClient } from "./grpc.ts";
-import type { EventHandler } from "./processor.ts";
 import type { FieldDefs } from "./schema.ts";
 import { generateFieldDSL } from "./codegen.ts";
 import type { Logger } from "./logger.ts";
+
+/** Event handler config — defines what to match and decode. */
+export interface EventHandler {
+  /** Fully-qualified Move event type */
+  type: string;
+  /** BCS field definitions. Auto-resolved from chain if not provided. */
+  fields?: FieldDefs;
+  /** Start checkpoint for backfill (optional) */
+  startCheckpoint?: bigint | string;
+}
 
 /**
  * Resolve fields for all event handlers that don't have them.

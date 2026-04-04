@@ -3,7 +3,7 @@ import pino from "pino";
 import { createServer, createMetrics, type IndexerServer, type IndexerMetrics } from "./serve.ts";
 import { createBroadcastManager, type BroadcastManager } from "./broadcast.ts";
 import type { StateManager } from "./state.ts";
-import type { FlushStats } from "./buffer.ts";
+import type { FlushStats } from "./serve.ts";
 
 const testLog = pino({ level: "silent" });
 
