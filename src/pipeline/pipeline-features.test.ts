@@ -218,7 +218,7 @@ storage:
   postgres:
     url: postgres://localhost/test
 `);
-    const balanceProc = config.processors.find(p => p.name === "balance-tracker");
+    const balanceProc = config.processors.find(p => p.name === "balanceChanges");
     expect(balanceProc).toBeDefined();
     expect(typeof balanceProc!.reload).toBe("function");
   });
@@ -238,7 +238,7 @@ storage:
   postgres:
     url: postgres://localhost/test
 `);
-    const eventProc = config.processors.find(p => p.name === "event-decoder");
+    const eventProc = config.processors.find(p => p.name === "events");
     expect(eventProc).toBeDefined();
     expect(typeof eventProc!.reload).toBe("function");
   });

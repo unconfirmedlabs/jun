@@ -8,7 +8,7 @@
  * ```ts
  * import { createPipeline } from "jun";
  * import { createGrpcLiveSource } from "jun/pipeline/sources/grpc";
- * import { createBalanceTracker } from "jun/pipeline/processors/balance-tracker";
+ * import { createBalanceTracker } from "jun/pipeline/processors/balanceChanges";
  * import { createSqlStorage } from "jun/pipeline/destinations/sql";
  *
  * const pipeline = createPipeline()

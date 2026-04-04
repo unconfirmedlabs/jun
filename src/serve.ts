@@ -370,7 +370,7 @@ async function handleReload(
 
     const parsed = parsePipelineConfig(yamlContent);
     // Extract event handlers from parsed processors
-    const eventProc = parsed.processors.find(p => p.name === "event-decoder");
+    const eventProc = parsed.processors.find(p => p.name === "events");
     const events = eventProc ? (eventProc as any)._reloadConfig ?? {} : {};
     const result = await applyReload(hotReload, events);
 

@@ -14,7 +14,7 @@
  * ```ts
  * import { createPipeline } from "jun/pipeline";
  * import { createGrpcLiveSource } from "jun/pipeline/sources/grpc";
- * import { createEventDecoder } from "jun/pipeline/processors/event-decoder";
+ * import { createEventDecoder } from "jun/pipeline/processors/events";
  * import { createSqlStorage } from "jun/pipeline/destinations/sql";
  *
  * const pipeline = createPipeline()

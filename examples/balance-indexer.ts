@@ -7,7 +7,7 @@
 import { createPipeline } from "../src/pipeline/pipeline.ts";
 import { createGrpcLiveSource } from "../src/pipeline/sources/grpc.ts";
 import { createArchiveSource } from "../src/pipeline/sources/archive.ts";
-import { createBalanceTracker } from "../src/pipeline/processors/balance-tracker.ts";
+import { createBalanceTracker } from "../src/pipeline/processors/balanceChanges.ts";
 import { createSqlStorage } from "../src/pipeline/destinations/sql.ts";
 
 const pipeline = createPipeline()
