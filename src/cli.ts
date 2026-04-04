@@ -2037,6 +2037,9 @@ interface PipelineOpts {
     coinType?: string[];
     eventType?: string[];
     sqlite?: string;
+    postgres?: string;
+    sqliteExport?: string;
+    stdout?: boolean;
     sse?: string;
     nats?: string;
 }
@@ -2115,8 +2118,12 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
         }
 
         if (opts.coinType) {
-          const coinTypes = opts.coinType.includes("*") ? "*" : opts.coinType;
+          // "*" means track all coin types. Shell may expand * to filenames,
+          // so also check if any element equals "*"
+          const isAll = opts.coinType.includes("*") || opts.coinType.some((t: string) => t === "*");
+          const coinTypes = isAll ? "*" : opts.coinType;
           baseConfig.processors.balances = { coinTypes };
+          console.error(`[jun] balance tracking: ${isAll ? "all coin types" : coinTypes.join(", ")}`);
         }
 
         if (opts.eventType) {
