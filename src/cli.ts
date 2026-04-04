@@ -2111,8 +2111,8 @@ pipelineCmd
   .option("--grpc-url <url>", "gRPC endpoint URL for live streaming")
   .option("--archive-url <url>", "archive base URL for backfill")
   .option("--epoch <number>", "backfill a specific completed epoch")
-  .option("--start-checkpoint <seq>", "backfill starting checkpoint")
-  .option("--end-checkpoint <seq>", "backfill ending checkpoint")
+  .option("--start-checkpoint <seq>", "backfill starting checkpoint (inclusive)")
+  .option("--end-checkpoint <seq>", "backfill ending checkpoint (inclusive)")
   .option("--network <network>", "network name (mainnet, testnet, devnet)")
   // Processors
   .option("--transaction-blocks", "enable transaction block indexing")
