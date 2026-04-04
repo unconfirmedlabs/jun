@@ -5,7 +5,7 @@
  *   DATABASE_URL=postgres://... bun run examples/balance-indexer.ts
  */
 import { createPipeline } from "../src/pipeline/pipeline.ts";
-import { createGrpcLiveSource } from "../src/pipeline/sources/grpc-live.ts";
+import { createGrpcLiveSource } from "../src/pipeline/sources/grpc.ts";
 import { createArchiveSource } from "../src/pipeline/sources/archive.ts";
 import { createBalanceTracker } from "../src/pipeline/processors/balance-tracker.ts";
 import { createSqlStorage } from "../src/pipeline/destinations/sql.ts";

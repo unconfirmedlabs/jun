@@ -14,6 +14,7 @@
         "@noble/hashes": "^1.7.0",
         "@unconfirmed/kei": "0.0.9",
         "commander": "^14.0.3",
+        "fzstd": "^0.1.1",
         "js-yaml": "^4.1.1",
         "nats": "^2.29.3",
         "p-map": "^7.0.4",
@@ -201,6 +202,8 @@
     "fresh": ["fresh@2.0.0", "", {}, "sha512-Rx/WycZ60HOaqLKAi6cHRKKI7zxWbJ31MhntmtwMoaTeF7XFH9hhBp8vITaMidfljRQ6eYWCKkaTK+ykVJHP2A=="],
 
     "function-bind": ["function-bind@1.1.2", "", {}, "sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA=="],
+
+    "fzstd": ["fzstd@0.1.1", "", {}, "sha512-dkuVSOKKwh3eas5VkJy1AW1vFpet8TA/fGmVA5krThl8YcOVE/8ZIoEA1+U1vEn5ckxxhLirSdY837azmbaNHA=="],
 
     "get-caller-file": ["get-caller-file@2.0.5", "", {}, ""],
 

@@ -7,7 +7,7 @@
  * @example Pipeline API
  * ```ts
  * import { createPipeline } from "jun";
- * import { createGrpcLiveSource } from "jun/pipeline/sources/grpc-live";
+ * import { createGrpcLiveSource } from "jun/pipeline/sources/grpc";
  * import { createBalanceTracker } from "jun/pipeline/processors/balance-tracker";
  * import { createSqlStorage } from "jun/pipeline/destinations/sql";
  *

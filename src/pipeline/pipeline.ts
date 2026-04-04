@@ -13,7 +13,7 @@
  * @example
  * ```ts
  * import { createPipeline } from "jun/pipeline";
- * import { createGrpcLiveSource } from "jun/pipeline/sources/grpc-live";
+ * import { createGrpcLiveSource } from "jun/pipeline/sources/grpc";
  * import { createEventDecoder } from "jun/pipeline/processors/event-decoder";
  * import { createSqlStorage } from "jun/pipeline/destinations/sql";
  *

@@ -6,7 +6,7 @@
  */
 import yaml from "js-yaml";
 import type { Source, Processor, Storage, Broadcast, PipelineConfig } from "./types.ts";
-import { createGrpcLiveSource } from "./sources/grpc-live.ts";
+import { createGrpcLiveSource } from "./sources/grpc.ts";
 import { createArchiveSource } from "./sources/archive.ts";
 import { createEventDecoder } from "./processors/event-decoder.ts";
 import { createBalanceTracker } from "./processors/balance-tracker.ts";
