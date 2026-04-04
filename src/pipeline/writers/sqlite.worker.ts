@@ -90,8 +90,8 @@ self.onmessage = async (event: MessageEvent) => {
         await storage.shutdown();
         storage = null;
       }
-    } catch {
-      // Best effort shutdown
+    } catch (err) {
+      console.error("[jun:worker] shutdown error:", err instanceof Error ? err.message : err);
     }
     postMessage({ type: "closed" });
     return;

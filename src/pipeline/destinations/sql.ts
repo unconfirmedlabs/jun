@@ -532,6 +532,11 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       if (driver) {
         if (snapshotMode && isSqlite) {
           await driver.exec("PRAGMA locking_mode = NORMAL");
+          log.info("VACUUMing database...");
+          const vacStart = performance.now();
+          await driver.exec("VACUUM");
+          const vacElapsed = ((performance.now() - vacStart) / 1000).toFixed(1);
+          log.info({ elapsed: `${vacElapsed}s` }, "VACUUM complete");
         }
         await driver.close();
         driver = null;

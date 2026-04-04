@@ -2300,20 +2300,11 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       const pipelineElapsed = ((performance.now() - pipelineStart) / 1000).toFixed(1);
       console.error(`[jun] pipeline completed in ${pipelineElapsed}s`);
 
-      // Post-pipeline: S3 export
+      // Post-pipeline: S3 export (VACUUM already done by worker during shutdown)
       if (s3ExportConfig && opts.sqlite) {
-        // Small delay to ensure worker file handles are released
-        await new Promise(r => setTimeout(r, 100));
-        const { Database } = await import("bun:sqlite");
         const dbPath = resolve(opts.sqlite);
-
-        // VACUUM
-        console.error("[jun] VACUUMing database...");
-        const db = new Database(dbPath);
-        db.exec("VACUUM");
         const dbSize = Bun.file(dbPath).size;
         console.error(`[jun] database size: ${(dbSize / 1024 / 1024).toFixed(1)} MB`);
-        db.close();
 
         // Upload raw SQLite
         console.error(`[jun] uploading to s3://${s3ExportConfig.bucket}/${s3ExportConfig.key}...`);
