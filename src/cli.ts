@@ -2218,12 +2218,17 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
 
       // Re-serialize to YAML for the parser
       const mergedYaml = yaml.dump(baseConfig);
-      const { sources, processors, storages, broadcasts, pipelineConfig } = await parsePipelineConfig(mergedYaml);
+      const { sources, processors, storages, broadcasts, pipelineConfig, resolvedRange } = await parsePipelineConfig(mergedYaml);
 
       const pipeline = createPipeline();
 
       pipelineConfig.quiet = opts.quiet ?? false;
       pipelineConfig.log = opts.log ?? false;
+
+      // Set total checkpoints for progress bar
+      if (resolvedRange) {
+        pipelineConfig.totalCheckpoints = resolvedRange.end - resolvedRange.start + 1n;
+      }
 
       pipeline.configure(pipelineConfig);
 
@@ -2250,7 +2255,10 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       console.error("  ────────────────");
       console.error(`  mode            ${backfillOnly ? "snapshot (exit after backfill)" : "continuous (backfill + live)"}`);
       if (backfill?.epoch) console.error(`  epoch           ${backfill.epoch}`);
-      if (startCp && endCp) {
+      if (resolvedRange) {
+        const count = resolvedRange.end - resolvedRange.start + 1n;
+        console.error(`  checkpoints     ${resolvedRange.start} → ${resolvedRange.end} (${count.toLocaleString()})`);
+      } else if (startCp && endCp) {
         const count = BigInt(endCp) - BigInt(startCp) + 1n;
         console.error(`  checkpoints     ${startCp} → ${endCp} (${count.toLocaleString()})`);
       }

@@ -378,6 +378,11 @@ export function createPipeline(): Pipeline {
 // Source runner — processes checkpoints from a single source
 // ---------------------------------------------------------------------------
 
+function progressBar(pct: number, width = 20): string {
+  const filled = Math.round((pct / 100) * width);
+  return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
 async function runSource(
   source: Source,
   processors: Processor[],
@@ -444,12 +449,31 @@ async function runSource(
     // Progress logging
     checkpointCount++;
     if (checkpointCount % 100 === 0) {
-      const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
-      const rate = (checkpointCount / (parseFloat(elapsed) || 1)).toFixed(0);
-      if (humanOutput) {
-        console.log(`[${source.name}] ${checkpointCount} checkpoints (${rate}/s, ${elapsed}s)`);
+      const elapsedSecs = (performance.now() - startTime) / 1000;
+      const elapsed = elapsedSecs.toFixed(1);
+      const rate = Math.round(checkpointCount / (elapsedSecs || 1));
+      const total = config.totalCheckpoints ? Number(config.totalCheckpoints) : undefined;
+
+      if (config.onProgress) {
+        config.onProgress({ source: source.name, checkpoints: checkpointCount, total, rate, elapsedSecs });
+      } else if (humanOutput) {
+        if (total) {
+          const pct = Math.round((checkpointCount / total) * 100);
+          const remaining = Math.round((total - checkpointCount) / (rate || 1));
+          const bar = progressBar(pct);
+          process.stderr.write(`\r[${source.name}] ${bar} ${pct}% | ${checkpointCount.toLocaleString()}/${total.toLocaleString()} | ${rate}/s | ETA ${remaining}s  `);
+        } else {
+          console.log(`[${source.name}] ${checkpointCount} checkpoints (${rate}/s, ${elapsed}s)`);
+        }
       }
       log.info({ source: source.name, checkpoints: checkpointCount, rate: `${rate}/s`, elapsed }, "progress");
     }
+  }
+
+  // Clear progress bar line
+  if (config.totalCheckpoints && humanOutput && !config.onProgress) {
+    const elapsedSecs = (performance.now() - startTime) / 1000;
+    const rate = Math.round(checkpointCount / (elapsedSecs || 1));
+    process.stderr.write(`\r[${source.name}] ${progressBar(100)} 100% | ${checkpointCount.toLocaleString()} checkpoints | ${rate}/s | ${elapsedSecs.toFixed(1)}s\n`);
   }
 }

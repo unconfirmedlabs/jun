@@ -28,6 +28,8 @@ export interface ParsedPipelineConfig {
   storages: Storage[];
   broadcasts: Broadcast[];
   pipelineConfig: PipelineConfig;
+  /** Resolved checkpoint range (if backfill with known bounds) */
+  resolvedRange?: { start: bigint; end: bigint };
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +172,7 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
   const processors: Processor[] = [];
   const storages: Storage[] = [];
   const broadcasts: Broadcast[] = [];
+  let resolvedRange: { start: bigint; end: bigint } | undefined;
 
   // --- Sources ---
   const sourceConfig = config.sources;
@@ -199,6 +202,7 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
       const resolved = await resolveEpochCheckpointRange(liveGrpc, BigInt(sourceConfig.backfill.epoch));
       start = resolved.start;
       end = resolved.end;
+      resolvedRange = { start, end };
       await verifyArchiveAvailability(backfillArchive, start, end);
     } else {
       // Manual checkpoint range
@@ -221,6 +225,7 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
       }
 
       if (end != null) {
+        resolvedRange = { start, end };
         await verifyArchiveAvailability(backfillArchive, start, end);
       }
     }
@@ -396,5 +401,5 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
     else if (grpc.includes("mainnet")) pipelineConfig.network = "mainnet";
   }
 
-  return { sources, processors, storages, broadcasts, pipelineConfig };
+  return { sources, processors, storages, broadcasts, pipelineConfig, resolvedRange };
 }

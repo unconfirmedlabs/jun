@@ -181,6 +181,16 @@ export interface PipelineConfig {
   database?: string;
   /** Network name (e.g. "testnet", "mainnet"). Used as cursor key namespace. */
   network?: string;
+  /** Total checkpoints expected (for progress reporting in snapshot mode) */
+  totalCheckpoints?: bigint;
+  /** Progress callback — called periodically with current state */
+  onProgress?: (info: {
+    source: string;
+    checkpoints: number;
+    total?: number;
+    rate: number;
+    elapsedSecs: number;
+  }) => void;
   /** Display format for human-readable output */
   display?: string;
 }
