@@ -47,6 +47,11 @@ const textDecoder = new TextDecoder();
 function readStr(buf: Uint8Array, pos: number, len: number): string {
   return textDecoder.decode(buf.subarray(pos, pos + len));
 }
+function ensureAvailable(raw: Uint8Array, pos: number, len: number, label: string): void {
+  if (pos + len > raw.byteLength) {
+    throw new Error(`Native checkpoint payload truncated while reading ${label} at ${pos} (${len}B requested, ${raw.byteLength - pos}B remaining)`);
+  }
+}
 
 function parseRawOutput(raw: Uint8Array, checkpointSeq: bigint): DecodeResult {
   const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
@@ -65,10 +70,15 @@ function parseRawOutput(raw: Uint8Array, checkpointSeq: bigint): DecodeResult {
   // Balance changes
   const balanceChanges: BalanceChange[] = new Array(numBal);
   for (let i = 0; i < numBal; i++) {
+    ensureAvailable(raw, pos, 2, `balance owner length ${i}`);
     const ownerLen = view.getUint16(pos, true); pos += 2;
+    ensureAvailable(raw, pos, ownerLen, `balance owner ${i}`);
     const address = readStr(raw, pos, ownerLen); pos += ownerLen;
+    ensureAvailable(raw, pos, 2, `balance coin type length ${i}`);
     const ctLen = view.getUint16(pos, true); pos += 2;
+    ensureAvailable(raw, pos, ctLen, `balance coin type ${i}`);
     const coinType = readStr(raw, pos, ctLen); pos += ctLen;
+    ensureAvailable(raw, pos, 8, `balance amount ${i}`);
     const amount = view.getBigInt64(pos, true); pos += 8;
     balanceChanges[i] = {
       txDigest: "", checkpointSeq, address, coinType,
@@ -80,10 +90,15 @@ function parseRawOutput(raw: Uint8Array, checkpointSeq: bigint): DecodeResult {
   const transactions: GrpcCheckpointResponse["checkpoint"]["transactions"] = new Array(numTransactions);
   const eventCounts = new Array<number>(numTransactions);
   for (let i = 0; i < numTransactions; i++) {
+    ensureAvailable(raw, pos, 2, `transaction digest length ${i}`);
     const digestLen = view.getUint16(pos, true); pos += 2;
+    ensureAvailable(raw, pos, digestLen, `transaction digest ${i}`);
     const digest = readStr(raw, pos, digestLen); pos += digestLen;
+    ensureAvailable(raw, pos, 2, `transaction sender length ${i}`);
     const senderLen = view.getUint16(pos, true); pos += 2;
+    ensureAvailable(raw, pos, senderLen, `transaction sender ${i}`);
     const sender = readStr(raw, pos, senderLen); pos += senderLen;
+    ensureAvailable(raw, pos, 1 + 8 + 8 + 8 + 2 + 2, `transaction fixed fields ${i}`);
     const success = view.getUint8(pos) === 1; pos += 1;
     const computationCost = view.getBigUint64(pos, true).toString(); pos += 8;
     const storageCost = view.getBigUint64(pos, true).toString(); pos += 8;
@@ -93,11 +108,17 @@ function parseRawOutput(raw: Uint8Array, checkpointSeq: bigint): DecodeResult {
 
     const commands: NonNullable<NonNullable<GrpcCheckpointResponse["checkpoint"]["transactions"][number]["transaction"]>["commands"]> = new Array(numMoveCalls);
     for (let j = 0; j < numMoveCalls; j++) {
+      ensureAvailable(raw, pos, 2, `move call package length ${i}:${j}`);
       const pkgLen = view.getUint16(pos, true); pos += 2;
+      ensureAvailable(raw, pos, pkgLen, `move call package ${i}:${j}`);
       const pkg = readStr(raw, pos, pkgLen); pos += pkgLen;
+      ensureAvailable(raw, pos, 2, `move call module length ${i}:${j}`);
       const modLen = view.getUint16(pos, true); pos += 2;
+      ensureAvailable(raw, pos, modLen, `move call module ${i}:${j}`);
       const mod = readStr(raw, pos, modLen); pos += modLen;
+      ensureAvailable(raw, pos, 2, `move call function length ${i}:${j}`);
       const fnLen = view.getUint16(pos, true); pos += 2;
+      ensureAvailable(raw, pos, fnLen, `move call function ${i}:${j}`);
       const fn = readStr(raw, pos, fnLen); pos += fnLen;
       commands[j] = { moveCall: { package: pkg, module: mod, function: fn } };
     }
@@ -121,15 +142,25 @@ function parseRawOutput(raw: Uint8Array, checkpointSeq: bigint): DecodeResult {
   // Events
   const events: Array<{ packageId: string; module: string; sender: string; eventType: string; contents: { name: string; value: Uint8Array } }> = new Array(numEvents);
   for (let i = 0; i < numEvents; i++) {
+    ensureAvailable(raw, pos, 2, `event package length ${i}`);
     const pkgLen = view.getUint16(pos, true); pos += 2;
+    ensureAvailable(raw, pos, pkgLen, `event package ${i}`);
     const packageId = readStr(raw, pos, pkgLen); pos += pkgLen;
+    ensureAvailable(raw, pos, 2, `event module length ${i}`);
     const modLen = view.getUint16(pos, true); pos += 2;
+    ensureAvailable(raw, pos, modLen, `event module ${i}`);
     const module = readStr(raw, pos, modLen); pos += modLen;
+    ensureAvailable(raw, pos, 2, `event sender length ${i}`);
     const sndLen = view.getUint16(pos, true); pos += 2;
+    ensureAvailable(raw, pos, sndLen, `event sender ${i}`);
     const sender = readStr(raw, pos, sndLen); pos += sndLen;
+    ensureAvailable(raw, pos, 2, `event type length ${i}`);
     const etLen = view.getUint16(pos, true); pos += 2;
+    ensureAvailable(raw, pos, etLen, `event type ${i}`);
     const eventType = readStr(raw, pos, etLen); pos += etLen;
+    ensureAvailable(raw, pos, 4, `event contents length ${i}`);
     const contentsLen = view.getUint32(pos, true); pos += 4;
+    ensureAvailable(raw, pos, contentsLen, `event contents ${i}`);
     const value = raw.slice(pos, pos + contentsLen); pos += contentsLen;
     events[i] = { packageId, module, sender, eventType, contents: { name: eventType, value } };
   }
@@ -201,43 +232,7 @@ export function createCheckpointDecoderPool(
         try {
           job.resolve(parseRawOutput(msg.raw, BigInt(msg.seq)));
         } catch (e) {
-          const view = new DataView(msg.raw.buffer, msg.raw.byteOffset, msg.raw.byteLength);
-          const numBal = view.getUint32(0, true);
-          const numEvents = view.getUint32(4, true);
-          const numTx = view.getUint32(8, true);
-          console.error(`[jun] Zig parse error cp:${msg.seq} (${msg.raw.length}B) bal:${numBal} ev:${numEvents} tx:${numTx}`);
-
-          // Dump first transaction to find format mismatch
-          let pos = 20;
-          // Skip balance changes
-          for (let i = 0; i < numBal; i++) {
-            const ownerLen = view.getUint16(pos, true); pos += 2 + ownerLen;
-            const ctLen = view.getUint16(pos, true); pos += 2 + ctLen;
-            pos += 8; // i64 amount
-          }
-          // Dump first tx raw fields
-          if (numTx > 0 && pos < msg.raw.length - 20) {
-            const digestLen = view.getUint16(pos, true);
-            const digestStart = pos + 2;
-            const digest = new TextDecoder().decode(msg.raw.subarray(digestStart, digestStart + digestLen));
-            pos = digestStart + digestLen;
-            const senderLen = view.getUint16(pos, true);
-            pos += 2 + senderLen;
-            const success = view.getUint8(pos); pos += 1;
-            const comp = view.getBigUint64(pos, true); pos += 8;
-            const stor = view.getBigUint64(pos, true); pos += 8;
-            const reb = view.getBigUint64(pos, true); pos += 8;
-            const numTxEv = view.getUint16(pos, true); pos += 2;
-            const numMC = view.getUint16(pos, true); pos += 2;
-            console.error(`[jun]   tx0: digest=${digest.slice(0,20)}.. success=${success} comp=${comp} numEv=${numTxEv} numMC=${numMC}`);
-            // Try first move call
-            if (numMC > 0 && pos < msg.raw.length - 10) {
-              const pkgLen = view.getUint16(pos, true);
-              console.error(`[jun]   mc0: pkgLen=${pkgLen} remaining=${msg.raw.length - pos}B`);
-              if (pkgLen > 1000) console.error(`[jun]   *** pkgLen looks wrong — likely format mismatch ***`);
-            }
-          }
-          job.reject(e);
+          job.reject(e instanceof Error ? e : new Error(String(e)));
         }
       } else {
         // Legacy path: pre-parsed JS objects

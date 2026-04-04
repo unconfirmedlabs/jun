@@ -44,6 +44,7 @@ const MAX_CREATED: u32 = 4096;
 const MAX_DELETED: u32 = 4096;
 const MAX_AGG: u32 = 4096;
 const SCRATCH_SIZE: u32 = 512 * 1024;
+const MOVE_CALL_BUF_SIZE: u32 = 512 * 1024;
 const BASE58_ALPHABET: [58]u8 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".*;
 
 // --- Protobuf primitives ---
@@ -990,6 +991,10 @@ const OutputWriter = struct {
     buf: []u8,
     pos: u32,
 
+    fn canWrite(self: *const OutputWriter, len: usize) bool {
+        return @as(usize, self.pos) + len <= self.buf.len;
+    }
+
     fn writeU16(self: *OutputWriter, v: u16) void {
         if (self.pos + 2 > self.buf.len) return;
         std.mem.writeInt(u16, self.buf[self.pos..][0..2], v, .little);
@@ -1159,7 +1164,10 @@ fn skipConsensusDeterminedVersionAssignments(buf: []const u8, pos: u32) ?u32 {
     };
 }
 
-fn writeMoveCall(buf: []const u8, package: []const u8, module: []const u8, function_name: []const u8, w: *OutputWriter) void {
+fn writeMoveCall(package: []const u8, module: []const u8, function_name: []const u8, w: *OutputWriter) bool {
+    const record_len = 2 + 66 + 2 + module.len + 2 + function_name.len;
+    if (!w.canWrite(record_len)) return false;
+
     var package_hex: [66]u8 = undefined;
     bytesToHex(package[0..32], &package_hex);
     w.writeU16(66);
@@ -1168,7 +1176,7 @@ fn writeMoveCall(buf: []const u8, package: []const u8, module: []const u8, funct
     w.writeBytes(module);
     w.writeU16(@intCast(function_name.len));
     w.writeBytes(function_name);
-    _ = buf;
+    return true;
 }
 
 fn parseCommandsToOutput(buf: []const u8, pos: u32, w: *OutputWriter, move_call_count: *u16) ?u32 {
@@ -1188,8 +1196,9 @@ fn parseCommandsToOutput(buf: []const u8, pos: u32, w: *OutputWriter, move_call_
                 p = function_name.end;
                 p = skipVecTypeTags(buf, p) orelse return null;
                 p = skipVecArguments(buf, p) orelse return null;
-                writeMoveCall(buf, package, buf[module.off .. module.off + module.len], buf[function_name.off .. function_name.off + function_name.len], w);
-                if (move_call_count.* < std.math.maxInt(u16)) move_call_count.* += 1;
+                if (writeMoveCall(package, buf[module.off .. module.off + module.len], buf[function_name.off .. function_name.off + function_name.len], w)) {
+                    if (move_call_count.* < std.math.maxInt(u16)) move_call_count.* += 1;
+                }
             },
             1 => { // TransferObjects
                 p = skipVecArguments(buf, p) orelse return null;
@@ -1563,7 +1572,7 @@ fn processInternal(
 
     // Write transactions
     const TxTLS = struct {
-        threadlocal var move_call_buf: [64 * 1024]u8 = undefined;
+        threadlocal var move_call_buf: [MOVE_CALL_BUF_SIZE]u8 = undefined;
     };
     for (0..num_tx) |i| {
         var move_writer = OutputWriter{ .buf = &TxTLS.move_call_buf, .pos = 0 };
