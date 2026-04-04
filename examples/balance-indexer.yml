@@ -1,14 +1,12 @@
 # Track SUI balance changes on testnet
 #
 # Usage:
-#   DATABASE_URL=postgres://... jun run examples/balance-indexer.yml
+#   DATABASE_URL=postgres://... jun pipeline run examples/balance-indexer.yml
 
 sources:
-  live:
-    grpc: fullnode.testnet.sui.io:443
-  backfill:
-    archive: https://checkpoints.testnet.sui.io
-    from: 100000000
+  grpcUrl: fullnode.testnet.sui.io:443
+  archiveUrl: https://checkpoints.testnet.sui.io
+  startCheckpoint: 100000000
 
 processors:
   balances:
@@ -16,5 +14,4 @@ processors:
       - "0x2::sui::SUI"
 
 storage:
-  postgres:
-    url: $DATABASE_URL
+  postgres: $DATABASE_URL

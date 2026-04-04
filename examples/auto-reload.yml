@@ -2,7 +2,7 @@
 #
 # Usage:
 #   1. Host this file at an HTTPS URL or S3 bucket
-#   2. Run: DATABASE_URL=postgres://... jun run examples/auto-reload.yml
+#   2. Run: DATABASE_URL=postgres://... jun pipeline run examples/auto-reload.yml
 #   3. Update the remote config to add WAL under balances.coinTypes
 #   4. Within 30s the indexer picks up the change and starts tracking WAL
 #
@@ -10,8 +10,7 @@
 #   curl -X POST http://localhost:8080/admin/reload
 
 sources:
-  live:
-    grpc: fullnode.testnet.sui.io:443
+  grpcUrl: fullnode.testnet.sui.io:443
 
 processors:
   balances:
@@ -19,8 +18,7 @@ processors:
       - "0x2::sui::SUI"
 
 storage:
-  postgres:
-    url: $DATABASE_URL
+  postgres: $DATABASE_URL
 
 serve:
   port: 8080

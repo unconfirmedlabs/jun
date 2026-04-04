@@ -5,8 +5,7 @@
 # Just run: jun pipeline run configs/live-stream.yml
 
 sources:
-  live:
-    grpc: fullnode.testnet.sui.io:443
+  grpcUrl: fullnode.testnet.sui.io:443
 
 processors:
   balances:

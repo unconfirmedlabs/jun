@@ -40,8 +40,8 @@ export type {
 } from "./src/pipeline/types.ts";
 
 // Config parser
-export { parsePipelineConfig } from "./src/pipeline/config-parser.ts";
-export type { ParsedPipelineConfig } from "./src/pipeline/config-parser.ts";
+export { parsePipelineConfig, parsePipelineConfigFromObject, normalizeConfig } from "./src/pipeline/config-parser.ts";
+export type { ParsedPipelineConfig, CanonicalConfig } from "./src/pipeline/config-parser.ts";
 
 // Schema types
 export type { FieldDefs, FieldType, PrimitiveFieldType } from "./src/schema.ts";

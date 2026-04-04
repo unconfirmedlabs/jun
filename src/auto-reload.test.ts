@@ -20,8 +20,7 @@ import { unlinkSync } from "fs";
 
 const suiOnlyConfig = `
 sources:
-  live:
-    grpc: fullnode.testnet.sui.io:443
+  grpcUrl: fullnode.testnet.sui.io:443
 
 processors:
   balances:
@@ -29,14 +28,12 @@ processors:
       - "0x2::sui::SUI"
 
 storage:
-  postgres:
-    url: postgres://localhost/jun_test
+  postgres: postgres://localhost/jun_test
 `;
 
 const suiAndWalConfig = `
 sources:
-  live:
-    grpc: fullnode.testnet.sui.io:443
+  grpcUrl: fullnode.testnet.sui.io:443
 
 processors:
   balances:
@@ -45,8 +42,7 @@ processors:
       - "0x9f992cc2430a1f442ca7a5ca7638169f5d5c00e0ebc3977a65e9ac6e497fe5ef::wal::WAL"
 
 storage:
-  postgres:
-    url: postgres://localhost/jun_test
+  postgres: postgres://localhost/jun_test
 `;
 
 // ---------------------------------------------------------------------------
@@ -70,7 +66,7 @@ describe("auto-reload with file://", () => {
     // Parse initial state
     const initial = await fetchRemoteConfig(configUrl);
     const parsed = await parsePipelineConfig(initial!.content);
-    const initialBalanceProc = parsed.processors.find(p => p.name === "balanceChanges");
+    const initialBalanceProc = parsed.processors.find(p => p.name === "balance-tracker");
     expect(initialBalanceProc).toBeDefined();
 
     // Track reload calls
@@ -91,7 +87,7 @@ describe("auto-reload with file://", () => {
       lastEtag = result.etag;
 
       const newParsed = await parsePipelineConfig(result.content);
-      const newBalanceProc = newParsed.processors.find(p => p.name === "balanceChanges");
+      const newBalanceProc = newParsed.processors.find(p => p.name === "balance-tracker");
       if (newBalanceProc && initialBalanceProc?.reload) {
         initialBalanceProc.reload({ coinTypes: ["0x2::sui::SUI", "0x9f992cc2430a1f442ca7a5ca7638169f5d5c00e0ebc3977a65e9ac6e497fe5ef::wal::WAL"] });
       }

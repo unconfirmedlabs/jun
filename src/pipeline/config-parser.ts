@@ -1,8 +1,14 @@
 /**
  * Parse YAML pipeline config into pipeline components.
  *
- * Maps the YAML structure (sources/processors/destinations) to
+ * Maps the config structure (sources/processors/storage/broadcast) to
  * actual Source, Processor, and Destination instances.
+ *
+ * Supports two entry points:
+ *   - parsePipelineConfig(yaml)          — for YAML strings (MCP, auto-reload, config files)
+ *   - parsePipelineConfigFromObject(obj) — for pre-built config objects (CLI)
+ *
+ * Both paths go through normalizeConfig() which maps legacy keys to canonical.
  */
 import yaml from "js-yaml";
 import type { Source, Processor, Storage, Broadcast, PipelineConfig } from "./types.ts";
@@ -17,6 +23,70 @@ import { createNatsBroadcast } from "./destinations/nats.ts";
 import { createStdoutBroadcast } from "./destinations/stdout.ts";
 import { normalizeEventType, normalizeCoinType, validateEventTypeAddress } from "../normalize.ts";
 import { createLogger } from "../logger.ts";
+
+// ---------------------------------------------------------------------------
+// Canonical config schema — matches CLI flags 1:1
+// ---------------------------------------------------------------------------
+
+export interface CanonicalConfig {
+  sources?: {
+    grpcUrl?: string;
+    archiveUrl?: string;
+    epoch?: string | number;
+    startCheckpoint?: string | number;
+    endCheckpoint?: string | number;
+    concurrency?: number;
+    workers?: number;
+    // Legacy keys (backwards compat)
+    live?: { grpcUrl?: string; grpc?: string };
+    backfill?: {
+      archiveUrl?: string; archive?: string;
+      epoch?: string | number;
+      startCheckpoint?: string | number; from?: string | number;
+      endCheckpoint?: string | number; to?: string | number;
+      concurrency?: number; workers?: number;
+    };
+  };
+  processors?: {
+    transactionBlocks?: boolean;
+    balances?: { coinTypes: string[] | "*" };
+    events?: Record<string, { type: string; fields?: any; startCheckpoint?: any }>;
+    // Legacy key (backwards compat)
+    transactions?: boolean;
+  };
+  storage?: {
+    sqlite?: string;
+    postgres?: string;
+    deferIndexes?: boolean;
+    // Legacy shorthands
+    type?: string;
+    path?: string;
+    url?: string;
+  };
+  broadcast?: {
+    stdout?: boolean | { format?: string };
+    sse?: number | { port: number; hostname?: string };
+    nats?: string | { url: string; prefix?: string };
+  };
+  // Legacy alias for storage/broadcast
+  destinations?: any;
+  network?: string;
+  serve?: number | { port: number; hostname?: string };
+  display?: any;
+  configUrl?: string;
+  configAutoReloadMs?: number;
+  gapRepair?: boolean | { enabled?: boolean; intervalMs?: number };
+  throttle?: {
+    initialConcurrency?: number;
+    minConcurrency?: number;
+    maxConcurrency?: number;
+  };
+  buffer?: {
+    maxBatchSize?: number;
+    intervalMs?: number;
+    retries?: number;
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -58,6 +128,78 @@ function substituteDeep(obj: any): any {
     return result;
   }
   return obj;
+}
+
+// ---------------------------------------------------------------------------
+// Config normalization — legacy keys → canonical
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a raw config object to canonical keys.
+ *
+ * Handles:
+ *   - sources.live.grpc / sources.backfill.archive / from / to → flat sources.*
+ *   - storage.type + path/url shorthands
+ *   - broadcast.sse object → port number, broadcast.nats object → url string
+ *   - destinations alias → storage
+ *   - processors.transactions → processors.transactionBlocks
+ */
+export function normalizeConfig(raw: any): CanonicalConfig {
+  const config = structuredClone(raw);
+
+  // Flatten sources.live + sources.backfill → sources.*
+  if (config.sources?.live || config.sources?.backfill) {
+    const live = config.sources.live;
+    const backfill = config.sources.backfill;
+
+    config.sources.grpcUrl = config.sources.grpcUrl ?? live?.grpcUrl ?? live?.grpc;
+    config.sources.archiveUrl = config.sources.archiveUrl ?? backfill?.archiveUrl ?? backfill?.archive;
+    config.sources.epoch = config.sources.epoch ?? backfill?.epoch;
+    config.sources.startCheckpoint = config.sources.startCheckpoint ?? backfill?.startCheckpoint ?? backfill?.from;
+    config.sources.endCheckpoint = config.sources.endCheckpoint ?? backfill?.endCheckpoint ?? backfill?.to;
+    config.sources.concurrency = config.sources.concurrency ?? backfill?.concurrency;
+    config.sources.workers = config.sources.workers ?? backfill?.workers;
+
+    // Clean up legacy
+    delete config.sources.live;
+    delete config.sources.backfill;
+  }
+
+  // Normalize processors.transactions → processors.transactionBlocks
+  if (config.processors?.transactions && !config.processors?.transactionBlocks) {
+    config.processors.transactionBlocks = config.processors.transactions;
+    delete config.processors.transactions;
+  }
+
+  // Normalize storage shorthand (type + path/url)
+  if (config.storage?.type === "sqlite" && config.storage?.path) {
+    config.storage.sqlite = config.storage.sqlite ?? config.storage.path;
+    delete config.storage.type;
+    delete config.storage.path;
+  }
+  if (config.storage?.type === "postgres" && config.storage?.url) {
+    config.storage.postgres = config.storage.postgres ?? config.storage.url;
+    delete config.storage.type;
+    delete config.storage.url;
+  }
+
+  // Normalize storage.sqlite as object with path → string
+  if (config.storage?.sqlite && typeof config.storage.sqlite === "object") {
+    config.storage.sqlite = config.storage.sqlite.path;
+  }
+
+  // Normalize storage.postgres as object with url → string
+  if (config.storage?.postgres && typeof config.storage.postgres === "object") {
+    config.storage.postgres = config.storage.postgres.url;
+  }
+
+  // Support config.destinations as alias for storage/broadcast
+  if (config.destinations && !config.storage) {
+    config.storage = config.destinations;
+    delete config.destinations;
+  }
+
+  return config;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,16 +300,11 @@ async function verifyArchiveAvailability(
 }
 
 // ---------------------------------------------------------------------------
-// Parser
+// Parser — from object (canonical path, no YAML dependency)
 // ---------------------------------------------------------------------------
 
-export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPipelineConfig> {
-  const raw = yaml.load(yamlContent) as any;
-  if (!raw || typeof raw !== "object") {
-    throw new Error("Invalid config: YAML must be a mapping");
-  }
-
-  const config = substituteDeep(raw);
+export async function parsePipelineConfigFromObject(rawConfig: any): Promise<ParsedPipelineConfig> {
+  const config = normalizeConfig(rawConfig);
   const sources: Source[] = [];
   const processors: Processor[] = [];
   const storages: Storage[] = [];
@@ -180,44 +317,44 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
     throw new Error("Invalid config: missing 'sources' section");
   }
 
-  // Support both old (grpc, from, to) and new (grpcUrl, startCheckpoint, endCheckpoint) keys
-  const liveGrpc = sourceConfig.live?.grpcUrl ?? sourceConfig.live?.grpc;
-  const backfillArchive = sourceConfig.backfill?.archiveUrl ?? sourceConfig.backfill?.archive;
-  const backfillStart = sourceConfig.backfill?.startCheckpoint ?? sourceConfig.backfill?.from;
-  const backfillEnd = sourceConfig.backfill?.endCheckpoint ?? sourceConfig.backfill?.to;
+  // After normalization, all keys are canonical (flat)
+  const grpcUrl = sourceConfig.grpcUrl;
+  const archiveUrl = sourceConfig.archiveUrl;
+  const startCheckpoint = sourceConfig.startCheckpoint;
+  const endCheckpoint = sourceConfig.endCheckpoint;
 
-  if (liveGrpc) {
-    sources.push(createGrpcLiveSource({ url: liveGrpc }));
+  if (grpcUrl) {
+    sources.push(createGrpcLiveSource({ url: grpcUrl }));
   }
 
-  if (backfillArchive) {
+  if (archiveUrl) {
     let start: bigint;
     let end: bigint | undefined;
 
     // Epoch-based archive source: resolve checkpoint range from epoch number
-    if (sourceConfig.backfill.epoch != null) {
-      if (!liveGrpc) {
-        throw new Error("Epoch-based archive source requires a gRPC URL (sources.live.grpcUrl) to resolve the epoch's checkpoint range");
+    if (sourceConfig.epoch != null) {
+      if (!grpcUrl) {
+        throw new Error("Epoch-based archive source requires a gRPC URL (sources.grpcUrl) to resolve the epoch's checkpoint range");
       }
-      const resolved = await resolveEpochCheckpointRange(liveGrpc, BigInt(sourceConfig.backfill.epoch));
+      const resolved = await resolveEpochCheckpointRange(grpcUrl, BigInt(sourceConfig.epoch));
       start = resolved.start;
       end = resolved.end;
       resolvedRange = { start, end };
-      await verifyArchiveAvailability(backfillArchive, start, end);
+      await verifyArchiveAvailability(archiveUrl, start, end);
     } else {
       // Manual checkpoint range
-      if (typeof backfillStart === "number") {
-        start = BigInt(Math.floor(backfillStart));
-      } else if (typeof backfillStart === "string" && /^\d+$/.test(backfillStart)) {
-        start = BigInt(backfillStart);
+      if (typeof startCheckpoint === "number") {
+        start = BigInt(Math.floor(startCheckpoint));
+      } else if (typeof startCheckpoint === "string" && /^\d+$/.test(startCheckpoint)) {
+        start = BigInt(startCheckpoint);
       } else {
         start = 0n;
       }
 
-      if (backfillEnd != null) {
-        end = typeof backfillEnd === "number"
-          ? BigInt(Math.floor(backfillEnd))
-          : BigInt(backfillEnd);
+      if (endCheckpoint != null) {
+        end = typeof endCheckpoint === "number"
+          ? BigInt(Math.floor(endCheckpoint))
+          : BigInt(endCheckpoint);
       }
 
       if (end != null && start > end) {
@@ -226,17 +363,17 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
 
       if (end != null) {
         resolvedRange = { start, end };
-        await verifyArchiveAvailability(backfillArchive, start, end);
+        await verifyArchiveAvailability(archiveUrl, start, end);
       }
     }
 
     sources.push(createArchiveSource({
-      archiveUrl: backfillArchive,
+      archiveUrl,
       from: start,
       to: end,
-      grpcUrl: liveGrpc,
-      concurrency: sourceConfig.backfill.concurrency,
-      workers: sourceConfig.backfill.workers,
+      grpcUrl,
+      concurrency: sourceConfig.concurrency,
+      workers: sourceConfig.workers,
       balanceCoinTypes: config.processors?.balances?.coinTypes === "*"
         ? "*"
         : config.processors?.balances?.coinTypes?.map((coinType: string) => normalizeCoinType(coinType)),
@@ -265,7 +402,7 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
     }
     const proc = createEventDecoder({
       handlers,
-      grpcUrl: sourceConfig.live?.grpc,
+      grpcUrl,
     });
     // Attach reload config so auto-reload can extract it
     (proc as any)._reloadConfig = handlers;
@@ -286,14 +423,12 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
     processors.push(proc);
   }
 
-  if (processorConfig?.transactions) {
+  if (processorConfig?.transactionBlocks) {
     processors.push(createTransactionTracker());
   }
 
-  // --- Destinations ---
-  const destinationConfig = config.destinations ?? {};
-  const storageConfig = config.storage ?? destinationConfig;
-  const broadcastConfig = config.broadcast ?? destinationConfig;
+  // --- Storage ---
+  const storageConfig = config.storage ?? {};
 
   // Collect handler table info for destinations that need it
   const handlerTables: Record<string, { tableName: string; fields: any }> = {};
@@ -304,13 +439,9 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
     }
   }
 
-  // Storage destinations (unified SQL backend)
   if (storageConfig.postgres) {
-    const url = typeof storageConfig.postgres === "string"
-      ? storageConfig.postgres
-      : storageConfig.postgres.url;
     storages.push(createSqlStorage({
-      url,
+      url: storageConfig.postgres,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
       transactions: !!processorConfig?.transactionBlocks,
@@ -319,11 +450,8 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
   }
 
   if (storageConfig.sqlite) {
-    const sqlitePath = typeof storageConfig.sqlite === "string"
-      ? storageConfig.sqlite
-      : storageConfig.sqlite.path;
     storages.push(createSqlStorage({
-      url: `sqlite:${sqlitePath}`,
+      url: `sqlite:${storageConfig.sqlite}`,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
       transactions: !!processorConfig?.transactionBlocks,
@@ -331,25 +459,34 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
     }));
   }
 
-  // Broadcast destinations
+  // --- Broadcast ---
+  const broadcastConfig = config.broadcast ?? {};
+
   if (broadcastConfig.sse) {
-    broadcasts.push(createSseBroadcast({
-      port: broadcastConfig.sse.port,
-      hostname: broadcastConfig.sse.hostname,
-    }));
+    const ssePort = typeof broadcastConfig.sse === "number"
+      ? broadcastConfig.sse
+      : (broadcastConfig.sse as { port: number; hostname?: string }).port;
+    const sseHostname = typeof broadcastConfig.sse === "object"
+      ? (broadcastConfig.sse as { port: number; hostname?: string }).hostname
+      : undefined;
+    broadcasts.push(createSseBroadcast({ port: ssePort, hostname: sseHostname }));
   }
 
   if (broadcastConfig.nats) {
-    broadcasts.push(createNatsBroadcast({
-      url: broadcastConfig.nats.url,
-      prefix: broadcastConfig.nats.prefix,
-    }));
+    const natsUrl = typeof broadcastConfig.nats === "string"
+      ? broadcastConfig.nats
+      : (broadcastConfig.nats as { url: string; prefix?: string }).url;
+    const natsPrefix = typeof broadcastConfig.nats === "object"
+      ? (broadcastConfig.nats as { url: string; prefix?: string }).prefix
+      : undefined;
+    broadcasts.push(createNatsBroadcast({ url: natsUrl, prefix: natsPrefix }));
   }
 
   if (broadcastConfig.stdout) {
-    broadcasts.push(createStdoutBroadcast({
-      format: broadcastConfig.stdout.format,
-    }));
+    const format = typeof broadcastConfig.stdout === "object"
+      ? (broadcastConfig.stdout as { format?: string }).format
+      : undefined;
+    broadcasts.push(createStdoutBroadcast({ format }));
   }
 
   // Default to stdout if no destinations configured
@@ -362,7 +499,7 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
   if (config.serve) {
     pipelineConfig.serve = {
       port: typeof config.serve === "number" ? config.serve : config.serve.port,
-      hostname: config.serve?.hostname,
+      hostname: typeof config.serve === "object" ? config.serve.hostname : undefined,
     };
   }
   if (config.display) pipelineConfig.display = config.display;
@@ -391,17 +528,27 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
 
   // Extract database URL from postgres storage config
   if (storageConfig.postgres) {
-    pipelineConfig.database = typeof storageConfig.postgres === "string"
-      ? storageConfig.postgres
-      : storageConfig.postgres.url;
+    pipelineConfig.database = storageConfig.postgres;
   }
 
   // Infer network from gRPC URL if not explicit
-  if (!pipelineConfig.network && sourceConfig.live?.grpc) {
-    const grpc: string = sourceConfig.live.grpc;
-    if (grpc.includes("testnet")) pipelineConfig.network = "testnet";
-    else if (grpc.includes("mainnet")) pipelineConfig.network = "mainnet";
+  if (!pipelineConfig.network && grpcUrl) {
+    if (grpcUrl.includes("testnet")) pipelineConfig.network = "testnet";
+    else if (grpcUrl.includes("mainnet")) pipelineConfig.network = "mainnet";
   }
 
   return { sources, processors, storages, broadcasts, pipelineConfig, resolvedRange };
+}
+
+// ---------------------------------------------------------------------------
+// Parser — from YAML string (backwards compat for MCP, auto-reload, tests)
+// ---------------------------------------------------------------------------
+
+export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPipelineConfig> {
+  const raw = yaml.load(yamlContent) as any;
+  if (!raw || typeof raw !== "object") {
+    throw new Error("Invalid config: YAML must be a mapping");
+  }
+
+  return parsePipelineConfigFromObject(substituteDeep(raw));
 }

@@ -10,7 +10,7 @@ import { createMetrics, type IndexerMetrics } from "../serve.ts";
 import { createAdaptiveThrottle, type AdaptiveThrottle } from "../throttle.ts";
 import { createLogger } from "../logger.ts";
 import { createPipeline } from "./pipeline.ts";
-import { parsePipelineConfig } from "./config-parser.ts";
+import { parsePipelineConfig, parsePipelineConfigFromObject } from "./config-parser.ts";
 import { fetchRemoteConfig } from "../remote-config.ts";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -208,6 +208,33 @@ describe("config parse + reload", () => {
   test("parsePipelineConfig produces processors with reload()", async () => {
     const config = await parsePipelineConfig(`
 sources:
+  grpcUrl: fullnode.testnet.sui.io:443
+processors:
+  balances:
+    coinTypes:
+      - "0x2::sui::SUI"
+storage:
+  postgres: postgres://localhost/test
+`);
+    const balanceProc = config.processors.find(p => p.name === "balance-tracker");
+    expect(balanceProc).toBeDefined();
+    expect(typeof balanceProc!.reload).toBe("function");
+  });
+
+  test("parsePipelineConfigFromObject works with canonical keys", async () => {
+    const config = await parsePipelineConfigFromObject({
+      sources: { grpcUrl: "fullnode.testnet.sui.io:443" },
+      processors: { balances: { coinTypes: ["0x2::sui::SUI"] } },
+      storage: { postgres: "postgres://localhost/test" },
+    });
+    const balanceProc = config.processors.find(p => p.name === "balance-tracker");
+    expect(balanceProc).toBeDefined();
+    expect(typeof balanceProc!.reload).toBe("function");
+  });
+
+  test("parsePipelineConfig still works with legacy keys (backwards compat)", async () => {
+    const config = await parsePipelineConfig(`
+sources:
   live:
     grpc: fullnode.testnet.sui.io:443
 processors:
@@ -218,7 +245,7 @@ storage:
   postgres:
     url: postgres://localhost/test
 `);
-    const balanceProc = config.processors.find(p => p.name === "balanceChanges");
+    const balanceProc = config.processors.find(p => p.name === "balance-tracker");
     expect(balanceProc).toBeDefined();
     expect(typeof balanceProc!.reload).toBe("function");
   });
@@ -226,8 +253,7 @@ storage:
   test("event decoder processor has reload()", async () => {
     const config = await parsePipelineConfig(`
 sources:
-  live:
-    grpc: fullnode.testnet.sui.io:443
+  grpcUrl: fullnode.testnet.sui.io:443
 processors:
   events:
     TestEvent:
@@ -235,10 +261,9 @@ processors:
       fields:
         amount: u64
 storage:
-  postgres:
-    url: postgres://localhost/test
+  postgres: postgres://localhost/test
 `);
-    const eventProc = config.processors.find(p => p.name === "events");
+    const eventProc = config.processors.find(p => p.name === "event-decoder");
     expect(eventProc).toBeDefined();
     expect(typeof eventProc!.reload).toBe("function");
   });
@@ -246,15 +271,13 @@ storage:
   test("file:// config reload detects changes via etag", async () => {
     await Bun.write(tmpFile, `
 sources:
-  live:
-    grpc: fullnode.testnet.sui.io:443
+  grpcUrl: fullnode.testnet.sui.io:443
 processors:
   balances:
     coinTypes:
       - "0x2::sui::SUI"
 storage:
-  postgres:
-    url: postgres://localhost/test
+  postgres: postgres://localhost/test
 `);
 
     const first = await fetchRemoteConfig(`file://${tmpFile}`);
@@ -264,20 +287,18 @@ storage:
     const same = await fetchRemoteConfig(`file://${tmpFile}`, { etag: first!.etag });
     expect(same).toBeNull();
 
-    // Change content → new etag → returns content
+    // Change content ��� new etag → returns content
     await Bun.sleep(10);
     await Bun.write(tmpFile, `
 sources:
-  live:
-    grpc: fullnode.testnet.sui.io:443
+  grpcUrl: fullnode.testnet.sui.io:443
 processors:
   balances:
     coinTypes:
       - "0x2::sui::SUI"
       - "0x9f992cc2430a1f442ca7a5ca7638169f5d5c00e0ebc3977a65e9ac6e497fe5ef::wal::WAL"
 storage:
-  postgres:
-    url: postgres://localhost/test
+  postgres: postgres://localhost/test
 `);
 
     const changed = await fetchRemoteConfig(`file://${tmpFile}`, { etag: first!.etag });

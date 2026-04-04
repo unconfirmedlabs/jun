@@ -8,8 +8,7 @@
 # Query with: sqlite3 events.db "SELECT * FROM my_event LIMIT 10"
 
 sources:
-  live:
-    grpc: fullnode.testnet.sui.io:443
+  grpcUrl: fullnode.testnet.sui.io:443
 
 processors:
   events:
@@ -17,5 +16,4 @@ processors:
       type: "0xPKG::module::EventStruct"
 
 storage:
-  sqlite:
-    path: ./events.db
+  sqlite: ./events.db

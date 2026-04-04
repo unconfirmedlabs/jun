@@ -5,16 +5,13 @@
 # Tracks SUI and all coins. Use specific coin types to reduce noise.
 
 sources:
-  live:
-    grpc: fullnode.mainnet.sui.io:443
-  backfill:
-    archive: https://checkpoints.mainnet.sui.io
-    from: 260000000
+  grpcUrl: fullnode.mainnet.sui.io:443
+  archiveUrl: https://checkpoints.mainnet.sui.io
+  startCheckpoint: 260000000
 
 processors:
   balances:
     coinTypes: "*"
 
 storage:
-  postgres:
-    url: $DATABASE_URL
+  postgres: $DATABASE_URL

@@ -2047,22 +2047,24 @@ interface PipelineOpts {
 async function runPipeline(configFile: string | undefined, opts: PipelineOpts, backfillOnly: boolean) {
     try {
       const { resolve } = await import("path");
-      const { parsePipelineConfig } = await import("./pipeline/config-parser.ts");
+      const { parsePipelineConfigFromObject } = await import("./pipeline/config-parser.ts");
       const { createPipeline } = await import("./pipeline/pipeline.ts");
 
-      let yamlContent: string;
+      // Load base config from file/URL, or start empty for pure CLI flags
+      let baseConfig: Record<string, any> = {};
       const configUrl = opts.configUrl ?? process.env.JUN_CONFIG_URL;
 
       if (configUrl) {
         const { fetchRemoteConfig } = await import("./remote-config.ts");
         const result = await fetchRemoteConfig(configUrl);
-        yamlContent = result!.content;
+        const yaml = await import("js-yaml");
+        baseConfig = (yaml.load(result!.content) as Record<string, any>) ?? {};
       } else if (configFile) {
         const { readFileSync } = require("fs");
-        yamlContent = readFileSync(resolve(configFile), "utf-8");
+        const yaml = await import("js-yaml");
+        baseConfig = (yaml.load(readFileSync(resolve(configFile), "utf-8")) as Record<string, any>) ?? {};
       } else if (opts.epoch || opts.startCheckpoint) {
-        // Generate config entirely from CLI flags
-        yamlContent = "";
+        // Generate config entirely from CLI flags — baseConfig stays empty
       } else {
         console.error("[jun] error: provide a config file, --config-url, or --epoch/--start-checkpoint flags");
         process.exit(1);
@@ -2076,37 +2078,39 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
         process.env.LOG_LEVEL = "silent";
       }
 
-      // Parse base config, then apply CLI flag overrides
-      const yaml = await import("js-yaml");
-      const baseConfig = yamlContent ? (yaml.load(yamlContent) as Record<string, any>) ?? {} : {};
-
-      // CLI flags override config file
-      const grpcUrl = opts.grpcUrl ?? baseConfig.sources?.live?.grpcUrl ?? baseConfig.sources?.live?.grpc ?? "hayabusa.mainnet.unconfirmed.cloud:443";
+      // CLI flags override config file — build with canonical keys directly
       const networkDefaults: Record<string, string> = {
         mainnet: "https://checkpoints.mainnet.sui.io",
         testnet: "https://checkpoints.testnet.sui.io",
         devnet: "https://checkpoints.devnet.sui.io",
       };
       const net = opts.network ?? baseConfig.network ?? "mainnet";
-      const archiveUrl = opts.archiveUrl ?? baseConfig.sources?.backfill?.archiveUrl ?? baseConfig.sources?.backfill?.archive ?? networkDefaults[net];
+      // Resolve grpcUrl: CLI flag > canonical key > legacy key > default
+      const grpcUrl = opts.grpcUrl
+        ?? baseConfig.sources?.grpcUrl
+        ?? baseConfig.sources?.live?.grpcUrl
+        ?? baseConfig.sources?.live?.grpc
+        ?? "hayabusa.mainnet.unconfirmed.cloud:443";
+      const archiveUrl = opts.archiveUrl
+        ?? baseConfig.sources?.archiveUrl
+        ?? baseConfig.sources?.backfill?.archiveUrl
+        ?? baseConfig.sources?.backfill?.archive
+        ?? networkDefaults[net];
 
-      // Source overrides
-      // backfillOnly is passed in from the command (snapshot vs run)
+      // Source overrides — use canonical keys
       if (opts.epoch || opts.startCheckpoint) {
         baseConfig.sources = baseConfig.sources ?? {};
-        // Always set live.grpcUrl — needed for epoch resolution
-        baseConfig.sources.live = { grpcUrl };
-        baseConfig.sources.backfill = baseConfig.sources.backfill ?? {};
-        baseConfig.sources.backfill.archiveUrl = archiveUrl;
+        baseConfig.sources.grpcUrl = grpcUrl;
+        baseConfig.sources.archiveUrl = archiveUrl;
 
         if (opts.epoch) {
-          baseConfig.sources.backfill.epoch = opts.epoch;
+          baseConfig.sources.epoch = opts.epoch;
         } else {
-          if (opts.startCheckpoint) baseConfig.sources.backfill.startCheckpoint = opts.startCheckpoint;
-          if (opts.endCheckpoint) baseConfig.sources.backfill.endCheckpoint = opts.endCheckpoint;
+          if (opts.startCheckpoint) baseConfig.sources.startCheckpoint = opts.startCheckpoint;
+          if (opts.endCheckpoint) baseConfig.sources.endCheckpoint = opts.endCheckpoint;
         }
-        if (opts.concurrency) baseConfig.sources.backfill.concurrency = parseInt(opts.concurrency);
-        if (opts.workers) baseConfig.sources.backfill.workers = parseInt(opts.workers);
+        if (opts.concurrency) baseConfig.sources.concurrency = parseInt(opts.concurrency);
+        if (opts.workers) baseConfig.sources.workers = parseInt(opts.workers);
       }
 
       // Processor overrides
@@ -2148,18 +2152,9 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
         baseConfig.storage = baseConfig.storage ?? {};
         baseConfig.storage.postgres = opts.postgres;
       }
-      // Auto-enable storage tables matching enabled processors
-      if (baseConfig.storage) {
-        if (opts.transactionBlocks || baseConfig.processors?.transactionBlocks) {
-          baseConfig.storage.transactions = true;
-        }
-        if (opts.coinType || baseConfig.processors?.balances) {
-          baseConfig.storage.balances = true;
-        }
-        // Defer indexes in snapshot mode for faster bulk inserts
-        if (backfillOnly) {
-          baseConfig.storage.deferIndexes = true;
-        }
+      // Defer indexes in snapshot mode for faster bulk inserts
+      if (baseConfig.storage && backfillOnly) {
+        baseConfig.storage.deferIndexes = true;
       }
 
       // S3 export validation — check creds before pipeline starts
@@ -2227,9 +2222,8 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
         baseConfig.broadcast.nats = { url: opts.nats };
       }
 
-      // Re-serialize to YAML for the parser
-      const mergedYaml = yaml.dump(baseConfig);
-      const { sources, processors, storages, broadcasts, pipelineConfig, resolvedRange } = await parsePipelineConfig(mergedYaml);
+      // Pass config object directly to parser — no YAML roundtrip
+      const { sources, processors, storages, broadcasts, pipelineConfig, resolvedRange } = await parsePipelineConfigFromObject(baseConfig);
 
       const pipeline = createPipeline();
 
@@ -2256,10 +2250,7 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       for (const storage of storages) pipeline.storage(storage);
       for (const broadcast of broadcasts) pipeline.broadcast(broadcast);
 
-      // Print summary and confirm
-      const backfill = baseConfig.sources?.backfill;
-      const startCp = backfill?.startCheckpoint ?? backfill?.from;
-      const endCp = backfill?.endCheckpoint ?? backfill?.to;
+      // Print summary and confirm (use canonical keys from baseConfig)
       const enabledProcessors: string[] = [];
       if (baseConfig.processors?.transactionBlocks) enabledProcessors.push("transaction-blocks");
       if (baseConfig.processors?.balances) enabledProcessors.push("balance-changes");
@@ -2269,21 +2260,21 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       console.error("  Pipeline Summary");
       console.error("  ────────────────");
       console.error(`  mode            ${backfillOnly ? "snapshot (exit after backfill)" : "continuous (backfill + live)"}`);
-      if (backfill?.epoch) console.error(`  epoch           ${backfill.epoch}`);
+      if (baseConfig.sources?.epoch) console.error(`  epoch           ${baseConfig.sources.epoch}`);
       if (resolvedRange) {
         const count = resolvedRange.end - resolvedRange.start + 1n;
         console.error(`  checkpoints     ${resolvedRange.start} → ${resolvedRange.end} (${count.toLocaleString()})`);
-      } else if (startCp && endCp) {
-        const count = BigInt(endCp) - BigInt(startCp) + 1n;
-        console.error(`  checkpoints     ${startCp} → ${endCp} (${count.toLocaleString()})`);
+      } else if (baseConfig.sources?.startCheckpoint && baseConfig.sources?.endCheckpoint) {
+        const count = BigInt(baseConfig.sources.endCheckpoint) - BigInt(baseConfig.sources.startCheckpoint) + 1n;
+        console.error(`  checkpoints     ${baseConfig.sources.startCheckpoint} → ${baseConfig.sources.endCheckpoint} (${count.toLocaleString()})`);
       }
       if (enabledProcessors.length > 0) console.error(`  processors      ${enabledProcessors.join(", ")}`);
       if (opts.sqlite) console.error(`  sqlite          ${opts.sqlite}`);
       if (opts.postgres) console.error(`  postgres        ${opts.postgres}`);
       if (opts.sqliteExport) console.error(`  export          ${opts.sqliteExport}`);
       if (opts.stdout) console.error(`  broadcast       stdout`);
-      if (backfill?.concurrency) console.error(`  concurrency     ${backfill.concurrency}`);
-      if (backfill?.workers) console.error(`  workers         ${backfill.workers}`);
+      if (baseConfig.sources?.concurrency) console.error(`  concurrency     ${baseConfig.sources.concurrency}`);
+      if (baseConfig.sources?.workers) console.error(`  workers         ${baseConfig.sources.workers}`);
       console.error("");
 
       if (!opts.yes) {

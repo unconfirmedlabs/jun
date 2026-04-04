@@ -11,11 +11,9 @@
 # NATS: nats sub "jun.events.decoded.*"
 
 sources:
-  live:
-    grpc: fullnode.mainnet.sui.io:443
-  backfill:
-    archive: https://checkpoints.mainnet.sui.io
-    from: 260000000
+  grpcUrl: fullnode.mainnet.sui.io:443
+  archiveUrl: https://checkpoints.mainnet.sui.io
+  startCheckpoint: 260000000
 
 processors:
   events:
@@ -26,8 +24,7 @@ processors:
       - "0x2::sui::SUI"
 
 storage:
-  postgres:
-    url: $DATABASE_URL
+  postgres: $DATABASE_URL
 
 broadcast:
   sse:
