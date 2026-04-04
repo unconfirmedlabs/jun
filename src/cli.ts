@@ -2121,7 +2121,7 @@ pipelineCmd
   // Storage
   .option("--sqlite <path>", "write to SQLite database at path")
   .option("--postgres <url>", "write to Postgres database at URL")
-  .option("--sqlite-export <s3url>", "after pipeline: VACUUM, compress, upload to S3 (e.g. s3://bucket/key.db.zst)")
+  .option("--sqlite-export <s3url>", "after pipeline: VACUUM + upload to S3 (e.g. s3://bucket/key.db)")
   // Broadcast
   .option("--stdout", "broadcast events to stdout as JSONL")
   .option("--sse <port>", "broadcast events via SSE on port")
@@ -2254,7 +2254,7 @@ pipelineCmd
       }
 
       // S3 export validation — check creds before pipeline starts
-      let s3ExportConfig: { bucket: string; key: string; compress: boolean } | null = null;
+      let s3ExportConfig: { bucket: string; key: string } | null = null;
       if (opts.sqliteExport) {
         if (!opts.sqliteExport.startsWith("s3://")) {
           console.error("[jun] error: --sqlite-export must be an S3 URL (s3://bucket/key.db.zst)");
@@ -2273,7 +2273,6 @@ pipelineCmd
         }
         const s3Bucket = s3Path.slice(0, slashIdx);
         const s3Key = s3Path.slice(slashIdx + 1);
-        const compress = s3Key.endsWith(".zst");
 
         const s3Endpoint = process.env.S3_ENDPOINT;
         const s3AccessKey = process.env.AWS_ACCESS_KEY_ID;
@@ -2302,7 +2301,7 @@ pipelineCmd
           process.exit(1);
         }
 
-        s3ExportConfig = { bucket: s3Bucket, key: s3Key, compress };
+        s3ExportConfig = { bucket: s3Bucket, key: s3Key };
       }
 
       // Broadcast overrides
@@ -2350,20 +2349,7 @@ pipelineCmd
         console.error(`[jun] database size: ${(dbSize / 1024 / 1024).toFixed(1)} MB`);
         db.close();
 
-        let uploadPath = dbPath;
-
-        // Compress if key ends in .zst
-        if (s3ExportConfig.compress) {
-          console.error("[jun] compressing with zstd...");
-          const { $ } = await import("bun");
-          const compressedPath = `${dbPath}.zst`;
-          await $`zstd -19 --rm ${dbPath} -o ${compressedPath}`.quiet();
-          const compressedSize = Bun.file(compressedPath).size;
-          console.error(`[jun] compressed: ${(compressedSize / 1024 / 1024).toFixed(1)} MB (${((compressedSize / dbSize) * 100).toFixed(1)}%)`);
-          uploadPath = compressedPath;
-        }
-
-        // Upload
+        // Upload raw SQLite
         console.error(`[jun] uploading to s3://${s3ExportConfig.bucket}/${s3ExportConfig.key}...`);
         const s3Client = new Bun.S3Client({
           endpoint: process.env.S3_ENDPOINT!,
@@ -2372,14 +2358,8 @@ pipelineCmd
           secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
         });
         const s3File = s3Client.file(s3ExportConfig.key);
-        await s3File.write(Bun.file(uploadPath));
+        await s3File.write(Bun.file(dbPath));
         console.error(`[jun] uploaded successfully`);
-
-        // Clean up compressed file
-        if (uploadPath !== dbPath) {
-          const fs = await import("fs");
-          fs.unlinkSync(uploadPath);
-        }
       }
     } catch (err) {
       cliError(err);
