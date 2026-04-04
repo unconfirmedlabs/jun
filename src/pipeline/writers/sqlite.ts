@@ -116,7 +116,9 @@ export function createSqliteWriterChannel(config: SqlStorageConfig): WriterChann
         pending.set(id, { resolve, reject });
       });
 
-      worker.postMessage({ type: "write", id, batch });
+      // JSON encode the batch — faster than structured clone for large nested objects
+      const encoded = JSON.stringify(batch);
+      worker.postMessage({ type: "write", id, encoded });
 
       // Don't await here — send() returns once the message is posted.
       // The ack will resolve the pending promise, but we let it run in background.

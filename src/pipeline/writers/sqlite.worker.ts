@@ -34,12 +34,13 @@ self.onmessage = async (event: MessageEvent) => {
   }
 
   if (msg.type === "write") {
-    const { id, batch } = msg as { id: number; batch: SerializedBatch[] };
+    const { id, encoded } = msg as { id: number; encoded: string };
 
     try {
       const start = performance.now();
 
-      // Deserialize: string -> bigint, ISO string -> Date
+      // JSON decode + deserialize: string -> bigint, ISO string -> Date
+      const batch: SerializedBatch[] = JSON.parse(encoded);
       const processed = deserializeBatch(batch);
 
       await storage!.write(processed);
