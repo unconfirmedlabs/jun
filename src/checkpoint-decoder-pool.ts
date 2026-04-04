@@ -192,6 +192,20 @@ function parseRawOutput(raw: Uint8Array, checkpointSeq: bigint): DecodeResult {
 // ---------------------------------------------------------------------------
 
 /** Default worker count: min(4, cpus - 1), at least 1. */
+/** Check if native Zig decoder is available for the current platform */
+export function isNativeDecoderAvailable(): boolean {
+  const { suffix } = require("bun:ffi");
+  const { existsSync } = require("fs");
+  const { join } = require("path");
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  const platform = process.platform === "darwin" ? "darwin" : "linux";
+  const paths = [
+    join(__dirname, "..", "native", "lib", `libcheckpoint_processor.${platform}-${arch}.${suffix}`),
+    join(__dirname, "..", "native", `libcheckpoint_processor.${suffix}`),
+  ];
+  return paths.some((p: string) => existsSync(p));
+}
+
 export function defaultWorkerCount(): number {
   const cpus = navigator.hardwareConcurrency ?? 4;
   return Math.max(1, Math.min(4, cpus - 1));

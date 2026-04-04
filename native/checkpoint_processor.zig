@@ -1608,8 +1608,9 @@ fn processInternal(
 
 // --- Exported entry points ---
 
-const zstd_c = @cImport(@cInclude("zstd.h"));
 const DECOMPRESS_BUF_SIZE = 4 * 1024 * 1024;
+
+const zstd_c = @cImport(@cInclude("zstd.h"));
 
 /// Process a decompressed protobuf checkpoint → balance changes + events.
 export fn process_checkpoint(

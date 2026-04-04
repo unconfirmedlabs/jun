@@ -147,6 +147,12 @@ export function createPipeline(): Pipeline {
         if (processors.length > 0) console.log(`Processors: ${processors.map(p => p.name).join(", ")}`);
         if (storages.length > 0) console.log(`Storage:    ${storages.map(s => s.name).join(", ")}`);
         if (broadcasts.length > 0) console.log(`Broadcast:  ${broadcasts.map(b => b.name).join(", ")}`);
+        if (sources.some(s => s.name === "backfill")) {
+          try {
+            const { isNativeDecoderAvailable } = require("../checkpoint-decoder-pool.ts");
+            console.log(`Decoder:    ${isNativeDecoderAvailable() ? "native (Zig)" : "JavaScript"}`);
+          } catch {}
+        }
         if (config.serve) console.log(`HTTP Server: port ${config.serve.port}`);
         if (state) console.log(`Cursors:    enabled (Postgres)`);
         console.log("");
