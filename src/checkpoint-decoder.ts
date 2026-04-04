@@ -18,11 +18,15 @@ import { zstdDecompressSync } from "zlib";
 
 const USE_LEGACY = process.env.JUN_LEGACY_PARSERS === "1";
 
-// Load Zig lib directly in worker (avoid checkpoint-processor-native.ts overhead)
-const LIB_NAME = `libcheckpoint_processor.${suffix}`;
+// Load Zig lib — try platform-specific prebuilt, then generic name
+const ARCH = process.arch === "arm64" ? "arm64" : "x64";
+const PLATFORM = process.platform === "darwin" ? "darwin" : "linux";
+const PLATFORM_LIB = `libcheckpoint_processor.${PLATFORM}-${ARCH}.${suffix}`;
+const GENERIC_LIB = `libcheckpoint_processor.${suffix}`;
 const LIB_PATHS = [
-  join(import.meta.dir, "..", "native", LIB_NAME),
-  join(import.meta.dir, "..", LIB_NAME),
+  join(import.meta.dir, "..", "native", "lib", PLATFORM_LIB),
+  join(import.meta.dir, "..", "native", GENERIC_LIB),
+  join(import.meta.dir, "..", GENERIC_LIB),
 ];
 
 let zigProcess: ((cp: number, cl: number, op: number, oc: number, fp: number, fl: number) => number) | null = null;
