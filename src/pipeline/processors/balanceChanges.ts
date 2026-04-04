@@ -31,7 +31,7 @@ export function createBalanceTracker(config: BalanceTrackerConfig): Processor {
       let changes: BalanceChange[];
 
       // Use pre-computed balance changes from archive worker if available
-      if (checkpoint.precomputedBalanceChanges && checkpoint.precomputedBalanceChanges.length > 0) {
+      if (checkpoint.precomputedBalanceChanges !== undefined) {
         changes = checkpoint.precomputedBalanceChanges;
         return { checkpoint, events: [], balanceChanges: changes, transactions: [], moveCalls: [] };
       }
