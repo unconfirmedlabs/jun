@@ -2117,7 +2117,7 @@ pipelineCmd
   // Processors
   .option("--transaction-blocks", "enable transaction block indexing")
   .option("--coin-type <type...>", "coin types to track balances for (repeatable, or \"*\" for all)")
-  .option("--event <type...>", "Move event types to index (repeatable)")
+  .option("--event-type <type...>", "Move event types to index (repeatable)")
   // Storage
   .option("--sqlite <path>", "write to SQLite database at path")
   .option("--postgres <url>", "write to Postgres database at URL")
@@ -2137,7 +2137,7 @@ pipelineCmd
     network?: string;
     transactionBlocks?: boolean;
     coinType?: string[];
-    event?: string[];
+    eventType?: string[];
     sqlite?: string;
     postgres?: string;
     stdout?: boolean;
@@ -2205,7 +2205,7 @@ pipelineCmd
       }
 
       // Processor overrides
-      if (opts.transactionBlocks || opts.coinType || opts.event) {
+      if (opts.transactionBlocks || opts.coinType || opts.eventType) {
         baseConfig.processors = baseConfig.processors ?? {};
 
         if (opts.transactionBlocks) {
@@ -2217,9 +2217,9 @@ pipelineCmd
           baseConfig.processors.balanceChanges = { coinTypes };
         }
 
-        if (opts.event) {
+        if (opts.eventType) {
           baseConfig.processors.events = baseConfig.processors.events ?? {};
-          for (const eventType of opts.event) {
+          for (const eventType of opts.eventType) {
             // Auto-generate handler name from event type: 0x...::module::Event → module_event
             const parts = eventType.split("::");
             const name = parts.length >= 3
