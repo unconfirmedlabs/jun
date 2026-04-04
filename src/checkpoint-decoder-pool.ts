@@ -202,8 +202,41 @@ export function createCheckpointDecoderPool(
           job.resolve(parseRawOutput(msg.raw, BigInt(msg.seq)));
         } catch (e) {
           const view = new DataView(msg.raw.buffer, msg.raw.byteOffset, msg.raw.byteLength);
-          console.error(`[jun] Zig output parse error at checkpoint ${msg.seq} (${msg.raw.length} bytes)`);
-          console.error(`[jun]   header: numBal=${view.getUint32(0, true)} numEvents=${view.getUint32(4, true)} numTx=${view.getUint32(8, true)} ts=${view.getBigUint64(12, true)}`);
+          const numBal = view.getUint32(0, true);
+          const numEvents = view.getUint32(4, true);
+          const numTx = view.getUint32(8, true);
+          console.error(`[jun] Zig parse error cp:${msg.seq} (${msg.raw.length}B) bal:${numBal} ev:${numEvents} tx:${numTx}`);
+
+          // Dump first transaction to find format mismatch
+          let pos = 20;
+          // Skip balance changes
+          for (let i = 0; i < numBal; i++) {
+            const ownerLen = view.getUint16(pos, true); pos += 2 + ownerLen;
+            const ctLen = view.getUint16(pos, true); pos += 2 + ctLen;
+            pos += 8; // i64 amount
+          }
+          // Dump first tx raw fields
+          if (numTx > 0 && pos < msg.raw.length - 20) {
+            const digestLen = view.getUint16(pos, true);
+            const digestStart = pos + 2;
+            const digest = new TextDecoder().decode(msg.raw.subarray(digestStart, digestStart + digestLen));
+            pos = digestStart + digestLen;
+            const senderLen = view.getUint16(pos, true);
+            pos += 2 + senderLen;
+            const success = view.getUint8(pos); pos += 1;
+            const comp = view.getBigUint64(pos, true); pos += 8;
+            const stor = view.getBigUint64(pos, true); pos += 8;
+            const reb = view.getBigUint64(pos, true); pos += 8;
+            const numTxEv = view.getUint16(pos, true); pos += 2;
+            const numMC = view.getUint16(pos, true); pos += 2;
+            console.error(`[jun]   tx0: digest=${digest.slice(0,20)}.. success=${success} comp=${comp} numEv=${numTxEv} numMC=${numMC}`);
+            // Try first move call
+            if (numMC > 0 && pos < msg.raw.length - 10) {
+              const pkgLen = view.getUint16(pos, true);
+              console.error(`[jun]   mc0: pkgLen=${pkgLen} remaining=${msg.raw.length - pos}B`);
+              if (pkgLen > 1000) console.error(`[jun]   *** pkgLen looks wrong — likely format mismatch ***`);
+            }
+          }
           job.reject(e);
         }
       } else {
