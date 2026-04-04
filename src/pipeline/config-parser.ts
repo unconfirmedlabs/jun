@@ -313,7 +313,7 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
       url,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
-      transactions: !!processorConfig?.transactions,
+      transactions: !!processorConfig?.transactionBlocks,
       deferIndexes: !!storageConfig.deferIndexes,
     }));
   }
@@ -326,7 +326,7 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
       url: `sqlite:${sqlitePath}`,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
-      transactions: !!processorConfig?.transactions,
+      transactions: !!processorConfig?.transactionBlocks,
       deferIndexes: !!storageConfig.deferIndexes,
     }));
   }

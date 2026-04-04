@@ -2262,7 +2262,7 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       const endCp = backfill?.endCheckpoint ?? backfill?.to;
       const enabledProcessors: string[] = [];
       if (baseConfig.processors?.transactionBlocks) enabledProcessors.push("transaction-blocks");
-      if (baseConfig.processors?.balanceChanges) enabledProcessors.push("balance-changes");
+      if (baseConfig.processors?.balances) enabledProcessors.push("balance-changes");
       if (baseConfig.processors?.events) enabledProcessors.push(`events (${Object.keys(baseConfig.processors.events).length} handlers)`);
 
       console.error("");
