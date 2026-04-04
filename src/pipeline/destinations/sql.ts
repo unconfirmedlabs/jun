@@ -423,6 +423,22 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
     },
 
     async shutdown(): Promise<void> {
+      // Materialize balances from balance_changes (snapshot mode)
+      if (driver && snapshotMode && config.balances) {
+        log.info("materializing balances from balance_changes...");
+        const startTime = performance.now();
+        await driver.exec(`
+          INSERT INTO balances (address, coin_type, balance, last_checkpoint)
+          SELECT address, coin_type,
+            CAST(SUM(CAST(amount AS INTEGER)) AS TEXT),
+            CAST(MAX(checkpoint_seq) AS TEXT)
+          FROM balance_changes
+          GROUP BY address, coin_type
+        `);
+        const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+        log.info({ elapsed: `${elapsed}s` }, "balances materialized");
+      }
+
       if (driver && deferredIndexes.length > 0) {
         log.info({ count: deferredIndexes.length }, "creating deferred indexes...");
         const startTime = performance.now();
@@ -473,6 +489,9 @@ async function writeBalanceChangesWithExec(
     `INSERT INTO balance_changes (tx_digest, checkpoint_seq, address, coin_type, amount, sui_timestamp) VALUES ${ledgerRows.join(", ")} ${conflictClause}`,
     ledgerValues,
   );
+
+  // In snapshot mode, skip incremental balance upserts — materialized at shutdown
+  if (snapshotMode) return;
 
   // 2. Aggregate per (address, coinType)
   const aggregated = new Map<string, { address: string; coinType: string; totalAmount: bigint; maxCheckpoint: bigint }>();
