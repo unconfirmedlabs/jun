@@ -34,7 +34,10 @@ import type {
   PipelineConfig,
   ProcessedCheckpoint,
 } from "./types.ts";
+import type { WriterChannel } from "./writer.ts";
 import { createPipelineWriteBuffer, type PipelineWriteBuffer, type PipelineFlushStats } from "./write-buffer.ts";
+import { createSqliteWriterChannel } from "./writers/sqlite.ts";
+import { createPostgresWriterChannel } from "./writers/postgres.ts";
 import { createLogger } from "../logger.ts";
 import type { Logger } from "../logger.ts";
 import { createMetrics, type IndexerMetrics } from "../serve.ts";
@@ -105,10 +108,31 @@ export function createPipeline(): Pipeline {
         }
       }
 
-      // Initialize storage destinations
+      // Wrap storages in WriterChannels
+      const writerChannels: WriterChannel[] = [];
       for (const storage of storages) {
-        await storage.initialize();
-        log.info({ storage: storage.name }, "storage initialized");
+        if (storage.name === "sqlite") {
+          // SQLite: extract config and create a worker-based channel
+          const sqliteConfig = (storage as any)._config;
+          if (sqliteConfig) {
+            const channel = createSqliteWriterChannel(sqliteConfig);
+            writerChannels.push(channel);
+          } else {
+            // Fallback: wrap in postgres-style async channel
+            const channel = createPostgresWriterChannel(storage);
+            writerChannels.push(channel);
+          }
+        } else {
+          // Postgres and others: in-process async channel
+          const channel = createPostgresWriterChannel(storage);
+          writerChannels.push(channel);
+        }
+      }
+
+      // Initialize writer channels (creates tables, etc.)
+      for (const channel of writerChannels) {
+        await channel.initialize();
+        log.info({ channel: channel.name }, "writer channel initialized");
       }
 
       // Initialize broadcast destinations
@@ -168,15 +192,6 @@ export function createPipeline(): Pipeline {
       };
       process.on("SIGINT", shutdownHandler);
       process.on("SIGTERM", shutdownHandler);
-
-      // --- Shared write mutex ---
-      let writeLock: Promise<void> = Promise.resolve();
-      function acquireWriteLock(): Promise<() => void> {
-        let release: () => void;
-        const prev = writeLock;
-        writeLock = new Promise(resolve => { release = resolve; });
-        return prev.then(() => release!);
-      }
 
       // --- HTTP server (worker thread) ---
       let httpWorker: Worker | null = null;
@@ -285,7 +300,7 @@ export function createPipeline(): Pipeline {
         const cursorKey = `${source.name}:${config.network ?? "default"}`;
 
         const buffer = createPipelineWriteBuffer(
-          storages,
+          writerChannels,
           state,
           cursorKey,
           {
@@ -326,7 +341,6 @@ export function createPipeline(): Pipeline {
             },
           },
           log.child({ component: `buffer:${source.name}` }),
-          acquireWriteLock,
         );
 
         buffer.start();
@@ -349,8 +363,17 @@ export function createPipeline(): Pipeline {
         await buffer.stop();
       }
 
-      // Shutdown storages and broadcasts
-      for (const storage of storages) await storage.shutdown();
+      // Drain all writer channels (wait for in-flight writes)
+      for (const channel of writerChannels) {
+        await channel.drain();
+      }
+
+      // Close all writer channels (triggers deferred indexes, materialization)
+      for (const channel of writerChannels) {
+        await channel.close();
+      }
+
+      // Shutdown broadcasts
       for (const broadcast of broadcasts) await broadcast.shutdown();
 
       // Close SQL connection
