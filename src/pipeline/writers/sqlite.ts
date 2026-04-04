@@ -101,7 +101,7 @@ export function createSqliteWriterChannel(config: SqlStorageConfig): WriterChann
       await initPromise;
     },
 
-    async send(batch: SerializedBatch): Promise<void> {
+    async send(batch: SerializedBatch[]): Promise<void> {
       if (!worker) throw new Error("SQLite writer not initialized");
 
       // Backpressure: wait if channel is full

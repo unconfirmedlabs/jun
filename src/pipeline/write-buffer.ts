@@ -118,14 +118,10 @@ export function createPipelineWriteBuffer(
         async () => {
           const start = performance.now();
 
-          // Serialize once, send to all channels
+          // Serialize batch and send to all channels as one message
           const serialized = serializeBatch(batch);
-
-          // Send each serialized checkpoint to all channels
-          for (const sb of serialized) {
-            if (channels.length > 0) {
-              await Promise.all(channels.map(channel => channel.send(sb)));
-            }
+          if (channels.length > 0) {
+            await Promise.all(channels.map(channel => channel.send(serialized)));
           }
 
           // Record processed seqs (for gap detection) — done eagerly since

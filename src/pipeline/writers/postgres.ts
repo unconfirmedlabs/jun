@@ -42,7 +42,7 @@ export function createPostgresWriterChannel(storage: Storage): WriterChannel {
       initialized = true;
     },
 
-    async send(batch: SerializedBatch): Promise<void> {
+    async send(batch: SerializedBatch[]): Promise<void> {
       if (!initialized) throw new Error("Postgres writer not initialized");
 
       // Backpressure: wait if channel is full
@@ -56,7 +56,7 @@ export function createPostgresWriterChannel(storage: Storage): WriterChannel {
       (async () => {
         try {
           const start = performance.now();
-          const processed = deserializeBatch([batch]);
+          const processed = deserializeBatch(batch);
           await storage.write(processed);
           const flushDurationMs = performance.now() - start;
 

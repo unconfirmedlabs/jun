@@ -43,7 +43,7 @@ export interface WriterChannel {
   /** Initialize — create tables, prepare statements. */
   initialize(): Promise<void>;
   /** Send a batch for writing. Blocks (awaits) if channel is full (backpressure). */
-  send(batch: SerializedBatch): Promise<void>;
+  send(batch: SerializedBatch[]): Promise<void>;
   /** Register callback for successful write acknowledgments. */
   onAck(callback: (ack: WriteAck) => void): void;
   /** Wait for all queued batches to be written. */
