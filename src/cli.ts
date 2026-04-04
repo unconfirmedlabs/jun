@@ -2107,10 +2107,24 @@ pipelineCmd
   .option("--config-url <url>", "fetch config from S3 or HTTPS URL")
   .option("--quiet", "suppress human-readable output to stdout")
   .option("--log [level]", "enable JSON logs to stderr (default: info)")
+  .option("--epoch <number>", "backfill a specific completed epoch")
+  .option("--from <checkpoint>", "backfill starting checkpoint")
+  .option("--to <checkpoint>", "backfill ending checkpoint")
+  .option("--archive <url>", "archive base URL")
+  .option("--grpc <url>", "gRPC endpoint URL")
+  .option("--output <path>", "SQLite output path")
+  .option("--network <network>", "network name (mainnet, testnet, devnet)")
   .action(async (configFile: string | undefined, opts: {
     configUrl?: string;
     quiet?: boolean;
     log?: string | boolean;
+    epoch?: string;
+    from?: string;
+    to?: string;
+    archive?: string;
+    grpc?: string;
+    output?: string;
+    network?: string;
   }) => {
     try {
       const { resolve } = await import("path");
@@ -2127,8 +2141,11 @@ pipelineCmd
       } else if (configFile) {
         const { readFileSync } = require("fs");
         yamlContent = readFileSync(resolve(configFile), "utf-8");
+      } else if (opts.epoch || opts.from) {
+        // Generate config entirely from CLI flags
+        yamlContent = "";
       } else {
-        console.error("[jun] error: provide a config file or --config-url");
+        console.error("[jun] error: provide a config file, --config-url, or --epoch/--from flags");
         process.exit(1);
       }
 
@@ -2140,7 +2157,43 @@ pipelineCmd
         process.env.LOG_LEVEL = "silent";
       }
 
-      const { sources, processors, storages, broadcasts, pipelineConfig } = await parsePipelineConfig(yamlContent);
+      // Parse base config, then apply CLI flag overrides
+      const yaml = await import("js-yaml");
+      const baseConfig = yamlContent ? (yaml.load(yamlContent) as Record<string, any>) ?? {} : {};
+
+      // CLI flags override config file
+      const grpcUrl = opts.grpc ?? baseConfig.sources?.live?.grpc ?? "hayabusa.mainnet.unconfirmed.cloud:443";
+      const networkDefaults: Record<string, string> = {
+        mainnet: "https://checkpoints.mainnet.sui.io",
+        testnet: "https://checkpoints.testnet.sui.io",
+        devnet: "https://checkpoints.devnet.sui.io",
+      };
+      const net = opts.network ?? baseConfig.network ?? "mainnet";
+      const archiveUrl = opts.archive ?? baseConfig.sources?.backfill?.archive ?? networkDefaults[net];
+
+      if (opts.epoch || opts.from) {
+        baseConfig.sources = baseConfig.sources ?? {};
+        baseConfig.sources.live = { grpc: grpcUrl };
+        baseConfig.sources.backfill = baseConfig.sources.backfill ?? {};
+        baseConfig.sources.backfill.archive = archiveUrl;
+
+        if (opts.epoch) {
+          baseConfig.sources.backfill.epoch = opts.epoch;
+        } else {
+          if (opts.from) baseConfig.sources.backfill.from = opts.from;
+          if (opts.to) baseConfig.sources.backfill.to = opts.to;
+        }
+      }
+
+      if (opts.output) {
+        baseConfig.storage = baseConfig.storage ?? {};
+        baseConfig.storage.type = "sqlite";
+        baseConfig.storage.path = opts.output;
+      }
+
+      // Re-serialize to YAML for the parser
+      const mergedYaml = yaml.dump(baseConfig);
+      const { sources, processors, storages, broadcasts, pipelineConfig } = await parsePipelineConfig(mergedYaml);
 
       const pipeline = createPipeline();
 
