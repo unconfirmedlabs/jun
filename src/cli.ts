@@ -2275,6 +2275,12 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       if (opts.stdout) console.error(`  broadcast       stdout`);
       if (baseConfig.sources?.concurrency) console.error(`  concurrency     ${baseConfig.sources.concurrency}`);
       if (baseConfig.sources?.workers) console.error(`  workers         ${baseConfig.sources.workers}`);
+      if (baseConfig.sources?.archiveUrl || baseConfig.sources?.epoch || baseConfig.sources?.startCheckpoint) {
+        try {
+          const { isNativeDecoderAvailable } = await import("./checkpoint-decoder-pool.ts");
+          console.error(`  decoder         ${isNativeDecoderAvailable() ? "native (Zig)" : "JavaScript"}`);
+        } catch {}
+      }
       console.error("");
 
       if (!opts.yes) {
