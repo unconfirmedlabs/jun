@@ -92,8 +92,17 @@ export async function fetchPackageModules(
   packageId: string,
   network: Network = "mainnet",
 ): Promise<MoveModule[]> {
-  const client = getClient(network);
+  return fetchPackageModulesWithClient(getClient(network), packageId);
+}
 
+/**
+ * Fetch all modules using an existing SuiGrpcClient.
+ * Use this when you already have a client (e.g. in browser apps).
+ */
+export async function fetchPackageModulesWithClient(
+  client: SuiGrpcClient,
+  packageId: string,
+): Promise<MoveModule[]> {
   const { object } = await client.core.getObject({
     objectId: packageId,
     include: { objectBcs: true },
