@@ -120,6 +120,7 @@ export function defaultWorkerCount(): number {
 export function createCheckpointDecoderPool(
   size: number,
   balanceCoinTypes?: string[] | "*",
+  needsTransactions = false,
 ): CheckpointDecoderPool {
   // Serialize coin types for worker messages: null = disabled, [] = all (*), [...] = specific types
   const workerBalanceCoinTypes: string[] | null = balanceCoinTypes === undefined
@@ -180,7 +181,7 @@ export function createCheckpointDecoderPool(
         // Round-robin assignment
         const worker = workers[id % size]!;
         worker.postMessage(
-          { id, seq: seq.toString(), compressed, balanceCoinTypes: workerBalanceCoinTypes },
+          { id, seq: seq.toString(), compressed, balanceCoinTypes: workerBalanceCoinTypes, needsTransactions },
           [compressed.buffer],
         );
       });

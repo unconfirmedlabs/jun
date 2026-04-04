@@ -70,18 +70,20 @@ function encodeFilter(balanceCoinTypes: string[] | null): void {
 declare var self: Worker;
 
 self.onmessage = async (event: MessageEvent) => {
-  const { id, seq, compressed, balanceCoinTypes } = event.data as {
+  const { id, seq, compressed, balanceCoinTypes, needsTransactions } = event.data as {
     id: number;
     seq: string;
     compressed: Uint8Array;
     balanceCoinTypes: string[] | null;
+    needsTransactions?: boolean;
   };
 
   try {
     const compressedBytes = new Uint8Array(compressed);
 
     // --- Native path: Zig processes, transfer raw output bytes ---
-    if (zigProcess) {
+    // Skip native path when transactions are needed (Zig output doesn't include per-tx data)
+    if (zigProcess && !needsTransactions) {
       encodeFilter(balanceCoinTypes);
 
       const bytesWritten = zigProcess(

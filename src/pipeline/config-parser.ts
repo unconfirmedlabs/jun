@@ -377,6 +377,7 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
       balanceCoinTypes: config.processors?.balances?.coinTypes === "*"
         ? "*"
         : config.processors?.balances?.coinTypes?.map((coinType: string) => normalizeCoinType(coinType)),
+      needsTransactions: !!config.processors?.transactionBlocks,
     }));
   }
 

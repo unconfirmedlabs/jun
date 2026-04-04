@@ -38,6 +38,8 @@ export interface ArchiveSourceConfig {
   balanceCoinTypes?: string[] | "*";
   /** gRPC URL for fetching latest checkpoint */
   grpcUrl?: string;
+  /** Whether transaction-level data is needed (disables Zig fast path) */
+  needsTransactions?: boolean;
 }
 
 export function createArchiveSource(config: ArchiveSourceConfig): Source {
@@ -53,7 +55,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
       const workerCount = config.workers ?? Math.max(1, Math.min(4, (navigator.hardwareConcurrency ?? 4) - 1));
       const balanceCoinTypes = config.balanceCoinTypes;
 
-      decoderPool = createCheckpointDecoderPool(workerCount, balanceCoinTypes);
+      decoderPool = createCheckpointDecoderPool(workerCount, balanceCoinTypes, config.needsTransactions ?? false);
       log.info({ workers: workerCount, fetchConcurrency, from: config.from.toString() }, "archive source starting");
 
       // Determine upper bound
