@@ -84,13 +84,14 @@ function readOutput(bytesWritten: number, checkpointSeq: bigint): ProcessedResul
 
   if (bytesWritten === 0 || bytesWritten < 16) return null;
 
-  // Read header (16 bytes)
+  // Read header (20 bytes)
   const numBalances = outputView.getUint32(0, true);
   const numEvents = outputView.getUint32(4, true);
-  const timestampMs = Number(outputView.getBigUint64(8, true));
+  const numTransactions = outputView.getUint32(8, true);
+  const timestampMs = Number(outputView.getBigUint64(12, true));
   const timestamp = new Date(timestampMs);
 
-  let pos = 16;
+  let pos = 20;
 
   // Read balance changes
   const balanceChanges: BalanceChange[] = new Array(numBalances);
@@ -109,6 +110,21 @@ function readOutput(bytesWritten: number, checkpointSeq: bigint): ProcessedResul
       amount: amount.toString(),
       timestamp,
     };
+  }
+
+  // Skip transactions (native main-thread helper does not surface them yet)
+  for (let i = 0; i < numTransactions; i++) {
+    const digestLen = outputView.getUint16(pos, true); pos += 2 + digestLen;
+    const senderLen = outputView.getUint16(pos, true); pos += 2 + senderLen;
+    pos += 1 + 8 + 8 + 8; // success + costs
+    const numTxEvents = outputView.getUint16(pos, true); pos += 2;
+    const numMoveCalls = outputView.getUint16(pos, true); pos += 2;
+    for (let j = 0; j < numMoveCalls; j++) {
+      const pkgLen = outputView.getUint16(pos, true); pos += 2 + pkgLen;
+      const modLen = outputView.getUint16(pos, true); pos += 2 + modLen;
+      const fnLen = outputView.getUint16(pos, true); pos += 2 + fnLen;
+    }
+    void numTxEvents;
   }
 
   // Read events

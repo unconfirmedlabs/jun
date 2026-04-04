@@ -1,19 +1,34 @@
 // Unified checkpoint processor — single Zig FFI call from compressed bytes to
-// fully decoded balance changes + events.
+// fully decoded balance changes + transactions + events.
 //
 // Entry points:
-//   process_checkpoint_compressed — compressed bytes → balance changes + events (main)
+//   process_checkpoint_compressed — compressed bytes → balance changes + transactions + events (main)
 //   compute_balance_changes       — decompressed proto → balance changes only (legacy)
 //   compute_balance_changes_compressed — compressed → balance changes only (legacy)
 //
 // Output format for process_checkpoint_compressed:
-//   u32 num_changes
-//   Per change:
-//     u16 owner_len (always 66)
-//     [66]u8 owner ("0x" + 64 hex)
-//     u16 coinType_len
-//     [N]u8 coinType
-//     i64 amount
+//   u32 num_balance_changes
+//   u32 num_events
+//   u32 num_transactions
+//   u64 timestamp_ms
+//   Balance changes:
+//     u16 owner_len + owner + u16 coinType_len + coinType + i64 amount
+//   Transactions:
+//     u16 digest_len + digest(base58)
+//     u16 sender_len + sender(hex)
+//     u8 success
+//     u64 computation_cost
+//     u64 storage_cost
+//     u64 storage_rebate
+//     u16 num_events
+//     u16 num_move_calls
+//     Move calls:
+//       u16 package_len + package(hex)
+//       u16 module_len + module
+//       u16 function_len + function
+//   Events:
+//     u16 package_len + package + u16 module_len + module + u16 sender_len + sender
+//     + u16 event_type_len + event_type + u32 contents_len + contents
 
 const std = @import("std");
 
@@ -29,6 +44,7 @@ const MAX_CREATED: u32 = 4096;
 const MAX_DELETED: u32 = 4096;
 const MAX_AGG: u32 = 4096;
 const SCRATCH_SIZE: u32 = 512 * 1024;
+const BASE58_ALPHABET: [58]u8 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".*;
 
 // --- Protobuf primitives ---
 
@@ -168,6 +184,142 @@ fn skipOwner(buf: []const u8, pos: u32) ?u32 {
     };
 }
 
+fn skipOptionU64(buf: []const u8, pos: u32) ?u32 {
+    if (pos >= buf.len) return null;
+    return switch (buf[pos]) {
+        0 => pos + 1,
+        1 => if (pos + 9 <= buf.len) pos + 9 else null,
+        else => null,
+    };
+}
+
+fn skipOptionString(buf: []const u8, pos: u32) ?u32 {
+    if (pos >= buf.len) return null;
+    return switch (buf[pos]) {
+        0 => pos + 1,
+        1 => blk: {
+            const s = readBcsStr(buf, pos + 1) orelse break :blk null;
+            break :blk s.end;
+        },
+        else => null,
+    };
+}
+
+fn skipVecVecU8(buf: []const u8, pos: u32) ?u32 {
+    const cnt = readUleb(buf, pos) orelse return null;
+    var p = cnt.end;
+    for (0..cnt.val) |_| p = skipVecU8(buf, p) orelse return null;
+    return p;
+}
+
+fn skipVecAddresses(buf: []const u8, pos: u32) ?u32 {
+    const cnt = readUleb(buf, pos) orelse return null;
+    const bytes = cnt.val * 32;
+    return if (cnt.end + bytes <= buf.len) cnt.end + bytes else null;
+}
+
+fn skipObjectDigestVec(buf: []const u8, pos: u32) ?u32 {
+    return skipVecU8(buf, pos);
+}
+
+fn skipSuiObjectRef(buf: []const u8, pos: u32) ?u32 {
+    var p = pos;
+    if (p + 32 + 8 > buf.len) return null;
+    p += 32; // object id
+    p += 8; // version
+    p = skipVecU8(buf, p) orelse return null; // digest
+    return p;
+}
+
+fn skipSharedObjectRef(buf: []const u8, pos: u32) ?u32 {
+    return if (pos + 32 + 8 + 1 <= buf.len) pos + 41 else null;
+}
+
+fn skipObjectArg(buf: []const u8, pos: u32) ?u32 {
+    const tag = readUleb(buf, pos) orelse return null;
+    const p = tag.end;
+    return switch (tag.val) {
+        0, 2 => skipSuiObjectRef(buf, p),
+        1 => skipSharedObjectRef(buf, p),
+        else => null,
+    };
+}
+
+fn skipFundsWithdrawal(buf: []const u8, pos: u32) ?u32 {
+    var p = pos;
+
+    // Reservation enum
+    const reservation = readUleb(buf, p) orelse return null;
+    p = reservation.end;
+    if (reservation.val != 0 or p + 8 > buf.len) return null;
+    p += 8;
+
+    // WithdrawalType enum
+    const withdrawal_type = readUleb(buf, p) orelse return null;
+    p = withdrawal_type.end;
+    if (withdrawal_type.val != 0) return null;
+    p = skipBcsTypeTag(buf, p) orelse return null;
+
+    // WithdrawFrom enum (null variants only)
+    const withdraw_from = readUleb(buf, p) orelse return null;
+    if (withdraw_from.val > 1) return null;
+    return withdraw_from.end;
+}
+
+fn skipCallArg(buf: []const u8, pos: u32) ?u32 {
+    const tag = readUleb(buf, pos) orelse return null;
+    const p = tag.end;
+    return switch (tag.val) {
+        0 => blk: {
+            const pure = readBcsStr(buf, p) orelse break :blk null;
+            break :blk pure.end;
+        },
+        1 => skipObjectArg(buf, p),
+        2 => skipFundsWithdrawal(buf, p),
+        else => null,
+    };
+}
+
+fn skipVecCallArgs(buf: []const u8, pos: u32) ?u32 {
+    const cnt = readUleb(buf, pos) orelse return null;
+    var p = cnt.end;
+    for (0..cnt.val) |_| p = skipCallArg(buf, p) orelse return null;
+    return p;
+}
+
+fn skipArgument(buf: []const u8, pos: u32) ?u32 {
+    const tag = readUleb(buf, pos) orelse return null;
+    return switch (tag.val) {
+        0 => tag.end,
+        1, 2 => if (tag.end + 2 <= buf.len) tag.end + 2 else null,
+        3 => if (tag.end + 4 <= buf.len) tag.end + 4 else null,
+        else => null,
+    };
+}
+
+fn skipVecArguments(buf: []const u8, pos: u32) ?u32 {
+    const cnt = readUleb(buf, pos) orelse return null;
+    var p = cnt.end;
+    for (0..cnt.val) |_| p = skipArgument(buf, p) orelse return null;
+    return p;
+}
+
+fn skipVecTypeTags(buf: []const u8, pos: u32) ?u32 {
+    const cnt = readUleb(buf, pos) orelse return null;
+    var p = cnt.end;
+    for (0..cnt.val) |_| p = skipBcsTypeTag(buf, p) orelse return null;
+    return p;
+}
+
+fn skipOptionTypeTag(buf: []const u8, pos: u32) ?u32 {
+    const tag = readUleb(buf, pos) orelse return null;
+    return switch (tag.val) {
+        0 => tag.end,
+        1 => skipBcsTypeTag(buf, tag.end),
+        else => null,
+    };
+}
+
 // --- Hex encoding ---
 
 fn bytesToHex(raw: []const u8, out: []u8) void {
@@ -196,6 +348,39 @@ fn hexVal(c: u8) ?u4 {
     if (c >= 'a' and c <= 'f') return @intCast(c - 'a' + 10);
     if (c >= 'A' and c <= 'F') return @intCast(c - 'A' + 10);
     return null;
+}
+
+fn base58Encode(raw: []const u8, out: []u8) ?u16 {
+    if (raw.len == 0) return 0;
+
+    var digits: [64]u8 = [_]u8{0} ** 64;
+    var digits_len: usize = 1;
+
+    for (raw) |byte| {
+        var carry: u32 = byte;
+        var i: usize = 0;
+        while (i < digits_len) : (i += 1) {
+            carry += @as(u32, digits[i]) * 256;
+            digits[i] = @intCast(carry % 58);
+            carry /= 58;
+        }
+        while (carry > 0) {
+            if (digits_len >= digits.len) return null;
+            digits[digits_len] = @intCast(carry % 58);
+            digits_len += 1;
+            carry /= 58;
+        }
+    }
+
+    var leading_zeroes: usize = 0;
+    while (leading_zeroes < raw.len and raw[leading_zeroes] == 0) : (leading_zeroes += 1) {}
+
+    const total_len = leading_zeroes + digits_len;
+    if (total_len > out.len) return null;
+
+    for (0..leading_zeroes) |i| out[i] = '1';
+    for (0..digits_len) |i| out[total_len - 1 - i] = BASE58_ALPHABET[digits[i]];
+    return @intCast(total_len);
 }
 
 // --- BCS string reader ---
@@ -792,6 +977,13 @@ fn parseEventsToOutput(buf: []const u8, events_off: u32, events_len: u32, w: *Ou
     return event_count;
 }
 
+fn countEventsInSlice(buf: []const u8, events_off: u32, events_len: u32) u16 {
+    if (events_len == 0) return 0;
+    const raw = buf[events_off .. events_off + events_len];
+    const cnt = readUleb(raw, 0) orelse return 0;
+    return @intCast(@min(cnt.val, std.math.maxInt(u16)));
+}
+
 // --- Output writer (for the unified entry point) ---
 
 const OutputWriter = struct {
@@ -808,6 +1000,16 @@ const OutputWriter = struct {
         std.mem.writeInt(u32, self.buf[self.pos..][0..4], v, .little);
         self.pos += 4;
     }
+    fn writeU64(self: *OutputWriter, v: u64) void {
+        if (self.pos + 8 > self.buf.len) return;
+        std.mem.writeInt(u64, self.buf[self.pos..][0..8], v, .little);
+        self.pos += 8;
+    }
+    fn writeU8(self: *OutputWriter, v: u8) void {
+        if (self.pos + 1 > self.buf.len) return;
+        self.buf[self.pos] = v;
+        self.pos += 1;
+    }
     fn writeI64(self: *OutputWriter, v: i64) void {
         if (self.pos + 8 > self.buf.len) return;
         std.mem.writeInt(i64, self.buf[self.pos..][0..8], v, .little);
@@ -820,13 +1022,327 @@ const OutputWriter = struct {
     }
 };
 
+const TxEntry = struct {
+    eff_off: u32 = 0,
+    eff_len: u32 = 0,
+    evt_off: u32 = 0,
+    evt_len: u32 = 0,
+    tx_off: u32 = 0,
+    tx_len: u32 = 0,
+};
+
+const TxEffectsMeta = struct {
+    digest_len: u16 = 0,
+    digest: [64]u8 = undefined,
+    success: bool = true,
+    computation_cost: u64 = 0,
+    storage_cost: u64 = 0,
+    storage_rebate: u64 = 0,
+};
+
+const TxDataMeta = struct {
+    sender_len: u16 = 0,
+    sender: [66]u8 = undefined,
+    move_call_count: u16 = 0,
+    move_calls_len: u32 = 0,
+};
+
+fn skipSystemPackages(buf: []const u8, pos: u32) ?u32 {
+    const cnt = readUleb(buf, pos) orelse return null;
+    var p = cnt.end;
+    for (0..cnt.val) |_| {
+        if (p + 8 > buf.len) return null;
+        p += 8;
+        p = skipVecVecU8(buf, p) orelse return null;
+        p = skipVecAddresses(buf, p) orelse return null;
+    }
+    return p;
+}
+
+fn skipActiveJwk(buf: []const u8, pos: u32) ?u32 {
+    var p = pos;
+    const iss = readBcsStr(buf, p) orelse return null;
+    p = iss.end;
+    const kid = readBcsStr(buf, p) orelse return null;
+    p = kid.end;
+    const kty = readBcsStr(buf, p) orelse return null;
+    p = kty.end;
+    const e = readBcsStr(buf, p) orelse return null;
+    p = e.end;
+    const n = readBcsStr(buf, p) orelse return null;
+    p = n.end;
+    const alg = readBcsStr(buf, p) orelse return null;
+    p = alg.end;
+    return if (p + 8 <= buf.len) p + 8 else null;
+}
+
+fn skipAuthenticatorStateUpdate(buf: []const u8, pos: u32) ?u32 {
+    var p = pos;
+    if (p + 16 > buf.len) return null;
+    p += 16;
+    const cnt = readUleb(buf, p) orelse return null;
+    p = cnt.end;
+    for (0..cnt.val) |_| p = skipActiveJwk(buf, p) orelse return null;
+    return if (p + 8 <= buf.len) p + 8 else null;
+}
+
+fn skipStoredExecutionTimeObservations(buf: []const u8, pos: u32) ?u32 {
+    const tag = readUleb(buf, pos) orelse return null;
+    if (tag.val != 0) return null;
+    var p = tag.end;
+    const outer = readUleb(buf, p) orelse return null;
+    p = outer.end;
+    for (0..outer.val) |_| {
+        if (p + 2 > buf.len) return null;
+        p += 2;
+        const inner = readUleb(buf, p) orelse return null;
+        p = inner.end;
+        for (0..inner.val) |_| {
+            if (p + 32 + 8 + 4 > buf.len) return null;
+            p += 44;
+        }
+    }
+    return p;
+}
+
+fn skipEndOfEpochTxKind(buf: []const u8, pos: u32) ?u32 {
+    const tag = readUleb(buf, pos) orelse return null;
+    var p = tag.end;
+    return switch (tag.val) {
+        0 => blk: {
+            if (p + 56 > buf.len) break :blk null;
+            p += 56;
+            break :blk skipSystemPackages(buf, p);
+        },
+        1, 3, 4, 8, 9, 10 => p,
+        2 => if (p + 16 <= buf.len) p + 16 else null,
+        5 => skipVecU8(buf, p),
+        6 => if (p + 8 <= buf.len) p + 8 else null,
+        7 => skipStoredExecutionTimeObservations(buf, p),
+        else => null,
+    };
+}
+
+fn skipConsensusDeterminedVersionAssignments(buf: []const u8, pos: u32) ?u32 {
+    const tag = readUleb(buf, pos) orelse return null;
+    var p = tag.end;
+    const outer = readUleb(buf, p) orelse return null;
+    p = outer.end;
+    return switch (tag.val) {
+        0 => blk: {
+            for (0..outer.val) |_| {
+                if (p + 32 > buf.len) break :blk null;
+                p += 32;
+                const inner = readUleb(buf, p) orelse break :blk null;
+                p = inner.end;
+                for (0..inner.val) |_| {
+                    if (p + 32 + 8 > buf.len) break :blk null;
+                    p += 40;
+                }
+            }
+            break :blk p;
+        },
+        1 => blk: {
+            for (0..outer.val) |_| {
+                if (p + 32 > buf.len) break :blk null;
+                p += 32;
+                const inner = readUleb(buf, p) orelse break :blk null;
+                p = inner.end;
+                for (0..inner.val) |_| {
+                    if (p + 32 + 8 + 8 > buf.len) break :blk null;
+                    p += 48;
+                }
+            }
+            break :blk p;
+        },
+        else => null,
+    };
+}
+
+fn writeMoveCall(buf: []const u8, package: []const u8, module: []const u8, function_name: []const u8, w: *OutputWriter) void {
+    var package_hex: [66]u8 = undefined;
+    bytesToHex(package[0..32], &package_hex);
+    w.writeU16(66);
+    w.writeBytes(&package_hex);
+    w.writeU16(@intCast(module.len));
+    w.writeBytes(module);
+    w.writeU16(@intCast(function_name.len));
+    w.writeBytes(function_name);
+    _ = buf;
+}
+
+fn parseCommandsToOutput(buf: []const u8, pos: u32, w: *OutputWriter, move_call_count: *u16) ?u32 {
+    const cnt = readUleb(buf, pos) orelse return null;
+    var p = cnt.end;
+    for (0..cnt.val) |_| {
+        const tag = readUleb(buf, p) orelse return null;
+        p = tag.end;
+        switch (tag.val) {
+            0 => { // MoveCall
+                if (p + 32 > buf.len) return null;
+                const package = buf[p .. p + 32];
+                p += 32;
+                const module = readBcsStr(buf, p) orelse return null;
+                p = module.end;
+                const function_name = readBcsStr(buf, p) orelse return null;
+                p = function_name.end;
+                p = skipVecTypeTags(buf, p) orelse return null;
+                p = skipVecArguments(buf, p) orelse return null;
+                writeMoveCall(buf, package, buf[module.off .. module.off + module.len], buf[function_name.off .. function_name.off + function_name.len], w);
+                if (move_call_count.* < std.math.maxInt(u16)) move_call_count.* += 1;
+            },
+            1 => { // TransferObjects
+                p = skipVecArguments(buf, p) orelse return null;
+                p = skipArgument(buf, p) orelse return null;
+            },
+            2 => { // SplitCoins
+                p = skipArgument(buf, p) orelse return null;
+                p = skipVecArguments(buf, p) orelse return null;
+            },
+            3 => { // MergeCoins
+                p = skipArgument(buf, p) orelse return null;
+                p = skipVecArguments(buf, p) orelse return null;
+            },
+            4 => { // Publish
+                p = skipVecVecU8(buf, p) orelse return null;
+                p = skipVecAddresses(buf, p) orelse return null;
+            },
+            5 => { // MakeMoveVec
+                p = skipOptionTypeTag(buf, p) orelse return null;
+                p = skipVecArguments(buf, p) orelse return null;
+            },
+            6 => { // Upgrade
+                p = skipVecVecU8(buf, p) orelse return null;
+                p = skipVecAddresses(buf, p) orelse return null;
+                if (p + 32 > buf.len) return null;
+                p += 32;
+                p = skipArgument(buf, p) orelse return null;
+            },
+            else => return null,
+        }
+    }
+    return p;
+}
+
+fn parseTransactionKindToOutput(buf: []const u8, pos: u32, w: *OutputWriter, move_call_count: *u16) ?u32 {
+    const tag = readUleb(buf, pos) orelse return null;
+    var p = tag.end;
+    return switch (tag.val) {
+        0, 10 => blk: { // ProgrammableTransaction / ProgrammableSystemTransaction
+            p = skipVecCallArgs(buf, p) orelse break :blk null;
+            break :blk parseCommandsToOutput(buf, p, w, move_call_count);
+        },
+        1 => blk: { // ChangeEpoch
+            if (p + 56 > buf.len) break :blk null;
+            p += 56;
+            break :blk skipSystemPackages(buf, p);
+        },
+        2 => null, // Genesis unsupported in fast path
+        3 => if (p + 24 <= buf.len) p + 24 else null,
+        4 => skipAuthenticatorStateUpdate(buf, p),
+        5 => blk: { // EndOfEpochTransaction
+            const cnt = readUleb(buf, p) orelse break :blk null;
+            p = cnt.end;
+            for (0..cnt.val) |_| p = skipEndOfEpochTxKind(buf, p) orelse break :blk null;
+            break :blk p;
+        },
+        6 => blk: { // RandomnessStateUpdate
+            if (p + 16 > buf.len) break :blk null;
+            p += 16;
+            p = skipVecU8(buf, p) orelse break :blk null;
+            break :blk if (p + 8 <= buf.len) p + 8 else null;
+        },
+        7 => blk: { // ConsensusCommitPrologueV2
+            if (p + 24 > buf.len) break :blk null;
+            p += 24;
+            break :blk skipVecU8(buf, p);
+        },
+        8 => blk: { // ConsensusCommitPrologueV3
+            if (p + 16 > buf.len) break :blk null;
+            p += 16;
+            p = skipOptionU64(buf, p) orelse break :blk null;
+            if (p + 8 > buf.len) break :blk null;
+            p += 8;
+            p = skipVecU8(buf, p) orelse break :blk null;
+            break :blk skipConsensusDeterminedVersionAssignments(buf, p);
+        },
+        9 => blk: { // ConsensusCommitPrologueV4
+            if (p + 16 > buf.len) break :blk null;
+            p += 16;
+            p = skipOptionU64(buf, p) orelse break :blk null;
+            if (p + 8 > buf.len) break :blk null;
+            p += 8;
+            p = skipVecU8(buf, p) orelse break :blk null;
+            p = skipConsensusDeterminedVersionAssignments(buf, p) orelse break :blk null;
+            break :blk skipVecU8(buf, p);
+        },
+        else => null,
+    };
+}
+
+fn parseTxDataMeta(buf: []const u8, tx_off: u32, tx_len: u32, move_calls_out: *OutputWriter) TxDataMeta {
+    var meta = TxDataMeta{};
+    if (tx_len == 0) return meta;
+
+    const raw = buf[tx_off .. tx_off + tx_len];
+    const version = readUleb(raw, 0) orelse return meta;
+    if (version.val != 0) return meta;
+
+    const p = parseTransactionKindToOutput(raw, version.end, move_calls_out, &meta.move_call_count) orelse return meta;
+    if (p + 32 > raw.len) return meta;
+
+    bytesToHex(raw[p .. p + 32], &meta.sender);
+    meta.sender_len = 66;
+    meta.move_calls_len = move_calls_out.pos;
+    return meta;
+}
+
+fn parseTxEffectsMeta(buf: []const u8, eff_off: u32, eff_len: u32) TxEffectsMeta {
+    var meta = TxEffectsMeta{};
+    if (eff_len == 0) return meta;
+
+    const raw = buf[eff_off .. eff_off + eff_len];
+    if (raw.len < 2) return meta;
+
+    if (raw[0] == 1) { // V2
+        var p: u32 = 1;
+        meta.success = raw[p] == 0;
+        p += 1;
+        if (!meta.success) {
+            p = skipExecutionFailureStatus(raw, p) orelse return meta;
+            p = skipOptionU64(raw, p) orelse return meta;
+        }
+
+        if (p + 8 + 32 > raw.len) return meta;
+        p += 8; // executedEpoch
+        meta.computation_cost = std.mem.readInt(u64, raw[p..][0..8], .little);
+        meta.storage_cost = std.mem.readInt(u64, raw[p + 8 ..][0..8], .little);
+        meta.storage_rebate = std.mem.readInt(u64, raw[p + 16 ..][0..8], .little);
+        p += 32;
+
+        const digest = readBcsStr(raw, p) orelse return meta;
+        meta.digest_len = base58Encode(raw[digest.off .. digest.off + digest.len], &meta.digest) orelse 0;
+        return meta;
+    }
+
+    return meta;
+}
+
 // --- Core processing logic ---
-// Output format (16-byte header + balance changes + events):
+// Output format (20-byte header + balance changes + transactions + events):
 //   u32 num_balance_changes
 //   u32 num_events
+//   u32 num_transactions
 //   u64 timestamp_ms
-//   Balance changes:
-//     Per change: u16 owner_len + owner + u16 coinType_len + coinType + i64 amount
+//   Balance changes: u16 owner_len + owner + u16 coinType_len + coinType + i64 amount
+//   Transactions:
+//     u16 digest_len + digest
+//     u16 sender_len + sender
+//     u8 success
+//     u64 computation_cost + u64 storage_cost + u64 storage_rebate
+//     u16 num_events
+//     u16 num_move_calls
+//     Move calls: u16 package_len + package + u16 module_len + module + u16 function_len + function
 //   Events:
 //     Per event: u16 packageId_len + packageId + u16 module_len + module
 //              + u16 sender_len + sender + u16 eventType_len + eventType
@@ -853,11 +1369,9 @@ fn processInternal(
     for (&TLS.agg) |*e| e.occupied = false;
     var scratch = Scratch{ .buf = &TLS.scratch_buf, .pos = 0 };
 
-    // Proto scan: extract effects, events, objects, summary
-    var eff_slices: [MAX_TX]struct { off: u32, len: u32 } = undefined;
-    var num_eff: u32 = 0;
-    var evt_slices: [MAX_TX]struct { off: u32, len: u32 } = undefined;
-    var num_evt: u32 = 0;
+    // Proto scan: extract per-transaction BCS slices, objects, summary
+    var tx_entries: [MAX_TX]TxEntry = undefined;
+    var num_tx: u32 = 0;
     var obj_entries: [MAX_OBJECTS]struct { bcs_off: u32, bcs_len: u32, id_off: u32, id_len: u32, version: u64 } = undefined;
     var num_obj: u32 = 0;
     var summary_bcs_off: u32 = 0;
@@ -880,6 +1394,8 @@ fn processInternal(
                     summary_bcs_len = s.len;
                 }
             } else if (fn_ == 6) { // transaction
+                if (num_tx >= MAX_TX) continue;
+                var tx_entry = TxEntry{};
                 const txend = ld.off + ld.len;
                 var tp = ld.off;
                 while (tp < txend) {
@@ -889,19 +1405,28 @@ fn processInternal(
                         const tld = readLen(buf, tp) orelse return 0;
                         tp = tld.end;
                         const tfn: u32 = @intCast(tt.val >> 3);
-                        if (tfn == 4) { // effects
+                        if (tfn == 2) { // transaction
                             if (bcsWrapper(buf, tld.off, tld.len)) |s| {
-                                if (num_eff < MAX_TX) { eff_slices[num_eff] = .{ .off = s.off, .len = s.len }; num_eff += 1; }
+                                tx_entry.tx_off = s.off;
+                                tx_entry.tx_len = s.len;
+                            }
+                        } else if (tfn == 4) { // effects
+                            if (bcsWrapper(buf, tld.off, tld.len)) |s| {
+                                tx_entry.eff_off = s.off;
+                                tx_entry.eff_len = s.len;
                             }
                         } else if (tfn == 5) { // events
                             if (bcsWrapper(buf, tld.off, tld.len)) |s| {
-                                if (num_evt < MAX_TX) { evt_slices[num_evt] = .{ .off = s.off, .len = s.len }; num_evt += 1; }
+                                tx_entry.evt_off = s.off;
+                                tx_entry.evt_len = s.len;
                             }
                         }
                     } else {
                         tp = skipPbField(buf, tp, @intCast(tt.val & 7)) orelse return 0;
                     }
                 }
+                tx_entries[num_tx] = tx_entry;
+                num_tx += 1;
             } else if (fn_ == 7) { // objects
                 const oend = ld.off + ld.len;
                 var op = ld.off;
@@ -962,8 +1487,10 @@ fn processInternal(
     }
 
     // Phase 2: Parse effects (balance computation)
-    for (0..num_eff) |i| {
-        if (!parseEffects(buf, eff_slices[i].off, eff_slices[i].len, &TLS.created, &created_n, &TLS.deleted, &deleted_n, &TLS.agg, &scratch)) return 0;
+    for (0..num_tx) |i| {
+        const tx_entry = tx_entries[i];
+        if (tx_entry.eff_len == 0) continue;
+        if (!parseEffects(buf, tx_entry.eff_off, tx_entry.eff_len, &TLS.created, &created_n, &TLS.deleted, &deleted_n, &TLS.agg, &scratch)) return 0;
     }
 
     // Phase 3: Parse coin objects
@@ -1008,7 +1535,15 @@ fn processInternal(
     }
 
     // Phase 5: Write output
-    var w = OutputWriter{ .buf = out, .pos = 16 }; // skip header (4+4+8 = 16)
+    var total_events: u32 = 0;
+    var tx_event_counts: [MAX_TX]u16 = [_]u16{0} ** MAX_TX;
+    for (0..num_tx) |i| {
+        const event_count = countEventsInSlice(buf, tx_entries[i].evt_off, tx_entries[i].evt_len);
+        tx_event_counts[i] = event_count;
+        total_events += event_count;
+    }
+
+    var w = OutputWriter{ .buf = out, .pos = 20 }; // skip header (4+4+4+8 = 20)
 
     // Write balance changes
     var bal_count: u32 = 0;
@@ -1026,16 +1561,38 @@ fn processInternal(
         bal_count += 1;
     }
 
-    // Write events
-    var total_events: u32 = 0;
-    for (0..num_evt) |i| {
-        total_events += parseEventsToOutput(buf, evt_slices[i].off, evt_slices[i].len, &w);
+    // Write transactions
+    const TxTLS = struct {
+        threadlocal var move_call_buf: [64 * 1024]u8 = undefined;
+    };
+    for (0..num_tx) |i| {
+        var move_writer = OutputWriter{ .buf = &TxTLS.move_call_buf, .pos = 0 };
+        const tx_data = parseTxDataMeta(buf, tx_entries[i].tx_off, tx_entries[i].tx_len, &move_writer);
+        const tx_effects = parseTxEffectsMeta(buf, tx_entries[i].eff_off, tx_entries[i].eff_len);
+
+        w.writeU16(tx_effects.digest_len);
+        w.writeBytes(tx_effects.digest[0..tx_effects.digest_len]);
+        w.writeU16(tx_data.sender_len);
+        w.writeBytes(tx_data.sender[0..tx_data.sender_len]);
+        w.writeU8(if (tx_effects.success) 1 else 0);
+        w.writeU64(tx_effects.computation_cost);
+        w.writeU64(tx_effects.storage_cost);
+        w.writeU64(tx_effects.storage_rebate);
+        w.writeU16(tx_event_counts[i]);
+        w.writeU16(tx_data.move_call_count);
+        w.writeBytes(TxTLS.move_call_buf[0..tx_data.move_calls_len]);
     }
 
-    // Write header (16 bytes: u32 + u32 + u64)
+    // Write events
+    for (0..num_tx) |i| {
+        _ = parseEventsToOutput(buf, tx_entries[i].evt_off, tx_entries[i].evt_len, &w);
+    }
+
+    // Write header (20 bytes: u32 + u32 + u32 + u64)
     std.mem.writeInt(u32, out[0..4], bal_count, .little);
     std.mem.writeInt(u32, out[4..8], total_events, .little);
-    std.mem.writeInt(u64, out[8..16], timestamp_ms, .little);
+    std.mem.writeInt(u32, out[8..12], num_tx, .little);
+    std.mem.writeInt(u64, out[12..20], timestamp_ms, .little);
 
     return w.pos;
 }

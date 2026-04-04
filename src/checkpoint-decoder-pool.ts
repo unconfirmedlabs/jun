@@ -48,18 +48,19 @@ function readStr(buf: Uint8Array, pos: number, len: number): string {
   return textDecoder.decode(buf.subarray(pos, pos + len));
 }
 
-function parseRawOutput(raw: Uint8Array): DecodeResult {
+function parseRawOutput(raw: Uint8Array, checkpointSeq: bigint): DecodeResult {
   const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
 
-  // Header: u32 numBal + u32 numEvents + u64 timestampMs
+  // Header: u32 numBal + u32 numEvents + u32 numTransactions + u64 timestampMs
   const numBal = view.getUint32(0, true);
   const numEvents = view.getUint32(4, true);
-  const timestampMs = Number(view.getBigUint64(8, true));
+  const numTransactions = view.getUint32(8, true);
+  const timestampMs = Number(view.getBigUint64(12, true));
   const timestamp = new Date(timestampMs);
   const seconds = String(Math.floor(timestampMs / 1000));
   const nanos = (timestampMs % 1000) * 1_000_000;
 
-  let pos = 16;
+  let pos = 20;
 
   // Balance changes
   const balanceChanges: BalanceChange[] = new Array(numBal);
@@ -70,13 +71,55 @@ function parseRawOutput(raw: Uint8Array): DecodeResult {
     const coinType = readStr(raw, pos, ctLen); pos += ctLen;
     const amount = view.getBigInt64(pos, true); pos += 8;
     balanceChanges[i] = {
-      txDigest: "", checkpointSeq: 0n, address, coinType,
+      txDigest: "", checkpointSeq, address, coinType,
       amount: amount.toString(), timestamp,
     };
   }
 
+  // Transactions
+  const transactions: GrpcCheckpointResponse["checkpoint"]["transactions"] = new Array(numTransactions);
+  const eventCounts = new Array<number>(numTransactions);
+  for (let i = 0; i < numTransactions; i++) {
+    const digestLen = view.getUint16(pos, true); pos += 2;
+    const digest = readStr(raw, pos, digestLen); pos += digestLen;
+    const senderLen = view.getUint16(pos, true); pos += 2;
+    const sender = readStr(raw, pos, senderLen); pos += senderLen;
+    const success = view.getUint8(pos) === 1; pos += 1;
+    const computationCost = view.getBigUint64(pos, true).toString(); pos += 8;
+    const storageCost = view.getBigUint64(pos, true).toString(); pos += 8;
+    const storageRebate = view.getBigUint64(pos, true).toString(); pos += 8;
+    const numTxEvents = view.getUint16(pos, true); pos += 2;
+    const numMoveCalls = view.getUint16(pos, true); pos += 2;
+
+    const commands: NonNullable<NonNullable<GrpcCheckpointResponse["checkpoint"]["transactions"][number]["transaction"]>["commands"]> = new Array(numMoveCalls);
+    for (let j = 0; j < numMoveCalls; j++) {
+      const pkgLen = view.getUint16(pos, true); pos += 2;
+      const pkg = readStr(raw, pos, pkgLen); pos += pkgLen;
+      const modLen = view.getUint16(pos, true); pos += 2;
+      const mod = readStr(raw, pos, modLen); pos += modLen;
+      const fnLen = view.getUint16(pos, true); pos += 2;
+      const fn = readStr(raw, pos, fnLen); pos += fnLen;
+      commands[j] = { moveCall: { package: pkg, module: mod, function: fn } };
+    }
+
+    eventCounts[i] = numTxEvents;
+    transactions[i] = {
+      digest,
+      transaction: {
+        sender,
+        programmableTransaction: commands.length > 0 ? { commands } : undefined,
+        commands: commands.length > 0 ? commands : undefined,
+      },
+      events: null,
+      effects: {
+        status: { success },
+        gasUsed: { computationCost, storageCost, storageRebate },
+      },
+    };
+  }
+
   // Events
-  const events: any[] = new Array(numEvents);
+  const events: Array<{ packageId: string; module: string; sender: string; eventType: string; contents: { name: string; value: Uint8Array } }> = new Array(numEvents);
   for (let i = 0; i < numEvents; i++) {
     const pkgLen = view.getUint16(pos, true); pos += 2;
     const packageId = readStr(raw, pos, pkgLen); pos += pkgLen;
@@ -91,16 +134,22 @@ function parseRawOutput(raw: Uint8Array): DecodeResult {
     events[i] = { packageId, module, sender, eventType, contents: { name: eventType, value } };
   }
 
+  let eventOffset = 0;
+  for (let i = 0; i < numTransactions; i++) {
+    const count = eventCounts[i] ?? 0;
+    if (count > 0) {
+      transactions[i]!.events = { events: events.slice(eventOffset, eventOffset + count) };
+      eventOffset += count;
+    }
+  }
+
   // Build GrpcCheckpointResponse shape
   const decoded: GrpcCheckpointResponse = {
-    cursor: "0",
+    cursor: checkpointSeq.toString(),
     checkpoint: {
-      sequenceNumber: "0",
+      sequenceNumber: checkpointSeq.toString(),
       summary: { timestamp: { seconds, nanos } },
-      transactions: [{
-        digest: "",
-        events: events.length > 0 ? { events } : null,
-      }],
+      transactions,
     },
   };
 
@@ -149,7 +198,7 @@ export function createCheckpointDecoderPool(
         job.reject(new Error(msg.error));
       } else if (msg.raw) {
         // Native path: raw Zig output buffer — parse on main thread
-        job.resolve(parseRawOutput(msg.raw));
+        job.resolve(parseRawOutput(msg.raw, BigInt(msg.seq)));
       } else {
         // Legacy path: pre-parsed JS objects
         job.resolve({ decoded: msg.decoded, balanceChanges: msg.balanceChanges });

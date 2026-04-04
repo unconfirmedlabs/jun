@@ -82,8 +82,7 @@ self.onmessage = async (event: MessageEvent) => {
     const compressedBytes = new Uint8Array(compressed);
 
     // --- Native path: Zig processes, transfer raw output bytes ---
-    // Skip native path when transactions are needed (Zig output doesn't include per-tx data)
-    if (zigProcess && !needsTransactions) {
+    if (zigProcess) {
       encodeFilter(balanceCoinTypes);
 
       const bytesWritten = zigProcess(
@@ -98,7 +97,7 @@ self.onmessage = async (event: MessageEvent) => {
         rawOutput.set(outputBuf.subarray(0, bytesWritten));
 
         postMessage(
-          { id, raw: rawOutput, error: null },
+          { id, seq, raw: rawOutput, error: null },
           [rawOutput.buffer], // transferable — zero-copy to main thread
         );
         return;
