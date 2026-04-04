@@ -48,20 +48,7 @@ interface CoinSnapshot {
 //   TypeTag enum: 0=bool..6=vector(T), 7=struct(StructTag), 8=u16..10=u256
 //   Owner enum: 0=AddressOwner(32), 1=ObjectOwner(32), 2=Shared{u64}, 3=Immutable, 4=ConsensusAddressOwner{u64,32}
 
-/** Read a ULEB128 integer from a buffer. Returns [value, bytesConsumed]. */
-function readUleb128(buf: Uint8Array, offset: number): [number, number] {
-  let value = 0;
-  let shift = 0;
-  let pos = offset;
-  for (;;) {
-    const byte = buf[pos]!;
-    value |= (byte & 0x7f) << shift;
-    pos++;
-    if ((byte & 0x80) === 0) break;
-    shift += 7;
-  }
-  return [value, pos - offset];
-}
+import { readUleb128, readBcsString } from "./uleb.ts";
 
 /** Convert 32 raw bytes to a 0x-prefixed hex string. */
 const HEX_CHARS = "0123456789abcdef";
@@ -72,17 +59,6 @@ function bytesToHex(buf: Uint8Array, offset: number): string {
     hex += HEX_CHARS[byte >> 4]! + HEX_CHARS[byte & 0xf]!;
   }
   return hex;
-}
-
-/** Read a BCS string (ULEB128 length + ASCII bytes). Returns [string, newOffset]. */
-function readBcsString(buf: Uint8Array, offset: number): [string, number] {
-  const [len, lenBytes] = readUleb128(buf, offset);
-  offset += lenBytes;
-  let str = "";
-  for (let i = 0; i < len; i++) {
-    str += String.fromCharCode(buf[offset + i]!);
-  }
-  return [str, offset + len];
 }
 
 /** Skip over a BCS-encoded TypeTag at the given offset. Returns new offset, or -1 on error. */

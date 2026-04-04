@@ -7,7 +7,7 @@
 import type { GrpcCheckpointResponse } from "./grpc.ts";
 import type { FieldDefs } from "./schema.ts";
 import { buildBcsSchema, formatRow } from "./schema.ts";
-import { normalizeEventType } from "./normalize.ts";
+import { normalizeEventType, stripGenerics } from "./normalize.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,15 +54,6 @@ interface CompiledHandler {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Strip generic type parameters from a Move type string.
- * "0x2::coin::Coin<0x2::sui::SUI>" → "0x2::coin::Coin"
- */
-function stripGenerics(type: string): string {
-  const idx = type.indexOf("<");
-  return idx === -1 ? type : type.slice(0, idx);
-}
 
 // Re-export shared timestamp parser
 import { parseTimestamp } from "./timestamp.ts";

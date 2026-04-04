@@ -5,6 +5,7 @@
  * the BCS-encoded module map to extract individual module bytecodes.
  */
 import { SuiGrpcClient } from "@mysten/sui/grpc";
+import { readUleb128, readBcsString } from "./uleb.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -53,28 +54,18 @@ function getClient(network: Network): SuiGrpcClient {
 export function parsePackageBcs(data: Uint8Array): Map<string, Uint8Array> {
   let pos = 1 + 32 + 8; // skip object type + id + version
 
-  function readULEB(): number {
-    let result = 0,
-      shift = 0;
-    while (true) {
-      const b = data[pos++]!;
-      result |= (b & 0x7f) << shift;
-      if (!(b & 0x80)) return result;
-      shift += 7;
-    }
-  }
+  const [mapLen, mapLenBytes] = readUleb128(data, pos);
+  pos += mapLenBytes;
 
-  const mapLen = readULEB();
   const modules = new Map<string, Uint8Array>();
 
   for (let i = 0; i < mapLen; i++) {
-    const nameLen = readULEB();
-    const name = new TextDecoder().decode(data.slice(pos, pos + nameLen));
-    pos += nameLen;
-    const bytesLen = readULEB();
-    const bytes = data.slice(pos, pos + bytesLen);
+    const [name, nameEnd] = readBcsString(data, pos);
+    pos = nameEnd;
+    const [bytesLen, bytesLenBytes] = readUleb128(data, pos);
+    pos += bytesLenBytes;
+    modules.set(name, data.slice(pos, pos + bytesLen));
     pos += bytesLen;
-    modules.set(name, bytes);
   }
 
   return modules;

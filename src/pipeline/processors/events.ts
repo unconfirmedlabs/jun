@@ -8,7 +8,7 @@
 import type { Processor, Checkpoint, ProcessedCheckpoint, DecodedEvent } from "../types.ts";
 import type { FieldDefs } from "../../schema.ts";
 import { buildBcsSchema, formatRow } from "../../schema.ts";
-import { normalizeEventType } from "../../normalize.ts";
+import { normalizeEventType, stripGenerics } from "../../normalize.ts";
 import { resolveEventHandlerFields } from "../../resolve-fields.ts";
 import { createGrpcClient, type GrpcClient } from "../../grpc.ts";
 import type { Logger } from "../../logger.ts";
@@ -45,11 +45,6 @@ interface CompiledHandler {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function stripGenerics(type: string): string {
-  const index = type.indexOf("<");
-  return index === -1 ? type : type.slice(0, index);
-}
 
 import { parseTimestamp } from "../../timestamp.ts";
 

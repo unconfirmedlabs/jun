@@ -66,3 +66,12 @@ export function validateEventTypeAddress(eventType: string, context: string): vo
   }
   validateAndNormalizeAddress(parts[0]!, context);
 }
+
+/**
+ * Strip generic type parameters from a Move type string.
+ * "0xPKG::module::Event<0x2::sui::SUI>" → "0xPKG::module::Event"
+ */
+export function stripGenerics(type: string): string {
+  const index = type.indexOf("<");
+  return index === -1 ? type : type.slice(0, index);
+}
