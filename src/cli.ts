@@ -2006,6 +2006,7 @@ pipelineCmd
   .option("--end-checkpoint <seq>", "backfill ending checkpoint (inclusive)")
   .option("--concurrency <n>", "archive fetch concurrency (default: 200)")
   .option("--workers <n>", "checkpoint decoder workers (default: CPU count)")
+  .option("--snapshot", "backfill only — exit when done (no live streaming)")
   .option("-y, --yes", "skip confirmation prompt")
   .option("--network <network>", "network name (mainnet, testnet, devnet)")
   // Processors
@@ -2031,6 +2032,7 @@ pipelineCmd
     endCheckpoint?: string;
     concurrency?: string;
     workers?: string;
+    snapshot?: boolean;
     yes?: boolean;
     network?: string;
     transactionBlocks?: boolean;
@@ -2089,7 +2091,7 @@ pipelineCmd
       const archiveUrl = opts.archiveUrl ?? baseConfig.sources?.backfill?.archiveUrl ?? baseConfig.sources?.backfill?.archive ?? networkDefaults[net];
 
       // Source overrides
-      const backfillOnly = (opts.epoch || opts.startCheckpoint) && !opts.grpcUrl;
+      const backfillOnly = opts.snapshot ?? false;
       if (opts.epoch || opts.startCheckpoint) {
         baseConfig.sources = baseConfig.sources ?? {};
         // Always set live.grpcUrl — needed for epoch resolution
@@ -2251,6 +2253,7 @@ pipelineCmd
       console.error("");
       console.error("  Pipeline Summary");
       console.error("  ────────────────");
+      console.error(`  mode            ${backfillOnly ? "snapshot (exit after backfill)" : "continuous (backfill + live)"}`);
       if (backfill?.epoch) console.error(`  epoch           ${backfill.epoch}`);
       if (startCp && endCp) {
         const count = BigInt(endCp) - BigInt(startCp) + 1n;
