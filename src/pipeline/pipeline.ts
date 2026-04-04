@@ -296,7 +296,7 @@ export function createPipeline(): Pipeline {
       for (const source of sources) {
         const isLive = source.name.includes("live");
         const intervalMs = config.buffer?.intervalMs ?? (isLive ? 200 : 1000);
-        const maxBatchSize = config.buffer?.maxBatchSize ?? (isLive ? 50 : 500);
+        const maxBatchSize = config.buffer?.maxBatchSize ?? (isLive ? 50 : 5000);
         const cursorKey = `${source.name}:${config.network ?? "default"}`;
 
         const buffer = createPipelineWriteBuffer(
