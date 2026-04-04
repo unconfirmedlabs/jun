@@ -849,21 +849,9 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         log.info({ elapsed: `${elapsed}s` }, "balances materialized");
       }
       if (driver) {
-        // Convert UNLOGGED tables back to LOGGED for durability (Postgres snapshot)
-        if (snapshotMode && isPostgres) {
-          log.info("converting UNLOGGED tables to LOGGED...");
-          const logStart = performance.now();
-          if (config.balances) {
-            await driver.exec("ALTER TABLE balance_changes SET LOGGED");
-            await driver.exec("ALTER TABLE balances SET LOGGED");
-          }
-          if (config.transactions) {
-            await driver.exec("ALTER TABLE transactions SET LOGGED");
-            await driver.exec("ALTER TABLE move_calls SET LOGGED");
-          }
-          const logElapsed = ((performance.now() - logStart) / 1000).toFixed(1);
-          log.info({ elapsed: `${logElapsed}s` }, "tables converted to LOGGED");
-        }
+        // Skip UNLOGGED→LOGGED conversion — snapshot data is re-indexable from
+        // the blockchain, so crash-safety of UNLOGGED tables is acceptable.
+        // If durability is needed, users can run: ALTER TABLE <t> SET LOGGED;
         if (snapshotMode && isSqlite) {
           await driver.exec("PRAGMA locking_mode = NORMAL");
           log.info("VACUUMing database...");
