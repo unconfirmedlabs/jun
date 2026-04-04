@@ -2323,6 +2323,11 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
         await s3File.write(Bun.file(dbPath));
         console.error(`[jun] uploaded successfully`);
       }
+
+      // Snapshot mode: exit explicitly (workers/timers may keep event loop alive)
+      if (backfillOnly) {
+        process.exit(0);
+      }
     } catch (err) {
       cliError(err);
     }
