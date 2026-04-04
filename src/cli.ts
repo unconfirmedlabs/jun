@@ -2005,6 +2005,7 @@ function addPipelineOptions(cmd: any) {
     .option("--end-checkpoint <seq>", "backfill ending checkpoint (inclusive)")
     .option("--concurrency <n>", "archive fetch concurrency (default: 200)")
     .option("--workers <n>", "checkpoint decoder workers (default: CPU count)")
+    .option("--batch-size <n>", "write buffer batch size in checkpoints (default: 500)")
     .option("-y, --yes", "skip confirmation prompt")
     .option("--network <network>", "network name (mainnet, testnet, devnet)")
     .option("--transaction-blocks", "enable transaction block indexing")
@@ -2029,6 +2030,7 @@ interface PipelineOpts {
     endCheckpoint?: string;
     concurrency?: string;
     workers?: string;
+    batchSize?: string;
     yes?: boolean;
     network?: string;
     transactionBlocks?: boolean;
@@ -2228,6 +2230,10 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
 
       pipelineConfig.quiet = opts.quiet ?? false;
       pipelineConfig.log = opts.log ?? false;
+      if (opts.batchSize) {
+        pipelineConfig.buffer = pipelineConfig.buffer ?? {};
+        pipelineConfig.buffer.maxBatchSize = parseInt(opts.batchSize);
+      }
 
       // Set total checkpoints for progress bar
       if (resolvedRange) {
