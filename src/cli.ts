@@ -1992,36 +1992,33 @@ const pipelineCmd = program
   .command("pipeline")
   .description("Composable data pipeline (Source → Processor → Destination)");
 
-pipelineCmd
-  .command("run [config]")
-  .description("Run a pipeline from YAML config")
-  .option("--config-url <url>", "fetch config from S3 or HTTPS URL")
-  .option("--quiet", "suppress human-readable output to stdout")
-  .option("--log [level]", "enable JSON logs to stderr (default: info)")
-  // Sources
-  .option("--grpc-url <url>", "gRPC endpoint URL for live streaming")
-  .option("--archive-url <url>", "archive base URL for backfill")
-  .option("--epoch <number>", "backfill a specific completed epoch")
-  .option("--start-checkpoint <seq>", "backfill starting checkpoint (inclusive)")
-  .option("--end-checkpoint <seq>", "backfill ending checkpoint (inclusive)")
-  .option("--concurrency <n>", "archive fetch concurrency (default: 200)")
-  .option("--workers <n>", "checkpoint decoder workers (default: CPU count)")
-  .option("--snapshot", "backfill only — exit when done (no live streaming)")
-  .option("-y, --yes", "skip confirmation prompt")
-  .option("--network <network>", "network name (mainnet, testnet, devnet)")
-  // Processors
-  .option("--transaction-blocks", "enable transaction block indexing")
-  .option("--coin-type <type...>", "coin types to track balances for (repeatable, or \"*\" for all)")
-  .option("--event-type <type...>", "Move event types to index (repeatable)")
-  // Storage
-  .option("--sqlite <path>", "write to SQLite database at path")
-  .option("--postgres <url>", "write to Postgres database at URL")
-  .option("--sqlite-export <s3url>", "after pipeline: VACUUM + upload to S3 (e.g. s3://bucket/key.db)")
-  // Broadcast
-  .option("--stdout", "broadcast events to stdout as JSONL")
-  .option("--sse <port>", "broadcast events via SSE on port")
-  .option("--nats <url>", "broadcast events to NATS server")
-  .action(async (configFile: string | undefined, opts: {
+// Shared pipeline options applied to both `run` and `snapshot`
+function addPipelineOptions(cmd: any) {
+  return cmd
+    .option("--config-url <url>", "fetch config from S3 or HTTPS URL")
+    .option("--quiet", "suppress human-readable output to stdout")
+    .option("--log [level]", "enable JSON logs to stderr (default: info)")
+    .option("--grpc-url <url>", "gRPC endpoint URL")
+    .option("--archive-url <url>", "archive base URL for backfill")
+    .option("--epoch <number>", "backfill a specific completed epoch")
+    .option("--start-checkpoint <seq>", "backfill starting checkpoint (inclusive)")
+    .option("--end-checkpoint <seq>", "backfill ending checkpoint (inclusive)")
+    .option("--concurrency <n>", "archive fetch concurrency (default: 200)")
+    .option("--workers <n>", "checkpoint decoder workers (default: CPU count)")
+    .option("-y, --yes", "skip confirmation prompt")
+    .option("--network <network>", "network name (mainnet, testnet, devnet)")
+    .option("--transaction-blocks", "enable transaction block indexing")
+    .option("--coin-type <type...>", "coin types to track balances for (repeatable, or \"*\" for all)")
+    .option("--event-type <type...>", "Move event types to index (repeatable)")
+    .option("--sqlite <path>", "write to SQLite database at path")
+    .option("--postgres <url>", "write to Postgres database at URL")
+    .option("--sqlite-export <s3url>", "after pipeline: VACUUM + upload to S3 (e.g. s3://bucket/key.db)")
+    .option("--stdout", "broadcast events to stdout as JSONL")
+    .option("--sse <port>", "broadcast events via SSE on port")
+    .option("--nats <url>", "broadcast events to NATS server");
+}
+
+interface PipelineOpts {
     configUrl?: string;
     quiet?: boolean;
     log?: string | boolean;
@@ -2032,19 +2029,17 @@ pipelineCmd
     endCheckpoint?: string;
     concurrency?: string;
     workers?: string;
-    snapshot?: boolean;
     yes?: boolean;
     network?: string;
     transactionBlocks?: boolean;
     coinType?: string[];
     eventType?: string[];
     sqlite?: string;
-    postgres?: string;
-    sqliteExport?: string;
-    stdout?: boolean;
     sse?: string;
     nats?: string;
-  }) => {
+}
+
+async function runPipeline(configFile: string | undefined, opts: PipelineOpts, backfillOnly: boolean) {
     try {
       const { resolve } = await import("path");
       const { parsePipelineConfig } = await import("./pipeline/config-parser.ts");
@@ -2091,7 +2086,7 @@ pipelineCmd
       const archiveUrl = opts.archiveUrl ?? baseConfig.sources?.backfill?.archiveUrl ?? baseConfig.sources?.backfill?.archive ?? networkDefaults[net];
 
       // Source overrides
-      const backfillOnly = opts.snapshot ?? false;
+      // backfillOnly is passed in from the command (snapshot vs run)
       if (opts.epoch || opts.startCheckpoint) {
         baseConfig.sources = baseConfig.sources ?? {};
         // Always set live.grpcUrl — needed for epoch resolution
@@ -2313,6 +2308,16 @@ pipelineCmd
     } catch (err) {
       cliError(err);
     }
+}
+
+addPipelineOptions(pipelineCmd.command("run [config]").description("Run a continuous pipeline (backfill + live)"))
+  .action(async (configFile: string | undefined, opts: PipelineOpts) => {
+    await runPipeline(configFile, opts, false);
+  });
+
+addPipelineOptions(pipelineCmd.command("snapshot [config]").description("Backfill a range or epoch, write to storage, exit"))
+  .action(async (configFile: string | undefined, opts: PipelineOpts) => {
+    await runPipeline(configFile, opts, true);
   });
 
 program.parse();
