@@ -29,7 +29,11 @@
     "./mcp": "./src/mcp.ts",
     "./signing": "./src/signing.ts",
     "./logger": "./src/logger.ts",
-    "./normalize": "./src/normalize.ts"
+    "./normalize": "./src/normalize.ts",
+    "./decompiler": "./src/decompiler.ts",
+    "./decompiler/wasm": "./src/decompiler-wasm.ts",
+    "./decompiler/native": "./src/decompiler-native.ts",
+    "./package-reader": "./src/package-reader.ts"
   },
   "bin": {
     "jun": "./src/cli.ts"

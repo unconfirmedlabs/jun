@@ -2029,6 +2029,69 @@ program
   });
 
 // ---------------------------------------------------------------------------
+// Move decompiler
+// ---------------------------------------------------------------------------
+
+const moveCmd = program
+  .command("move")
+  .description("Move bytecode tools");
+
+moveCmd
+  .command("decompile")
+  .description("Decompile a published Sui Move package")
+  .argument("<packageId>", "package object ID (0x...)")
+  .argument("[moduleName]", "specific module to decompile (all if omitted)")
+  .option("--network <network>", "network to use", "mainnet")
+  .option("--output <dir>", "output directory for .move files")
+  .action(async (packageId: string, moduleName: string | undefined, opts: { network: string; output?: string }) => {
+    const { fetchPackageModules } = await import("./package-reader.ts");
+    const { decompile } = await import("./decompiler-native.ts");
+    const network = opts.network as "mainnet" | "testnet" | "devnet" | "localnet";
+
+    try {
+      const modules = await fetchPackageModules(packageId, network);
+
+      // Filter to single module if specified
+      const targets = moduleName
+        ? modules.filter((m) => m.name === moduleName)
+        : modules;
+
+      if (targets.length === 0) {
+        const available = modules.map((m) => m.name).join(", ");
+        if (moduleName) {
+          throw new Error(`Module "${moduleName}" not found. Available: ${available}`);
+        }
+        throw new Error("Package contains no modules");
+      }
+
+      if (!moduleName) {
+        console.error(`[jun] decompiling ${targets.length} module${targets.length !== 1 ? "s" : ""} from ${packageId}`);
+      }
+
+      for (const mod of targets) {
+        const source = await decompile(mod.bytes);
+
+        if (opts.output) {
+          const { mkdirSync, writeFileSync } = await import("fs");
+          mkdirSync(opts.output, { recursive: true });
+          const filePath = `${opts.output}/${mod.name}.move`;
+          writeFileSync(filePath, source);
+          console.error(`[jun] wrote ${filePath}`);
+        } else if (targets.length > 1) {
+          // Multiple modules to stdout: add separator headers
+          console.log(`// ===== ${mod.name} =====`);
+          console.log(source);
+          console.log("");
+        } else {
+          console.log(source);
+        }
+      }
+    } catch (err) {
+      cliError(err);
+    }
+  });
+
+// ---------------------------------------------------------------------------
 // pipeline — composable Source → Processor → Destination
 // ---------------------------------------------------------------------------
 
