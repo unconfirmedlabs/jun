@@ -2014,6 +2014,7 @@ function addPipelineOptions(cmd: any) {
     .option("--sqlite <path>", "write to SQLite database at path")
     .option("--postgres <url>", "write to Postgres database at URL")
     .option("--sqlite-export <s3url>", "after pipeline: VACUUM + upload to S3 (e.g. s3://bucket/key.db)")
+    .option("--sqlite-export-split-datasets", "export SQLite as one database per dataset before upload")
     .option("--stdout", "broadcast events to stdout as JSONL")
     .option("--sse <port>", "broadcast events via SSE on port")
     .option("--nats <url>", "broadcast events to NATS server");
@@ -2039,6 +2040,7 @@ interface PipelineOpts {
     sqlite?: string;
     postgres?: string;
     sqliteExport?: string;
+    sqliteExportSplitDatasets?: boolean;
     stdout?: boolean;
     sse?: string;
     nats?: string;
@@ -2162,6 +2164,10 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
 
       // S3 export validation — check creds before pipeline starts
       let s3ExportConfig: { bucket: string; key: string } | null = null;
+      if (opts.sqliteExportSplitDatasets && !opts.sqliteExport) {
+        console.error("[jun] error: --sqlite-export-split-datasets requires --sqlite-export <s3url>");
+        process.exit(1);
+      }
       if (opts.sqliteExport) {
         if (!opts.sqliteExport.startsWith("s3://")) {
           console.error("[jun] error: --sqlite-export must be an S3 URL (s3://bucket/key.db.zst)");
@@ -2275,6 +2281,7 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       if (opts.sqlite) console.error(`  sqlite          ${opts.sqlite}`);
       if (opts.postgres) console.error(`  postgres        ${opts.postgres}`);
       if (opts.sqliteExport) console.error(`  export          ${opts.sqliteExport}`);
+      if (opts.sqliteExportSplitDatasets) console.error(`  export split    datasets`);
       if (opts.stdout) console.error(`  broadcast       stdout`);
       if (baseConfig.sources?.concurrency) console.error(`  concurrency     ${baseConfig.sources.concurrency}`);
       if (baseConfig.sources?.workers) console.error(`  workers         ${baseConfig.sources.workers}`);
@@ -2306,20 +2313,45 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       // Post-pipeline: S3 export (VACUUM already done by worker during shutdown)
       if (s3ExportConfig && opts.sqlite) {
         const dbPath = resolve(opts.sqlite);
-        const dbSize = Bun.file(dbPath).size;
-        console.error(`[jun] database size: ${(dbSize / 1024 / 1024).toFixed(1)} MB`);
-
-        // Upload raw SQLite
-        console.error(`[jun] uploading to s3://${s3ExportConfig.bucket}/${s3ExportConfig.key}...`);
         const s3Client = new Bun.S3Client({
           endpoint: process.env.S3_ENDPOINT!,
           bucket: s3ExportConfig.bucket,
           accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
           secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
         });
-        const s3File = s3Client.file(s3ExportConfig.key);
-        await s3File.write(Bun.file(dbPath));
-        console.error(`[jun] uploaded successfully`);
+
+        if (opts.sqliteExportSplitDatasets) {
+          const { exportSplitSqliteDatasets, deriveSplitSqliteExportKey } = await import("./sqlite-export.ts");
+          const datasetExports = exportSplitSqliteDatasets(dbPath);
+
+          try {
+            for (const datasetExport of datasetExports) {
+              const dbSize = Bun.file(datasetExport.path).size;
+              const uploadKey = deriveSplitSqliteExportKey(s3ExportConfig.key, datasetExport.dataset);
+              console.error(`[jun] ${datasetExport.dataset} export size: ${(dbSize / 1024 / 1024).toFixed(1)} MB`);
+              console.error(`[jun] uploading ${datasetExport.dataset} to s3://${s3ExportConfig.bucket}/${uploadKey}...`);
+              const s3File = s3Client.file(uploadKey);
+              await s3File.write(Bun.file(datasetExport.path));
+            }
+            console.error("[jun] split dataset exports uploaded successfully");
+          } finally {
+            const { unlinkSync } = await import("fs");
+            for (const datasetExport of datasetExports) {
+              for (const candidate of [datasetExport.path, `${datasetExport.path}-wal`, `${datasetExport.path}-shm`]) {
+                try {
+                  unlinkSync(candidate);
+                } catch {}
+              }
+            }
+          }
+        } else {
+          const dbSize = Bun.file(dbPath).size;
+          console.error(`[jun] database size: ${(dbSize / 1024 / 1024).toFixed(1)} MB`);
+          console.error(`[jun] uploading to s3://${s3ExportConfig.bucket}/${s3ExportConfig.key}...`);
+          const s3File = s3Client.file(s3ExportConfig.key);
+          await s3File.write(Bun.file(dbPath));
+          console.error(`[jun] uploaded successfully`);
+        }
       }
 
       // Snapshot mode: exit explicitly (workers/timers may keep event loop alive)

@@ -75,6 +75,7 @@ jun pipeline snapshot \
   --coin-type '*' \
   --sqlite /tmp/epoch.db \
   --sqlite-export s3://bucket/mainnet/epoch_1080.db \
+  --sqlite-export-split-datasets \
   --concurrency 300 \
   --workers 24 \
   --quiet --yes
@@ -97,6 +98,7 @@ jun pipeline snapshot \
 | `--sqlite` | `storage.sqlite` | SQLite output path |
 | `--postgres` | `storage.postgres` | Postgres URL |
 | `--sqlite-export` | `storage.sqliteExport` | VACUUM + upload to S3 |
+| `--sqlite-export-split-datasets` | - | Split export into `transactions`, `balance_changes`, `balances`, and `events` DBs |
 | `--stdout` | `broadcast.stdout` | JSONL stdout |
 | `--sse` | `broadcast.sse` | SSE server port |
 | `--nats` | `broadcast.nats` | NATS URL |
