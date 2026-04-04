@@ -411,12 +411,16 @@ async function runSource(
       checkpoint,
       events: [],
       balanceChanges: [],
+      transactions: [],
+      moveCalls: [],
     };
 
     for (const processor of processors) {
       const result = processor.process(checkpoint);
       processed.events.push(...result.events);
       processed.balanceChanges.push(...result.balanceChanges);
+      processed.transactions.push(...result.transactions);
+      processed.moveCalls.push(...result.moveCalls);
     }
 
     // Human output
@@ -430,6 +434,11 @@ async function runSource(
         const sign = BigInt(change.amount) >= 0n ? "+" : "";
         const coinName = change.coinType.split("::").pop();
         console.log(`[${source.name}] BALANCE cp:${change.checkpointSeq} ${shortAddress} ${sign}${change.amount} ${coinName}`);
+      }
+      for (const tx of processed.transactions) {
+        const shortSender = tx.sender.slice(0, 10) + "..." + tx.sender.slice(-4);
+        const status = tx.success ? "ok" : "FAIL";
+        console.log(`[${source.name}] TX     cp:${tx.checkpointSeq} ${tx.digest.slice(0, 16)}... sender:${shortSender} ${status} calls:${tx.moveCallCount}`);
       }
     }
 

@@ -5,7 +5,7 @@
  * and running totals identically for both databases.
  */
 import { Database } from "bun:sqlite";
-import type { Storage, ProcessedCheckpoint, DecodedEvent, BalanceChange } from "../types.ts";
+import type { Storage, ProcessedCheckpoint, DecodedEvent, BalanceChange, TransactionRecord, MoveCallRecord } from "../types.ts";
 import type { FieldDefs, FieldType } from "../../schema.ts";
 import { generateDDL } from "../../schema.ts";
 import { validateIdentifier } from "../../output/storage.ts";
@@ -23,6 +23,8 @@ export interface SqlStorageConfig {
   handlers?: Record<string, { tableName: string; fields: FieldDefs }>;
   /** Enable balance tables */
   balances?: boolean;
+  /** Enable transaction tables (transactions + move_calls) */
+  transactions?: boolean;
 }
 
 type Dialect = "postgres" | "sqlite";
@@ -234,6 +236,75 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         log.info("balance tables created");
       }
 
+      // Create transaction tables
+      if (config.transactions) {
+        if (driver.dialect === "postgres") {
+          await driver.exec(`
+            CREATE TABLE IF NOT EXISTS transactions (
+              digest TEXT PRIMARY KEY,
+              sender TEXT NOT NULL,
+              success BOOLEAN NOT NULL,
+              computation_cost NUMERIC NOT NULL,
+              storage_cost NUMERIC NOT NULL,
+              storage_rebate NUMERIC NOT NULL,
+              move_call_count INTEGER NOT NULL DEFAULT 0,
+              checkpoint_seq NUMERIC NOT NULL,
+              sui_timestamp TIMESTAMPTZ NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender);
+            CREATE INDEX IF NOT EXISTS idx_tx_checkpoint ON transactions(checkpoint_seq);
+          `);
+          await driver.exec(`
+            CREATE TABLE IF NOT EXISTS move_calls (
+              tx_digest TEXT NOT NULL,
+              call_index INTEGER NOT NULL,
+              package TEXT NOT NULL,
+              module TEXT NOT NULL,
+              function TEXT NOT NULL,
+              checkpoint_seq NUMERIC NOT NULL,
+              sui_timestamp TIMESTAMPTZ NOT NULL,
+              PRIMARY KEY (tx_digest, call_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_mc_package ON move_calls(package);
+            CREATE INDEX IF NOT EXISTS idx_mc_module ON move_calls(package, module);
+            CREATE INDEX IF NOT EXISTS idx_mc_function ON move_calls(package, module, function);
+          `);
+        } else {
+          await driver.exec(`
+            CREATE TABLE IF NOT EXISTS transactions (
+              digest TEXT PRIMARY KEY,
+              sender TEXT NOT NULL,
+              success INTEGER NOT NULL,
+              computation_cost TEXT NOT NULL,
+              storage_cost TEXT NOT NULL,
+              storage_rebate TEXT NOT NULL,
+              move_call_count INTEGER NOT NULL DEFAULT 0,
+              checkpoint_seq TEXT NOT NULL,
+              sui_timestamp TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender);
+            CREATE INDEX IF NOT EXISTS idx_tx_checkpoint ON transactions(checkpoint_seq);
+          `);
+          await driver.exec(`
+            CREATE TABLE IF NOT EXISTS move_calls (
+              tx_digest TEXT NOT NULL,
+              call_index INTEGER NOT NULL,
+              package TEXT NOT NULL,
+              module TEXT NOT NULL,
+              function TEXT NOT NULL,
+              checkpoint_seq TEXT NOT NULL,
+              sui_timestamp TEXT NOT NULL,
+              PRIMARY KEY (tx_digest, call_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_mc_package ON move_calls(package);
+            CREATE INDEX IF NOT EXISTS idx_mc_module ON move_calls(package, module);
+            CREATE INDEX IF NOT EXISTS idx_mc_function ON move_calls(package, module, function);
+          `);
+        }
+
+        log.info("transaction tables created");
+      }
+
       log.info({ dialect: driver.dialect }, "sql storage initialized");
     },
 
@@ -242,9 +313,11 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       const d = driver; // capture for closure
       const dialect = d.dialect;
 
-      // Collect events and balance changes
+      // Collect events, balance changes, transactions, and move calls
       const groupedEvents = new Map<string, DecodedEvent[]>();
       const allBalanceChanges: BalanceChange[] = [];
+      const allTransactions: TransactionRecord[] = [];
+      const allMoveCalls: MoveCallRecord[] = [];
 
       for (const processed of batch) {
         for (const event of processed.events) {
@@ -253,6 +326,8 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
           else groupedEvents.set(event.handlerName, [event]);
         }
         allBalanceChanges.push(...processed.balanceChanges);
+        allTransactions.push(...processed.transactions);
+        allMoveCalls.push(...processed.moveCalls);
       }
 
       // Wrap all writes in a single transaction
@@ -292,6 +367,16 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       // Write balance changes
       if (config.balances && allBalanceChanges.length > 0) {
         await writeBalanceChangesWithExec(exec, dialect, allBalanceChanges);
+      }
+
+      // Write transactions
+      if (config.transactions && allTransactions.length > 0) {
+        await writeTransactionsWithExec(exec, dialect, allTransactions);
+      }
+
+      // Write move calls
+      if (config.transactions && allMoveCalls.length > 0) {
+        await writeMoveCallsWithExec(exec, dialect, allMoveCalls);
       }
       }); // end transaction
     },
@@ -384,5 +469,75 @@ async function writeBalanceChangesWithExec(
         balanceValues,
       );
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Transaction writer
+// ---------------------------------------------------------------------------
+
+async function writeTransactionsWithExec(
+  exec: (query: string, params?: unknown[]) => Promise<any>,
+  dialect: Dialect,
+  transactions: TransactionRecord[],
+): Promise<void> {
+  const values: unknown[] = [];
+  const rows: string[] = [];
+
+  for (const tx of transactions) {
+    const ph = placeholders(dialect, 9, values.length);
+    rows.push(`(${ph.join(", ")})`);
+    values.push(
+      tx.digest,
+      tx.sender,
+      dialect === "postgres" ? tx.success : (tx.success ? 1 : 0),
+      tx.computationCost,
+      tx.storageCost,
+      tx.storageRebate,
+      tx.moveCallCount,
+      tx.checkpointSeq.toString(),
+      dialect === "postgres" ? tx.timestamp : tx.timestamp.toISOString(),
+    );
+  }
+
+  if (rows.length > 0) {
+    await exec(
+      `INSERT INTO transactions (digest, sender, success, computation_cost, storage_cost, storage_rebate, move_call_count, checkpoint_seq, sui_timestamp) VALUES ${rows.join(", ")} ON CONFLICT (digest) DO NOTHING`,
+      values,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Move call writer
+// ---------------------------------------------------------------------------
+
+async function writeMoveCallsWithExec(
+  exec: (query: string, params?: unknown[]) => Promise<any>,
+  dialect: Dialect,
+  moveCalls: MoveCallRecord[],
+): Promise<void> {
+  const values: unknown[] = [];
+  const rows: string[] = [];
+
+  for (const mc of moveCalls) {
+    const ph = placeholders(dialect, 7, values.length);
+    rows.push(`(${ph.join(", ")})`);
+    values.push(
+      mc.txDigest,
+      mc.callIndex,
+      mc.package,
+      mc.module,
+      mc.function,
+      mc.checkpointSeq.toString(),
+      dialect === "postgres" ? mc.timestamp : mc.timestamp.toISOString(),
+    );
+  }
+
+  if (rows.length > 0) {
+    await exec(
+      `INSERT INTO move_calls (tx_digest, call_index, package, module, function, checkpoint_seq, sui_timestamp) VALUES ${rows.join(", ")} ON CONFLICT (tx_digest, call_index) DO NOTHING`,
+      values,
+    );
   }
 }

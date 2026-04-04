@@ -20,6 +20,7 @@ const READ_MASK_PATHS = [
   "transactions.events",
   "transactions.digest",
   "transactions.transaction",
+  "transactions.effects",
   "transactions.balance_changes",
   "summary.timestamp",
 ];
@@ -85,11 +86,32 @@ export interface GrpcBalanceChange {
   amount: string;
 }
 
+/** A Move call command from a PTB */
+export interface GrpcCommand {
+  moveCall?: {
+    package: string;
+    module: string;
+    function: string;
+    typeArguments?: string[];
+  };
+  // Other command types exist but we only care about MoveCall for now
+}
+
 /** A transaction from a gRPC checkpoint response */
 export interface GrpcTransaction {
   digest: string;
   transaction?: {
     sender: string;
+    programmableTransaction?: {
+      commands?: GrpcCommand[];
+    };
+    // proto-loader may map under `kind` depending on proto version
+    kind?: {
+      programmableTransaction?: {
+        commands?: GrpcCommand[];
+      };
+    };
+    commands?: GrpcCommand[];
   };
   events: {
     events: GrpcEvent[];

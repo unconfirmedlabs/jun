@@ -51,11 +51,37 @@ export interface BalanceChange {
   timestamp: Date;
 }
 
+/** A transaction record. */
+export interface TransactionRecord {
+  digest: string;
+  sender: string;
+  success: boolean;
+  computationCost: string;
+  storageCost: string;
+  storageRebate: string;
+  checkpointSeq: bigint;
+  timestamp: Date;
+  moveCallCount: number;
+}
+
+/** A Move function call within a transaction. */
+export interface MoveCallRecord {
+  txDigest: string;
+  callIndex: number;
+  package: string;
+  module: string;
+  function: string;
+  checkpointSeq: bigint;
+  timestamp: Date;
+}
+
 /** The result of processing a checkpoint. */
 export interface ProcessedCheckpoint {
   checkpoint: Checkpoint;
   events: DecodedEvent[];
   balanceChanges: BalanceChange[];
+  transactions: TransactionRecord[];
+  moveCalls: MoveCallRecord[];
 }
 
 // ---------------------------------------------------------------------------

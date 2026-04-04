@@ -16,6 +16,7 @@
     "./pipeline/sources/archive": "./src/pipeline/sources/archive.ts",
     "./pipeline/processors/event-decoder": "./src/pipeline/processors/event-decoder.ts",
     "./pipeline/processors/balance-tracker": "./src/pipeline/processors/balance-tracker.ts",
+    "./pipeline/processors/transaction-tracker": "./src/pipeline/processors/transaction-tracker.ts",
     "./pipeline/destinations/postgres": "./src/pipeline/destinations/postgres.ts",
     "./pipeline/destinations/sqlite": "./src/pipeline/destinations/sqlite.ts",
     "./pipeline/destinations/sse": "./src/pipeline/destinations/sse.ts",

@@ -10,6 +10,7 @@ import { createGrpcLiveSource } from "./sources/grpc.ts";
 import { createArchiveSource } from "./sources/archive.ts";
 import { createEventDecoder } from "./processors/event-decoder.ts";
 import { createBalanceTracker } from "./processors/balance-tracker.ts";
+import { createTransactionTracker } from "./processors/transaction-tracker.ts";
 import { createSqlStorage } from "./destinations/sql.ts";
 import { createSseBroadcast } from "./destinations/sse.ts";
 import { createNatsBroadcast } from "./destinations/nats.ts";
@@ -152,6 +153,10 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
     processors.push(proc);
   }
 
+  if (processorConfig?.transactions) {
+    processors.push(createTransactionTracker());
+  }
+
   // --- Destinations ---
   const destinationConfig = config.destinations ?? {};
   const storageConfig = config.storage ?? destinationConfig;
@@ -175,6 +180,7 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
       url,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
+      transactions: !!processorConfig?.transactions,
     }));
   }
 
@@ -186,6 +192,7 @@ export function parsePipelineConfig(yamlContent: string): ParsedPipelineConfig {
       url: `sqlite:${sqlitePath}`,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
+      transactions: !!processorConfig?.transactions,
     }));
   }
 

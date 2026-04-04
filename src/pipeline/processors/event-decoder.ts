@@ -158,7 +158,7 @@ export function createEventDecoder(config: EventDecoderConfig): Processor {
         }
       }
 
-      return { checkpoint, events, balanceChanges: [] };
+      return { checkpoint, events, balanceChanges: [], transactions: [], moveCalls: [] };
     },
 
     reload(newHandlers: Record<string, EventHandlerConfig>): void {

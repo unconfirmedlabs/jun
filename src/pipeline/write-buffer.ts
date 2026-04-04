@@ -72,7 +72,7 @@ export function createPipelineWriteBuffer(
   function countEvents(): number {
     let total = 0;
     for (const cp of buffer) {
-      total += cp.events.length + cp.balanceChanges.length;
+      total += cp.events.length + cp.balanceChanges.length + cp.transactions.length + cp.moveCalls.length;
     }
     return total;
   }
