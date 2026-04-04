@@ -44,8 +44,8 @@ if (!USE_LEGACY) {
   }
 }
 
-// Per-worker output buffer (2MB)
-const OUTPUT_CAP = 2 * 1024 * 1024;
+// Per-worker output buffer (8MB — transactions + move calls + events + balance changes)
+const OUTPUT_CAP = 8 * 1024 * 1024;
 const outputBuf = new Uint8Array(OUTPUT_CAP);
 const outputPtr = ptr(outputBuf);
 
