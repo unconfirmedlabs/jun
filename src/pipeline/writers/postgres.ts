@@ -8,8 +8,8 @@ import type { WriterChannel, WriteAck, SerializedBatch } from "../writer.ts";
 import { deserializeBatch } from "../writer.ts";
 import type { Storage } from "../types.ts";
 
-const MAX_QUEUED = 3;
-const MAX_CONCURRENCY = 2;
+const MAX_QUEUED = 5;
+const MAX_CONCURRENCY = 3;
 
 export function createPostgresWriterChannel(storage: Storage): WriterChannel {
   let ackCallback: ((ack: WriteAck) => void) | null = null;

@@ -32,11 +32,13 @@ export interface SqlStorageConfig {
 
 type Dialect = "postgres" | "sqlite";
 
+type ExecFn = (query: string, params?: unknown[]) => Promise<any>;
+
 interface SqlDriver {
   dialect: Dialect;
   exec(query: string, params?: unknown[]): Promise<any>;
-  /** Execute multiple statements inside a transaction. */
-  transaction(fn: (exec: (query: string, params?: unknown[]) => Promise<any>) => Promise<void>): Promise<void>;
+  /** Execute multiple statements inside a transaction. rawTx is the Bun.SQL transaction instance (Postgres only). */
+  transaction(fn: (exec: ExecFn, rawTx?: any) => Promise<void>): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -53,9 +55,9 @@ function createPostgresDriver(url: string): SqlDriver {
     },
     async transaction(fn) {
       await sql.begin(async (tx: any) => {
-        await fn((query: string, params?: unknown[]) =>
-          params ? tx.unsafe(query, params) : tx.unsafe(query)
-        );
+        const exec: ExecFn = (query: string, params?: unknown[]) =>
+          params ? tx.unsafe(query, params) : tx.unsafe(query);
+        await fn(exec, tx);
       });
     },
     async close() {
@@ -105,6 +107,188 @@ function placeholders(dialect: Dialect, count: number, offset = 0): string[] {
     return Array.from({ length: count }, (_, i) => `$${offset + i + 1}`);
   }
   return Array.from({ length: count }, () => "?");
+}
+
+// ---------------------------------------------------------------------------
+// Postgres bulk write helpers — uses unnest() for columnar inserts
+// ---------------------------------------------------------------------------
+
+/** Format a JavaScript array as a Postgres array literal string. */
+function pgArray(values: (string | number | boolean | null)[]): string {
+  if (values.length === 0) return "{}";
+  return (
+    "{" +
+    values
+      .map((v) => {
+        if (v === null) return "NULL";
+        if (typeof v === "boolean") return v ? "t" : "f";
+        if (typeof v === "number") return String(v);
+        const s = String(v);
+        return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+      })
+      .join(",") +
+    "}"
+  );
+}
+
+const PG_BC_CHUNK = 10000;
+
+async function writeBalanceChangesPgBulk(
+  tx: any,
+  changes: BalanceChange[],
+  snapshotMode: boolean,
+): Promise<void> {
+  // 1. Insert into balance_changes ledger using unnest (columnar)
+  for (let offset = 0; offset < changes.length; offset += PG_BC_CHUNK) {
+    const chunk = changes.slice(offset, Math.min(offset + PG_BC_CHUNK, changes.length));
+    const n = chunk.length;
+    const txDigests = new Array(n);
+    const checkpoints = new Array(n);
+    const addresses = new Array(n);
+    const coinTypes = new Array(n);
+    const amounts = new Array(n);
+    const timestamps = new Array(n);
+
+    for (let i = 0; i < n; i++) {
+      const c = chunk[i];
+      txDigests[i] = c.txDigest;
+      checkpoints[i] = c.checkpointSeq.toString();
+      addresses[i] = c.address;
+      coinTypes[i] = c.coinType;
+      amounts[i] = c.amount;
+      timestamps[i] = c.timestamp.toISOString();
+    }
+
+    const conflict = snapshotMode ? "" : "ON CONFLICT (tx_digest, address, coin_type) DO NOTHING";
+    await tx.unsafe(
+      `INSERT INTO balance_changes (tx_digest, checkpoint_seq, address, coin_type, amount, sui_timestamp)
+       SELECT * FROM unnest($1::text[], $2::numeric[], $3::text[], $4::text[], $5::numeric[], $6::timestamptz[])
+       ${conflict}`,
+      [pgArray(txDigests), pgArray(checkpoints), pgArray(addresses), pgArray(coinTypes), pgArray(amounts), pgArray(timestamps)],
+    );
+  }
+
+  // In snapshot mode, skip incremental balance upserts — materialized at shutdown
+  if (snapshotMode) return;
+
+  // 2. Aggregate per (address, coinType)
+  const aggregated = new Map<string, { address: string; coinType: string; totalAmount: bigint; maxCheckpoint: bigint }>();
+  for (const change of changes) {
+    const key = `${change.address}:${change.coinType}`;
+    const existing = aggregated.get(key);
+    if (existing) {
+      existing.totalAmount += BigInt(change.amount);
+      if (change.checkpointSeq > existing.maxCheckpoint) existing.maxCheckpoint = change.checkpointSeq;
+    } else {
+      aggregated.set(key, {
+        address: change.address,
+        coinType: change.coinType,
+        totalAmount: BigInt(change.amount),
+        maxCheckpoint: change.checkpointSeq,
+      });
+    }
+  }
+
+  // 3. Upsert into balances
+  if (aggregated.size > 0) {
+    const addrs: string[] = [];
+    const coins: string[] = [];
+    const bals: string[] = [];
+    const cps: string[] = [];
+    for (const a of aggregated.values()) {
+      addrs.push(a.address);
+      coins.push(a.coinType);
+      bals.push(a.totalAmount.toString());
+      cps.push(a.maxCheckpoint.toString());
+    }
+    await tx.unsafe(
+      `INSERT INTO balances (address, coin_type, balance, last_checkpoint)
+       SELECT * FROM unnest($1::text[], $2::text[], $3::numeric[], $4::numeric[])
+       ON CONFLICT (address, coin_type) DO UPDATE SET
+         balance = balances.balance + EXCLUDED.balance,
+         last_checkpoint = GREATEST(balances.last_checkpoint, EXCLUDED.last_checkpoint),
+         last_updated = NOW()`,
+      [pgArray(addrs), pgArray(coins), pgArray(bals), pgArray(cps)],
+    );
+  }
+}
+
+async function writeTransactionsPgBulk(
+  tx: any,
+  transactions: TransactionRecord[],
+  snapshotMode: boolean,
+): Promise<void> {
+  for (let offset = 0; offset < transactions.length; offset += PG_BC_CHUNK) {
+    const chunk = transactions.slice(offset, Math.min(offset + PG_BC_CHUNK, transactions.length));
+    const n = chunk.length;
+    const digests = new Array(n);
+    const senders = new Array(n);
+    const successes = new Array(n);
+    const compCosts = new Array(n);
+    const storCosts = new Array(n);
+    const storRebates = new Array(n);
+    const mcCounts = new Array(n);
+    const checkpoints = new Array(n);
+    const timestamps = new Array(n);
+
+    for (let i = 0; i < n; i++) {
+      const t = chunk[i];
+      digests[i] = t.digest;
+      senders[i] = t.sender;
+      successes[i] = t.success;
+      compCosts[i] = t.computationCost;
+      storCosts[i] = t.storageCost;
+      storRebates[i] = t.storageRebate;
+      mcCounts[i] = t.moveCallCount;
+      checkpoints[i] = t.checkpointSeq.toString();
+      timestamps[i] = t.timestamp.toISOString();
+    }
+
+    const conflict = snapshotMode ? "" : "ON CONFLICT (digest) DO NOTHING";
+    await tx.unsafe(
+      `INSERT INTO transactions (digest, sender, success, computation_cost, storage_cost, storage_rebate, move_call_count, checkpoint_seq, sui_timestamp)
+       SELECT * FROM unnest($1::text[], $2::text[], $3::boolean[], $4::numeric[], $5::numeric[], $6::numeric[], $7::integer[], $8::numeric[], $9::timestamptz[])
+       ${conflict}`,
+      [pgArray(digests), pgArray(senders), pgArray(successes), pgArray(compCosts), pgArray(storCosts), pgArray(storRebates), pgArray(mcCounts), pgArray(checkpoints), pgArray(timestamps)],
+    );
+  }
+}
+
+async function writeMoveCallsPgBulk(
+  tx: any,
+  moveCalls: MoveCallRecord[],
+  snapshotMode: boolean,
+): Promise<void> {
+  for (let offset = 0; offset < moveCalls.length; offset += PG_BC_CHUNK) {
+    const chunk = moveCalls.slice(offset, Math.min(offset + PG_BC_CHUNK, moveCalls.length));
+    const n = chunk.length;
+    const txDigests = new Array(n);
+    const callIndexes = new Array(n);
+    const packages = new Array(n);
+    const modules = new Array(n);
+    const functions = new Array(n);
+    const checkpoints = new Array(n);
+    const timestamps = new Array(n);
+
+    for (let i = 0; i < n; i++) {
+      const mc = chunk[i];
+      txDigests[i] = mc.txDigest;
+      callIndexes[i] = mc.callIndex;
+      packages[i] = mc.package;
+      modules[i] = mc.module;
+      functions[i] = mc.function;
+      checkpoints[i] = mc.checkpointSeq.toString();
+      timestamps[i] = mc.timestamp.toISOString();
+    }
+
+    const conflict = snapshotMode ? "" : "ON CONFLICT (tx_digest, call_index) DO NOTHING";
+    await tx.unsafe(
+      `INSERT INTO move_calls (tx_digest, call_index, package, module, function, checkpoint_seq, sui_timestamp)
+       SELECT * FROM unnest($1::text[], $2::integer[], $3::text[], $4::text[], $5::text[], $6::numeric[], $7::timestamptz[])
+       ${conflict}`,
+      [pgArray(txDigests), pgArray(callIndexes), pgArray(packages), pgArray(modules), pgArray(functions), pgArray(checkpoints), pgArray(timestamps)],
+    );
+  }
 }
 
 function isUniqueConstraintError(error: unknown): error is Error {
@@ -197,7 +381,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         : createSqliteDriver(sqlitePath);
 
       // Snapshot mode: drop existing tables to avoid stale constraints
-      if (snapshotMode && isSqlite) {
+      if (snapshotMode) {
         await driver.exec("DROP TABLE IF EXISTS transactions");
         await driver.exec("DROP TABLE IF EXISTS move_calls");
         await driver.exec("DROP TABLE IF EXISTS balance_changes");
@@ -240,32 +424,62 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
       // Create balance tables
       if (config.balances) {
+        const pgUnlogged = snapshotMode && isPostgres ? "UNLOGGED" : "";
         if (driver.dialect === "postgres") {
-          await driver.exec(`
-            CREATE TABLE IF NOT EXISTS balance_changes (
-              id SERIAL PRIMARY KEY,
-              tx_digest TEXT NOT NULL,
-              checkpoint_seq NUMERIC NOT NULL,
-              address TEXT NOT NULL,
-              coin_type TEXT NOT NULL,
-              amount NUMERIC NOT NULL,
-              sui_timestamp TIMESTAMPTZ NOT NULL,
-              UNIQUE (tx_digest, address, coin_type)
-            );
-          `);
+          if (snapshotMode) {
+            // Snapshot: UNLOGGED table, no PK/UNIQUE — constraints deferred to shutdown
+            await driver.exec(`
+              CREATE ${pgUnlogged} TABLE IF NOT EXISTS balance_changes (
+                tx_digest TEXT NOT NULL,
+                checkpoint_seq NUMERIC NOT NULL,
+                address TEXT NOT NULL,
+                coin_type TEXT NOT NULL,
+                amount NUMERIC NOT NULL,
+                sui_timestamp TIMESTAMPTZ NOT NULL
+              );
+            `);
+            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bc_unique ON balance_changes(tx_digest, address, coin_type)`);
+          } else {
+            await driver.exec(`
+              CREATE TABLE IF NOT EXISTS balance_changes (
+                id SERIAL PRIMARY KEY,
+                tx_digest TEXT NOT NULL,
+                checkpoint_seq NUMERIC NOT NULL,
+                address TEXT NOT NULL,
+                coin_type TEXT NOT NULL,
+                amount NUMERIC NOT NULL,
+                sui_timestamp TIMESTAMPTZ NOT NULL,
+                UNIQUE (tx_digest, address, coin_type)
+              );
+            `);
+          }
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_address ON balance_changes(address)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_coin_type ON balance_changes(coin_type)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_checkpoint ON balance_changes(checkpoint_seq)`);
-          await driver.exec(`
-            CREATE TABLE IF NOT EXISTS balances (
-              address TEXT NOT NULL,
-              coin_type TEXT NOT NULL,
-              balance NUMERIC NOT NULL DEFAULT 0,
-              last_checkpoint NUMERIC NOT NULL DEFAULT 0,
-              last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-              PRIMARY KEY (address, coin_type)
-            );
-          `);
+          if (snapshotMode) {
+            // Snapshot: balances materialized at shutdown, just create the table
+            await driver.exec(`
+              CREATE ${pgUnlogged} TABLE IF NOT EXISTS balances (
+                address TEXT NOT NULL,
+                coin_type TEXT NOT NULL,
+                balance NUMERIC NOT NULL DEFAULT 0,
+                last_checkpoint NUMERIC NOT NULL DEFAULT 0,
+                last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW()
+              );
+            `);
+            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_balances_pk ON balances(address, coin_type)`);
+          } else {
+            await driver.exec(`
+              CREATE TABLE IF NOT EXISTS balances (
+                address TEXT NOT NULL,
+                coin_type TEXT NOT NULL,
+                balance NUMERIC NOT NULL DEFAULT 0,
+                last_checkpoint NUMERIC NOT NULL DEFAULT 0,
+                last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (address, coin_type)
+              );
+            `);
+          }
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_balances_coin ON balances(coin_type, balance DESC)`);
         } else {
           if (snapshotMode) {
@@ -313,34 +527,68 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
       // Create transaction tables
       if (config.transactions) {
+        const pgUnlogged = snapshotMode && isPostgres ? "UNLOGGED" : "";
         if (driver.dialect === "postgres") {
-          await driver.exec(`
-            CREATE TABLE IF NOT EXISTS transactions (
-              digest TEXT PRIMARY KEY,
-              sender TEXT NOT NULL,
-              success BOOLEAN NOT NULL,
-              computation_cost NUMERIC NOT NULL,
-              storage_cost NUMERIC NOT NULL,
-              storage_rebate NUMERIC NOT NULL,
-              move_call_count INTEGER NOT NULL DEFAULT 0,
-              checkpoint_seq NUMERIC NOT NULL,
-              sui_timestamp TIMESTAMPTZ NOT NULL
-            );
-          `);
+          if (snapshotMode) {
+            // Snapshot: UNLOGGED, no PK — deferred to shutdown
+            await driver.exec(`
+              CREATE ${pgUnlogged} TABLE IF NOT EXISTS transactions (
+                digest TEXT NOT NULL,
+                sender TEXT NOT NULL,
+                success BOOLEAN NOT NULL,
+                computation_cost NUMERIC NOT NULL,
+                storage_cost NUMERIC NOT NULL,
+                storage_rebate NUMERIC NOT NULL,
+                move_call_count INTEGER NOT NULL DEFAULT 0,
+                checkpoint_seq NUMERIC NOT NULL,
+                sui_timestamp TIMESTAMPTZ NOT NULL
+              );
+            `);
+            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_digest ON transactions(digest)`);
+          } else {
+            await driver.exec(`
+              CREATE TABLE IF NOT EXISTS transactions (
+                digest TEXT PRIMARY KEY,
+                sender TEXT NOT NULL,
+                success BOOLEAN NOT NULL,
+                computation_cost NUMERIC NOT NULL,
+                storage_cost NUMERIC NOT NULL,
+                storage_rebate NUMERIC NOT NULL,
+                move_call_count INTEGER NOT NULL DEFAULT 0,
+                checkpoint_seq NUMERIC NOT NULL,
+                sui_timestamp TIMESTAMPTZ NOT NULL
+              );
+            `);
+          }
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_checkpoint ON transactions(checkpoint_seq)`);
-          await driver.exec(`
-            CREATE TABLE IF NOT EXISTS move_calls (
-              tx_digest TEXT NOT NULL,
-              call_index INTEGER NOT NULL,
-              package TEXT NOT NULL,
-              module TEXT NOT NULL,
-              function TEXT NOT NULL,
-              checkpoint_seq NUMERIC NOT NULL,
-              sui_timestamp TIMESTAMPTZ NOT NULL,
-              PRIMARY KEY (tx_digest, call_index)
-            );
-          `);
+          if (snapshotMode) {
+            await driver.exec(`
+              CREATE ${pgUnlogged} TABLE IF NOT EXISTS move_calls (
+                tx_digest TEXT NOT NULL,
+                call_index INTEGER NOT NULL,
+                package TEXT NOT NULL,
+                module TEXT NOT NULL,
+                function TEXT NOT NULL,
+                checkpoint_seq NUMERIC NOT NULL,
+                sui_timestamp TIMESTAMPTZ NOT NULL
+              );
+            `);
+            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mc_pk ON move_calls(tx_digest, call_index)`);
+          } else {
+            await driver.exec(`
+              CREATE TABLE IF NOT EXISTS move_calls (
+                tx_digest TEXT NOT NULL,
+                call_index INTEGER NOT NULL,
+                package TEXT NOT NULL,
+                module TEXT NOT NULL,
+                function TEXT NOT NULL,
+                checkpoint_seq NUMERIC NOT NULL,
+                sui_timestamp TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (tx_digest, call_index)
+              );
+            `);
+          }
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_package ON move_calls(package)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_module ON move_calls(package, module)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_function ON move_calls(package, module, function)`);
@@ -444,9 +692,9 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       }
 
       // Wrap all writes in a single transaction
-      await d.transaction(async (exec) => {
+      await d.transaction(async (exec, rawTx) => {
 
-      // Write events
+      // Write events (uses exec for both dialects — user-defined schemas)
       for (const [handlerName, events] of groupedEvents) {
         const table = tables.get(handlerName);
         if (!table) continue;
@@ -475,25 +723,42 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         }
       }
 
-      // Write balance changes
+      // Write balance changes — Postgres uses unnest() bulk path
       if (config.balances && allBalanceChanges.length > 0) {
-        await writeBalanceChangesWithExec(exec, dialect, allBalanceChanges, snapshotMode);
+        if (rawTx) {
+          await writeBalanceChangesPgBulk(rawTx, allBalanceChanges, snapshotMode);
+        } else {
+          await writeBalanceChangesWithExec(exec, dialect, allBalanceChanges, snapshotMode);
+        }
       }
 
       // Write transactions
       if (config.transactions && allTransactions.length > 0) {
-        await writeTransactionsWithExec(exec, dialect, allTransactions, snapshotMode);
+        if (rawTx) {
+          await writeTransactionsPgBulk(rawTx, allTransactions, snapshotMode);
+        } else {
+          await writeTransactionsWithExec(exec, dialect, allTransactions, snapshotMode);
+        }
       }
 
       // Write move calls
       if (config.transactions && allMoveCalls.length > 0) {
-        await writeMoveCallsWithExec(exec, dialect, allMoveCalls, snapshotMode);
+        if (rawTx) {
+          await writeMoveCallsPgBulk(rawTx, allMoveCalls, snapshotMode);
+        } else {
+          await writeMoveCallsWithExec(exec, dialect, allMoveCalls, snapshotMode);
+        }
       }
       }); // end transaction
     },
 
     async shutdown(): Promise<void> {
       if (driver && deferredIndexes.length > 0) {
+        // Boost maintenance_work_mem for faster index creation (Postgres)
+        if (isPostgres) {
+          await driver.exec("SET maintenance_work_mem = '512MB'");
+        }
+
         const balanceIndexes = deferredIndexes.filter(sql => /\bON balances\b/i.test(sql));
         const otherIndexes = deferredIndexes.filter(sql => !/\bON balances\b/i.test(sql));
 
@@ -518,18 +783,44 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       if (driver && snapshotMode && config.balances) {
         log.info("materializing balances from balance_changes...");
         const startTime = performance.now();
-        await driver.exec(`
-          INSERT INTO balances (address, coin_type, balance, last_checkpoint)
-          SELECT address, coin_type,
-            CAST(SUM(CAST(amount AS INTEGER)) AS TEXT),
-            CAST(MAX(checkpoint_seq) AS TEXT)
-          FROM balance_changes
-          GROUP BY address, coin_type
-        `);
+        if (isPostgres) {
+          await driver.exec(`
+            INSERT INTO balances (address, coin_type, balance, last_checkpoint)
+            SELECT address, coin_type,
+              SUM(amount),
+              MAX(checkpoint_seq)
+            FROM balance_changes
+            GROUP BY address, coin_type
+          `);
+        } else {
+          await driver.exec(`
+            INSERT INTO balances (address, coin_type, balance, last_checkpoint)
+            SELECT address, coin_type,
+              CAST(SUM(CAST(amount AS INTEGER)) AS TEXT),
+              CAST(MAX(checkpoint_seq) AS TEXT)
+            FROM balance_changes
+            GROUP BY address, coin_type
+          `);
+        }
         const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
         log.info({ elapsed: `${elapsed}s` }, "balances materialized");
       }
       if (driver) {
+        // Convert UNLOGGED tables back to LOGGED for durability (Postgres snapshot)
+        if (snapshotMode && isPostgres) {
+          log.info("converting UNLOGGED tables to LOGGED...");
+          const logStart = performance.now();
+          if (config.balances) {
+            await driver.exec("ALTER TABLE balance_changes SET LOGGED");
+            await driver.exec("ALTER TABLE balances SET LOGGED");
+          }
+          if (config.transactions) {
+            await driver.exec("ALTER TABLE transactions SET LOGGED");
+            await driver.exec("ALTER TABLE move_calls SET LOGGED");
+          }
+          const logElapsed = ((performance.now() - logStart) / 1000).toFixed(1);
+          log.info({ elapsed: `${logElapsed}s` }, "tables converted to LOGGED");
+        }
         if (snapshotMode && isSqlite) {
           await driver.exec("PRAGMA locking_mode = NORMAL");
           log.info("VACUUMing database...");

@@ -5,9 +5,15 @@ import { Database } from "bun:sqlite";
 
 /**
  * Create a Postgres connection via Bun.SQL.
+ * synchronous_commit=off skips WAL flush on commit — safe for indexers
+ * since the blockchain is the source of truth (data can be re-indexed).
  */
 export function createPostgresConnection(url: string) {
-  return new Bun.SQL(url);
+  return new Bun.SQL(url, {
+    connection: {
+      synchronous_commit: "off",
+    },
+  });
 }
 
 /**
