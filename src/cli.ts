@@ -2302,6 +2302,8 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
 
       // Post-pipeline: S3 export
       if (s3ExportConfig && opts.sqlite) {
+        // Small delay to ensure worker file handles are released
+        await new Promise(r => setTimeout(r, 100));
         const { Database } = await import("bun:sqlite");
         const dbPath = resolve(opts.sqlite);
 
