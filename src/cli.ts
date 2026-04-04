@@ -2062,7 +2062,8 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       } else if (configFile) {
         const { readFileSync } = require("fs");
         const yaml = await import("js-yaml");
-        baseConfig = (yaml.load(readFileSync(resolve(configFile), "utf-8")) as Record<string, any>) ?? {};
+        const { substituteDeep } = await import("./pipeline/config-parser.ts");
+        baseConfig = substituteDeep((yaml.load(readFileSync(resolve(configFile), "utf-8")) as Record<string, any>) ?? {});
       } else if (opts.epoch || opts.startCheckpoint) {
         // Generate config entirely from CLI flags — baseConfig stays empty
       } else {

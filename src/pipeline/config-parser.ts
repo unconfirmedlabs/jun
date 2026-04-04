@@ -117,7 +117,7 @@ function substituteEnvVars(value: string): string {
   });
 }
 
-function substituteDeep(obj: any): any {
+export function substituteDeep(obj: any): any {
   if (typeof obj === "string") return substituteEnvVars(obj);
   if (Array.isArray(obj)) return obj.map(substituteDeep);
   if (obj !== null && typeof obj === "object") {
