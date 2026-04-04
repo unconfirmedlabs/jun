@@ -2152,12 +2152,11 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
         baseConfig.storage = baseConfig.storage ?? {};
         baseConfig.storage.postgres = opts.postgres;
       }
-      // Snapshot optimizations: SQLite defers indexes, Postgres uses UNLOGGED tables
+      // Snapshot optimizations: defer indexes + UNLOGGED tables for bulk loading
       if (baseConfig.storage && backfillOnly) {
+        baseConfig.storage.deferIndexes = true;
         if (baseConfig.storage.postgres) {
           baseConfig.storage.pgUnlogged = true;
-        } else {
-          baseConfig.storage.deferIndexes = true;
         }
       }
 
