@@ -2180,27 +2180,27 @@ pipelineCmd
       const baseConfig = yamlContent ? (yaml.load(yamlContent) as Record<string, any>) ?? {} : {};
 
       // CLI flags override config file
-      const grpcUrl = opts.grpcUrl ?? baseConfig.sources?.live?.grpc ?? "hayabusa.mainnet.unconfirmed.cloud:443";
+      const grpcUrl = opts.grpcUrl ?? baseConfig.sources?.live?.grpcUrl ?? baseConfig.sources?.live?.grpc ?? "hayabusa.mainnet.unconfirmed.cloud:443";
       const networkDefaults: Record<string, string> = {
         mainnet: "https://checkpoints.mainnet.sui.io",
         testnet: "https://checkpoints.testnet.sui.io",
         devnet: "https://checkpoints.devnet.sui.io",
       };
       const net = opts.network ?? baseConfig.network ?? "mainnet";
-      const archiveUrl = opts.archiveUrl ?? baseConfig.sources?.backfill?.archive ?? networkDefaults[net];
+      const archiveUrl = opts.archiveUrl ?? baseConfig.sources?.backfill?.archiveUrl ?? baseConfig.sources?.backfill?.archive ?? networkDefaults[net];
 
       // Source overrides
-      if (opts.epoch || opts.from) {
+      if (opts.epoch || opts.startCheckpoint) {
         baseConfig.sources = baseConfig.sources ?? {};
-        baseConfig.sources.live = { grpc: grpcUrl };
+        baseConfig.sources.live = { grpcUrl };
         baseConfig.sources.backfill = baseConfig.sources.backfill ?? {};
-        baseConfig.sources.backfill.archive = archiveUrl;
+        baseConfig.sources.backfill.archiveUrl = archiveUrl;
 
         if (opts.epoch) {
           baseConfig.sources.backfill.epoch = opts.epoch;
         } else {
-          if (opts.startCheckpoint) baseConfig.sources.backfill.from = opts.startCheckpoint;
-          if (opts.endCheckpoint) baseConfig.sources.backfill.to = opts.endCheckpoint;
+          if (opts.startCheckpoint) baseConfig.sources.backfill.startCheckpoint = opts.startCheckpoint;
+          if (opts.endCheckpoint) baseConfig.sources.backfill.endCheckpoint = opts.endCheckpoint;
         }
       }
 

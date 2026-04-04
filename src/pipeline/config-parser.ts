@@ -177,54 +177,59 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
     throw new Error("Invalid config: missing 'sources' section");
   }
 
-  if (sourceConfig.live?.grpc) {
-    sources.push(createGrpcLiveSource({ url: sourceConfig.live.grpc }));
+  // Support both old (grpc, from, to) and new (grpcUrl, startCheckpoint, endCheckpoint) keys
+  const liveGrpc = sourceConfig.live?.grpcUrl ?? sourceConfig.live?.grpc;
+  const backfillArchive = sourceConfig.backfill?.archiveUrl ?? sourceConfig.backfill?.archive;
+  const backfillStart = sourceConfig.backfill?.startCheckpoint ?? sourceConfig.backfill?.from;
+  const backfillEnd = sourceConfig.backfill?.endCheckpoint ?? sourceConfig.backfill?.to;
+
+  if (liveGrpc) {
+    sources.push(createGrpcLiveSource({ url: liveGrpc }));
   }
 
-  if (sourceConfig.backfill?.archive) {
-    let from: bigint;
-    let to: bigint | undefined;
+  if (backfillArchive) {
+    let start: bigint;
+    let end: bigint | undefined;
 
     // Epoch-based archive source: resolve checkpoint range from epoch number
     if (sourceConfig.backfill.epoch != null) {
-      const grpcUrl = sourceConfig.live?.grpc;
-      if (!grpcUrl) {
-        throw new Error("Epoch-based archive source requires a gRPC URL (sources.live.grpc) to resolve the epoch's checkpoint range");
+      if (!liveGrpc) {
+        throw new Error("Epoch-based archive source requires a gRPC URL (sources.live.grpcUrl) to resolve the epoch's checkpoint range");
       }
-      const resolved = await resolveEpochCheckpointRange(grpcUrl, BigInt(sourceConfig.backfill.epoch));
-      from = resolved.start;
-      to = resolved.end;
-      await verifyArchiveAvailability(sourceConfig.backfill.archive, from, to);
+      const resolved = await resolveEpochCheckpointRange(liveGrpc, BigInt(sourceConfig.backfill.epoch));
+      start = resolved.start;
+      end = resolved.end;
+      await verifyArchiveAvailability(backfillArchive, start, end);
     } else {
       // Manual checkpoint range
-      if (typeof sourceConfig.backfill.from === "number") {
-        from = BigInt(Math.floor(sourceConfig.backfill.from));
-      } else if (typeof sourceConfig.backfill.from === "string" && /^\d+$/.test(sourceConfig.backfill.from)) {
-        from = BigInt(sourceConfig.backfill.from);
+      if (typeof backfillStart === "number") {
+        start = BigInt(Math.floor(backfillStart));
+      } else if (typeof backfillStart === "string" && /^\d+$/.test(backfillStart)) {
+        start = BigInt(backfillStart);
       } else {
-        from = 0n;
+        start = 0n;
       }
 
-      if (sourceConfig.backfill.to != null) {
-        to = typeof sourceConfig.backfill.to === "number"
-          ? BigInt(Math.floor(sourceConfig.backfill.to))
-          : BigInt(sourceConfig.backfill.to);
+      if (backfillEnd != null) {
+        end = typeof backfillEnd === "number"
+          ? BigInt(Math.floor(backfillEnd))
+          : BigInt(backfillEnd);
       }
 
-      if (to != null && from > to) {
-        throw new Error(`Invalid checkpoint range: from (${from}) is greater than to (${to})`);
+      if (end != null && start > end) {
+        throw new Error(`Invalid checkpoint range: startCheckpoint (${start}) is greater than endCheckpoint (${end})`);
       }
 
-      if (to != null) {
-        await verifyArchiveAvailability(sourceConfig.backfill.archive, from, to);
+      if (end != null) {
+        await verifyArchiveAvailability(backfillArchive, start, end);
       }
     }
 
     sources.push(createArchiveSource({
-      archiveUrl: sourceConfig.backfill.archive,
-      from,
-      to,
-      grpcUrl: sourceConfig.live?.grpc,
+      archiveUrl: backfillArchive,
+      from: start,
+      to: end,
+      grpcUrl: liveGrpc,
       concurrency: sourceConfig.backfill.concurrency,
       workers: sourceConfig.backfill.workers,
       balanceCoinTypes: config.processors?.balances?.coinTypes === "*"
