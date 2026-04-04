@@ -134,6 +134,14 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         ? createPostgresDriver(config.url)
         : createSqliteDriver(sqlitePath);
 
+      // Snapshot mode: drop existing tables to avoid stale constraints
+      if (snapshotMode && isSqlite) {
+        await driver.exec("DROP TABLE IF EXISTS transactions");
+        await driver.exec("DROP TABLE IF EXISTS move_calls");
+        await driver.exec("DROP TABLE IF EXISTS balance_changes");
+        await driver.exec("DROP TABLE IF EXISTS balances");
+      }
+
       // Aggressive SQLite pragmas for snapshot mode (bulk insert optimization)
       if (snapshotMode && isSqlite) {
         await driver.exec("PRAGMA synchronous = OFF");
