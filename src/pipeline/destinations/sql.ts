@@ -26,6 +26,8 @@ export interface SqlStorageConfig {
   balances?: boolean;
   /** Enable transaction tables (transactions + move_calls) */
   transactions?: boolean;
+  /** Defer index creation until shutdown (faster bulk inserts for snapshots) */
+  deferIndexes?: boolean;
 }
 
 type Dialect = "postgres" | "sqlite";
@@ -119,6 +121,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
   // Pre-computed table configs
   const tables = new Map<string, { name: string; columns: string[] }>();
+  const deferredIndexes: string[] = [];
 
   return {
     name: isPostgres ? "postgres" : "sqlite",
@@ -146,6 +149,12 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         }
       }
 
+      // Helper: execute index SQL now or defer it
+      const indexOrDefer = async (sql: string) => {
+        if (config.deferIndexes) deferredIndexes.push(sql);
+        else await driver!.exec(sql);
+      };
+
       // Create balance tables
       if (config.balances) {
         if (driver.dialect === "postgres") {
@@ -160,10 +169,10 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
               sui_timestamp TIMESTAMPTZ NOT NULL,
               UNIQUE (tx_digest, address, coin_type)
             );
-            CREATE INDEX IF NOT EXISTS idx_bc_address ON balance_changes(address);
-            CREATE INDEX IF NOT EXISTS idx_bc_coin_type ON balance_changes(coin_type);
-            CREATE INDEX IF NOT EXISTS idx_bc_checkpoint ON balance_changes(checkpoint_seq);
           `);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_address ON balance_changes(address)`);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_coin_type ON balance_changes(coin_type)`);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_checkpoint ON balance_changes(checkpoint_seq)`);
           await driver.exec(`
             CREATE TABLE IF NOT EXISTS balances (
               address TEXT NOT NULL,
@@ -173,8 +182,8 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
               last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
               PRIMARY KEY (address, coin_type)
             );
-            CREATE INDEX IF NOT EXISTS idx_balances_coin ON balances(coin_type, balance DESC);
           `);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_balances_coin ON balances(coin_type, balance DESC)`);
         } else {
           await driver.exec(`
             CREATE TABLE IF NOT EXISTS balance_changes (
@@ -187,9 +196,9 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
               sui_timestamp TEXT NOT NULL,
               UNIQUE (tx_digest, address, coin_type)
             );
-            CREATE INDEX IF NOT EXISTS idx_bc_address ON balance_changes(address);
-            CREATE INDEX IF NOT EXISTS idx_bc_coin_type ON balance_changes(coin_type);
           `);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_address ON balance_changes(address)`);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_bc_coin_type ON balance_changes(coin_type)`);
           await driver.exec(`
             CREATE TABLE IF NOT EXISTS balances (
               address TEXT NOT NULL,
@@ -219,9 +228,9 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
               checkpoint_seq NUMERIC NOT NULL,
               sui_timestamp TIMESTAMPTZ NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender);
-            CREATE INDEX IF NOT EXISTS idx_tx_checkpoint ON transactions(checkpoint_seq);
           `);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender)`);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_checkpoint ON transactions(checkpoint_seq)`);
           await driver.exec(`
             CREATE TABLE IF NOT EXISTS move_calls (
               tx_digest TEXT NOT NULL,
@@ -233,10 +242,10 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
               sui_timestamp TIMESTAMPTZ NOT NULL,
               PRIMARY KEY (tx_digest, call_index)
             );
-            CREATE INDEX IF NOT EXISTS idx_mc_package ON move_calls(package);
-            CREATE INDEX IF NOT EXISTS idx_mc_module ON move_calls(package, module);
-            CREATE INDEX IF NOT EXISTS idx_mc_function ON move_calls(package, module, function);
           `);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_package ON move_calls(package)`);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_module ON move_calls(package, module)`);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_function ON move_calls(package, module, function)`);
         } else {
           await driver.exec(`
             CREATE TABLE IF NOT EXISTS transactions (
@@ -250,9 +259,9 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
               checkpoint_seq TEXT NOT NULL,
               sui_timestamp TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender);
-            CREATE INDEX IF NOT EXISTS idx_tx_checkpoint ON transactions(checkpoint_seq);
           `);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender)`);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_checkpoint ON transactions(checkpoint_seq)`);
           await driver.exec(`
             CREATE TABLE IF NOT EXISTS move_calls (
               tx_digest TEXT NOT NULL,
@@ -264,13 +273,17 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
               sui_timestamp TEXT NOT NULL,
               PRIMARY KEY (tx_digest, call_index)
             );
-            CREATE INDEX IF NOT EXISTS idx_mc_package ON move_calls(package);
-            CREATE INDEX IF NOT EXISTS idx_mc_module ON move_calls(package, module);
-            CREATE INDEX IF NOT EXISTS idx_mc_function ON move_calls(package, module, function);
           `);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_package ON move_calls(package)`);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_module ON move_calls(package, module)`);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_mc_function ON move_calls(package, module, function)`);
         }
 
         log.info("transaction tables created");
+      }
+
+      if (deferredIndexes.length > 0) {
+        log.info({ count: deferredIndexes.length }, "indexes deferred to shutdown");
       }
 
       log.info({ dialect: driver.dialect }, "sql storage initialized");
@@ -350,6 +363,15 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
     },
 
     async shutdown(): Promise<void> {
+      if (driver && deferredIndexes.length > 0) {
+        log.info({ count: deferredIndexes.length }, "creating deferred indexes...");
+        const startTime = performance.now();
+        for (const sql of deferredIndexes) {
+          await driver.exec(sql);
+        }
+        const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+        log.info({ elapsed: `${elapsed}s` }, "deferred indexes created");
+      }
       if (driver) {
         await driver.close();
         driver = null;

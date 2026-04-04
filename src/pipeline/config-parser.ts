@@ -314,6 +314,7 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
       transactions: !!processorConfig?.transactions,
+      deferIndexes: !!storageConfig.deferIndexes,
     }));
   }
 
@@ -326,6 +327,7 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
       balances: !!processorConfig?.balances,
       transactions: !!processorConfig?.transactions,
+      deferIndexes: !!storageConfig.deferIndexes,
     }));
   }
 

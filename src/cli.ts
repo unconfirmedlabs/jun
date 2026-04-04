@@ -2149,6 +2149,10 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
         if (opts.coinType || baseConfig.processors?.balanceChanges) {
           baseConfig.storage.balances = true;
         }
+        // Defer indexes in snapshot mode for faster bulk inserts
+        if (backfillOnly) {
+          baseConfig.storage.deferIndexes = true;
+        }
       }
 
       // S3 export validation — check creds before pipeline starts
