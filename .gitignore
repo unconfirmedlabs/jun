@@ -50,3 +50,6 @@ native/*.o
 native/*.dylib
 native/*.so
 native/*.o
+defi-tracker.db
+defi-tracker.db-shm
+defi-tracker.db-wal
