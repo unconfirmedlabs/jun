@@ -457,22 +457,21 @@ async function runSource(
 
       if (config.onProgress) {
         config.onProgress({ source: source.name, checkpoints: checkpointCount, total, rate, elapsedSecs });
+      } else if (total) {
+        // Progress bar always goes to stderr (even with --quiet)
+        const pct = Math.round((checkpointCount / total) * 100);
+        const remaining = Math.round((total - checkpointCount) / (rate || 1));
+        const bar = progressBar(pct);
+        process.stderr.write(`\r[${source.name}] ${bar} ${pct}% | ${checkpointCount.toLocaleString()}/${total.toLocaleString()} | ${rate}/s | ETA ${remaining}s  `);
       } else if (humanOutput) {
-        if (total) {
-          const pct = Math.round((checkpointCount / total) * 100);
-          const remaining = Math.round((total - checkpointCount) / (rate || 1));
-          const bar = progressBar(pct);
-          process.stderr.write(`\r[${source.name}] ${bar} ${pct}% | ${checkpointCount.toLocaleString()}/${total.toLocaleString()} | ${rate}/s | ETA ${remaining}s  `);
-        } else {
-          console.log(`[${source.name}] ${checkpointCount} checkpoints (${rate}/s, ${elapsed}s)`);
-        }
+        console.log(`[${source.name}] ${checkpointCount} checkpoints (${rate}/s, ${elapsed}s)`);
       }
       log.info({ source: source.name, checkpoints: checkpointCount, rate: `${rate}/s`, elapsed }, "progress");
     }
   }
 
   // Clear progress bar line
-  if (config.totalCheckpoints && source.name !== "live" && humanOutput && !config.onProgress) {
+  if (config.totalCheckpoints && source.name !== "live" && !config.onProgress) {
     const elapsedSecs = (performance.now() - startTime) / 1000;
     const rate = Math.round(checkpointCount / (elapsedSecs || 1));
     process.stderr.write(`\r[${source.name}] ${progressBar(100)} 100% | ${checkpointCount.toLocaleString()} checkpoints | ${rate}/s | ${elapsedSecs.toFixed(1)}s\n`);
