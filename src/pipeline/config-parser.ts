@@ -80,6 +80,9 @@ async function resolveEpochCheckpointRange(
     const serviceInfo = await client.getServiceInfo();
     const currentEpoch = BigInt(serviceInfo.epoch ?? "0");
 
+    if (epoch < 0n) {
+      throw new Error(`Invalid epoch: ${epoch}. Epoch must be a non-negative integer.`);
+    }
     if (epoch === currentEpoch) {
       throw new Error(
         `Epoch ${epoch} is the current epoch and has not completed yet`,
@@ -87,7 +90,7 @@ async function resolveEpochCheckpointRange(
     }
     if (epoch > currentEpoch) {
       throw new Error(
-        `Epoch ${epoch} has not started yet (current epoch: ${currentEpoch})`,
+        `Epoch ${epoch} does not exist (current epoch: ${currentEpoch})`,
       );
     }
 
@@ -192,17 +195,29 @@ export async function parsePipelineConfig(yamlContent: string): Promise<ParsedPi
       from = resolved.start;
       to = resolved.end;
       await verifyArchiveAvailability(sourceConfig.backfill.archive, from, to);
-    } else if (typeof sourceConfig.backfill.from === "number") {
-      from = BigInt(Math.floor(sourceConfig.backfill.from));
-    } else if (typeof sourceConfig.backfill.from === "string") {
-      // Could be "timestamp:ISO", "package:0x...", or numeric string
-      // For now, handle numeric strings. Resolution of timestamp/package
-      // happens at runtime in the archive source or pipeline.
-      from = /^\d+$/.test(sourceConfig.backfill.from)
-        ? BigInt(sourceConfig.backfill.from)
-        : 0n; // Will be resolved at runtime
     } else {
-      from = 0n;
+      // Manual checkpoint range
+      if (typeof sourceConfig.backfill.from === "number") {
+        from = BigInt(Math.floor(sourceConfig.backfill.from));
+      } else if (typeof sourceConfig.backfill.from === "string" && /^\d+$/.test(sourceConfig.backfill.from)) {
+        from = BigInt(sourceConfig.backfill.from);
+      } else {
+        from = 0n;
+      }
+
+      if (sourceConfig.backfill.to != null) {
+        to = typeof sourceConfig.backfill.to === "number"
+          ? BigInt(Math.floor(sourceConfig.backfill.to))
+          : BigInt(sourceConfig.backfill.to);
+      }
+
+      if (to != null && from > to) {
+        throw new Error(`Invalid checkpoint range: from (${from}) is greater than to (${to})`);
+      }
+
+      if (to != null) {
+        await verifyArchiveAvailability(sourceConfig.backfill.archive, from, to);
+      }
     }
 
     sources.push(createArchiveSource({
