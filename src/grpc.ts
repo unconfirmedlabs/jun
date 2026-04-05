@@ -23,6 +23,12 @@ const READ_MASK_PATHS = [
   "transactions.effects",
   "transactions.balance_changes",
   "summary.timestamp",
+  "summary.epoch",
+  "summary.digest",
+  "summary.previous_digest",
+  "summary.content_digest",
+  "summary.total_network_transactions",
+  "summary.epoch_rolling_gas_cost_summary",
 ];
 
 const PROTO_LOAD_OPTIONS: protoLoader.Options = {
@@ -86,7 +92,91 @@ export interface GrpcBalanceChange {
   amount: string;
 }
 
-/** A Move call command from a PTB */
+/** Owner of a Sui object — flattened representation used across records. */
+export interface GrpcOwner {
+  kind: "ADDRESS" | "OBJECT" | "SHARED" | "IMMUTABLE" | "CONSENSUS_ADDRESS";
+  /** For ADDRESS/OBJECT/CONSENSUS_ADDRESS: the owner address. For SHARED: unused. */
+  address?: string;
+  /** For SHARED: initial_shared_version. For CONSENSUS_ADDRESS: start_version. */
+  version?: string;
+}
+
+/** A changed object from TransactionEffects.changed_objects */
+export interface GrpcChangedObject {
+  objectId: string;
+  inputState: "DOES_NOT_EXIST" | "EXISTS";
+  inputVersion?: string;
+  inputDigest?: string;
+  inputOwner?: GrpcOwner;
+  outputState: "DOES_NOT_EXIST" | "OBJECT_WRITE" | "PACKAGE_WRITE" | "ACCUMULATOR_WRITE";
+  outputVersion?: string;
+  outputDigest?: string;
+  outputOwner?: GrpcOwner;
+  idOperation: "NONE" | "CREATED" | "DELETED";
+  objectType?: string;
+  /** AccumulatorWriteV1 details when outputState === ACCUMULATOR_WRITE */
+  accumulatorWrite?: {
+    address: string;
+    type: string;
+    operation: "MERGE" | "SPLIT";
+    value: string;
+  };
+}
+
+/** An unchanged consensus object (read-only reference) from effects */
+export interface GrpcUnchangedConsensusObject {
+  kind: "READ_ONLY_ROOT" | "MUTATE_CONSENSUS_STREAM_ENDED" | "READ_CONSENSUS_STREAM_ENDED" | "CANCELED" | "PER_EPOCH_CONFIG";
+  objectId: string;
+  version?: string;
+  digest?: string;
+  objectType?: string;
+}
+
+/** A transaction input (from programmable transaction inputs[]) */
+export interface GrpcInput {
+  kind: "PURE" | "IMMUTABLE_OR_OWNED" | "SHARED" | "RECEIVING" | "FUNDS_WITHDRAWAL";
+  /** For PURE: BCS-encoded argument bytes */
+  pure?: Uint8Array;
+  /** For IMMUTABLE_OR_OWNED/SHARED/RECEIVING: object reference */
+  objectId?: string;
+  version?: string;
+  digest?: string;
+  mutability?: "IMMUTABLE" | "MUTABLE" | "NON_EXCLUSIVE_WRITE";
+  initialSharedVersion?: string;
+  /** For FUNDS_WITHDRAWAL */
+  amount?: string;
+  coinType?: string;
+  source?: "SENDER" | "SPONSOR";
+}
+
+/** Execution error details for failed transactions */
+export interface GrpcExecutionError {
+  kind: string;
+  description?: string;
+  commandIndex?: number;
+  abortCode?: string;
+  moveLocation?: {
+    package: string;
+    module: string;
+    function: string;
+    instruction?: number;
+  };
+}
+
+/** System transaction kind discriminator. undefined for regular programmable transactions. */
+export type GrpcSystemTransactionKind =
+  | "GENESIS"
+  | "CHANGE_EPOCH"
+  | "CONSENSUS_COMMIT_PROLOGUE_V1"
+  | "CONSENSUS_COMMIT_PROLOGUE_V2"
+  | "CONSENSUS_COMMIT_PROLOGUE_V3"
+  | "CONSENSUS_COMMIT_PROLOGUE_V4"
+  | "AUTHENTICATOR_STATE_UPDATE"
+  | "END_OF_EPOCH"
+  | "RANDOMNESS_STATE_UPDATE"
+  | "PROGRAMMABLE_SYSTEM_TRANSACTION";
+
+/** A command within a programmable transaction. Exactly one of the fields will be set. */
 export interface GrpcCommand {
   moveCall?: {
     package: string;
@@ -94,7 +184,32 @@ export interface GrpcCommand {
     function: string;
     typeArguments?: string[];
   };
-  // Other command types exist but we only care about MoveCall for now
+  transferObjects?: {
+    objects: any[];
+    address: any;
+  };
+  splitCoins?: {
+    coin: any;
+    amounts: any[];
+  };
+  mergeCoins?: {
+    coin: any;
+    coins: any[];
+  };
+  publish?: {
+    modules: Uint8Array[];
+    dependencies: string[];
+  };
+  upgrade?: {
+    modules: Uint8Array[];
+    dependencies: string[];
+    package: string;
+    ticket: any;
+  };
+  makeMoveVector?: {
+    elementType?: any;
+    elements: any[];
+  };
 }
 
 /** A transaction from a gRPC checkpoint response */
@@ -102,6 +217,10 @@ export interface GrpcTransaction {
   digest: string;
   transaction?: {
     sender: string;
+    /** Discriminator for non-programmable (system) transactions. Undefined for regular PTBs. */
+    systemKind?: GrpcSystemTransactionKind;
+    /** Raw system transaction data as JSON (only populated when systemKind is set) */
+    systemData?: any;
     programmableTransaction?: {
       commands?: GrpcCommand[];
     };
@@ -112,17 +231,42 @@ export interface GrpcTransaction {
       };
     };
     commands?: GrpcCommand[];
+    /** Programmable transaction inputs (PURE, IMMUTABLE_OR_OWNED, SHARED, RECEIVING, FUNDS_WITHDRAWAL) */
+    inputs?: GrpcInput[];
+    gasPayment?: {
+      objects: Array<{ objectId: string; version: string; digest: string }>;
+      owner: string;
+      price: string;
+      budget: string;
+    };
+    expiration?: {
+      kind: "NONE" | "EPOCH" | "VALID_DURING";
+      epoch?: string;
+      minEpoch?: string;
+      maxEpoch?: string;
+      minTimestamp?: string;
+      maxTimestamp?: string;
+      chain?: string;
+      nonce?: string;
+    };
   };
   events: {
     events: GrpcEvent[];
   } | null;
   effects?: {
-    status: { success?: boolean };
+    status: { success?: boolean; error?: GrpcExecutionError };
     gasUsed?: {
       computationCost: string;
       storageCost: string;
       storageRebate: string;
+      nonRefundableStorageFee?: string;
     };
+    epoch?: string;
+    dependencies?: string[];
+    changedObjects?: GrpcChangedObject[];
+    unchangedConsensusObjects?: GrpcUnchangedConsensusObject[];
+    eventsDigest?: string;
+    lamportVersion?: string;
   };
   balanceChanges?: GrpcBalanceChange[];
 }
@@ -163,17 +307,31 @@ export interface GrpcDatatypeDescriptor {
   }>;
 }
 
+/** Checkpoint summary fields (from CheckpointSummary proto / BCS) */
+export interface GrpcCheckpointSummary {
+  timestamp: {
+    seconds: string;
+    nanos: number;
+  };
+  epoch?: string;
+  digest?: string;
+  previousDigest?: string;
+  contentDigest?: string;
+  totalNetworkTransactions?: string;
+  epochRollingGasCostSummary?: {
+    computationCost: string;
+    storageCost: string;
+    storageRebate: string;
+    nonRefundableStorageFee: string;
+  };
+}
+
 /** A checkpoint response from gRPC */
 export interface GrpcCheckpointResponse {
   cursor: string; // checkpoint sequence number as string (u64)
   checkpoint: {
     sequenceNumber: string;
-    summary: {
-      timestamp: {
-        seconds: string;
-        nanos: number;
-      };
-    } | null;
+    summary: GrpcCheckpointSummary | null;
     transactions: GrpcTransaction[];
   };
 }

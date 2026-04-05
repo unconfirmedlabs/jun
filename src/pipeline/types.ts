@@ -24,6 +24,25 @@ export interface Checkpoint {
   rawProto?: any;
   /** Pre-computed balance changes from archive worker (bypasses balance tracker) */
   precomputedBalanceChanges?: BalanceChange[];
+
+  // ─── Checkpoint summary fields ────────────────────────────────────────────
+  /** Epoch this checkpoint belongs to */
+  epoch: bigint;
+  /** Checkpoint digest (canonical base58 string) */
+  digest: string;
+  /** Previous checkpoint digest (null for checkpoint 0) */
+  previousDigest: string | null;
+  /** Content digest — hash of CheckpointContents */
+  contentDigest: string | null;
+  /** Cumulative transaction count across the entire network */
+  totalNetworkTransactions: bigint;
+  /** Epoch-to-date rolling gas cost summary */
+  epochRollingGasCostSummary: {
+    computationCost: string;
+    storageCost: string;
+    storageRebate: string;
+    nonRefundableStorageFee: string;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -59,9 +78,20 @@ export interface TransactionRecord {
   computationCost: string;
   storageCost: string;
   storageRebate: string;
+  nonRefundableStorageFee: string | null;
   checkpointSeq: bigint;
   timestamp: Date;
   moveCallCount: number;
+  epoch: bigint;
+  errorKind: string | null;
+  errorDescription: string | null;
+  errorCommandIndex: number | null;
+  errorAbortCode: string | null;
+  errorModule: string | null;
+  errorFunction: string | null;
+  eventsDigest: string | null;
+  lamportVersion: string | null;
+  dependencyCount: number;
 }
 
 /** A Move function call within a transaction. */
@@ -75,6 +105,109 @@ export interface MoveCallRecord {
   timestamp: Date;
 }
 
+/** A checkpoint-level record (one row per checkpoint). */
+export interface CheckpointRecord {
+  sequenceNumber: bigint;
+  epoch: bigint;
+  digest: string;
+  previousDigest: string | null;
+  contentDigest: string | null;
+  timestamp: Date;
+  totalNetworkTransactions: bigint;
+  rollingComputationCost: string;
+  rollingStorageCost: string;
+  rollingStorageRebate: string;
+  rollingNonRefundableStorageFee: string;
+}
+
+/** An object change from TransactionEffects.changedObjects. */
+export interface ObjectChangeRecord {
+  txDigest: string;
+  objectId: string;
+  /** Derived from (inputState, outputState, idOperation) */
+  changeType: "CREATED" | "MUTATED" | "DELETED" | "WRAPPED" | "UNWRAPPED" | "PACKAGE_WRITE";
+  objectType: string | null;
+  inputVersion: string | null;
+  inputDigest: string | null;
+  inputOwner: string | null;
+  inputOwnerKind: string | null;
+  outputVersion: string | null;
+  outputDigest: string | null;
+  outputOwner: string | null;
+  outputOwnerKind: string | null;
+  isGasObject: boolean;
+  checkpointSeq: bigint;
+  timestamp: Date;
+}
+
+/** A transaction dependency edge. */
+export interface TransactionDependencyRecord {
+  txDigest: string;
+  dependsOnDigest: string;
+  checkpointSeq: bigint;
+  timestamp: Date;
+}
+
+/** A programmable transaction input. */
+export interface TransactionInputRecord {
+  txDigest: string;
+  inputIndex: number;
+  kind: string;
+  objectId: string | null;
+  version: string | null;
+  digest: string | null;
+  mutability: string | null;
+  initialSharedVersion: string | null;
+  /** For PURE inputs: hex-encoded BCS bytes */
+  pureBytes: string | null;
+  /** For FUNDS_WITHDRAWAL */
+  amount: string | null;
+  coinType: string | null;
+  source: string | null;
+  checkpointSeq: bigint;
+  timestamp: Date;
+}
+
+/** A command within a programmable transaction (superset of move_calls). */
+export interface CommandRecord {
+  txDigest: string;
+  commandIndex: number;
+  /** MoveCall | TransferObjects | SplitCoins | MergeCoins | Publish | Upgrade | MakeMoveVector */
+  kind: string;
+  package: string | null;
+  module: string | null;
+  function: string | null;
+  /** JSON-serialized array of type arguments (MoveCall only) */
+  typeArguments: string | null;
+  /** JSON blob for command-specific arguments */
+  args: string | null;
+  checkpointSeq: bigint;
+  timestamp: Date;
+}
+
+/** A system (non-programmable) transaction record. */
+export interface SystemTransactionRecord {
+  txDigest: string;
+  /** GENESIS | CHANGE_EPOCH | CONSENSUS_COMMIT_PROLOGUE_V1..V4 | AUTHENTICATOR_STATE_UPDATE | END_OF_EPOCH | RANDOMNESS_STATE_UPDATE | PROGRAMMABLE_SYSTEM_TRANSACTION */
+  kind: string;
+  /** Full system transaction data as JSON */
+  data: string;
+  checkpointSeq: bigint;
+  timestamp: Date;
+}
+
+/** A read-only consensus object reference. */
+export interface UnchangedConsensusObjectRecord {
+  txDigest: string;
+  objectId: string;
+  kind: string;
+  version: string | null;
+  digest: string | null;
+  objectType: string | null;
+  checkpointSeq: bigint;
+  timestamp: Date;
+}
+
 /** The result of processing a checkpoint. */
 export interface ProcessedCheckpoint {
   checkpoint: Checkpoint;
@@ -82,7 +215,52 @@ export interface ProcessedCheckpoint {
   balanceChanges: BalanceChange[];
   transactions: TransactionRecord[];
   moveCalls: MoveCallRecord[];
+  objectChanges: ObjectChangeRecord[];
+  dependencies: TransactionDependencyRecord[];
+  inputs: TransactionInputRecord[];
+  commands: CommandRecord[];
+  systemTransactions: SystemTransactionRecord[];
+  unchangedConsensusObjects: UnchangedConsensusObjectRecord[];
 }
+
+/** Build an empty ProcessedCheckpoint wrapping the given checkpoint. */
+export function emptyProcessed(checkpoint: Checkpoint): ProcessedCheckpoint {
+  return {
+    checkpoint,
+    events: [],
+    balanceChanges: [],
+    transactions: [],
+    moveCalls: [],
+    objectChanges: [],
+    dependencies: [],
+    inputs: [],
+    commands: [],
+    systemTransactions: [],
+    unchangedConsensusObjects: [],
+  };
+}
+
+/**
+ * Default summary fields for a Checkpoint. Use when sources don't (yet) populate
+ * the full summary, and in test fixtures. Does NOT include sequenceNumber,
+ * timestamp, transactions, or source — those are always required.
+ */
+export const DEFAULT_CHECKPOINT_SUMMARY: Pick<
+  Checkpoint,
+  "epoch" | "digest" | "previousDigest" | "contentDigest" | "totalNetworkTransactions" | "epochRollingGasCostSummary"
+> = {
+  epoch: 0n,
+  digest: "",
+  previousDigest: null,
+  contentDigest: null,
+  totalNetworkTransactions: 0n,
+  epochRollingGasCostSummary: {
+    computationCost: "0",
+    storageCost: "0",
+    storageRebate: "0",
+    nonRefundableStorageFee: "0",
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Source — where checkpoints come from

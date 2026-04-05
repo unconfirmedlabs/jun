@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { unlinkSync } from "fs";
 import { createSqlStorage } from "./pipeline/destinations/sql.ts";
 import { exportSplitSqliteDatasets } from "./sqlite-export.ts";
+import { DEFAULT_CHECKPOINT_SUMMARY, emptyProcessed } from "./pipeline/types.ts";
 
 const SOURCE_DB = "/tmp/jun-sqlite-export-source.db";
 const SPLIT_DBS = [
@@ -45,12 +46,13 @@ describe("exportSplitSqliteDatasets", () => {
 
     const timestamp = new Date("2026-04-04T10:00:00Z");
     await storage.write([{
-      checkpoint: {
+      ...emptyProcessed({
         sequenceNumber: 1n,
         timestamp,
         transactions: [],
         source: "backfill",
-      },
+        ...DEFAULT_CHECKPOINT_SUMMARY,
+      }),
       events: [
         {
           handlerName: "swaps",
@@ -89,9 +91,20 @@ describe("exportSplitSqliteDatasets", () => {
           computationCost: "10",
           storageCost: "20",
           storageRebate: "5",
+          nonRefundableStorageFee: null,
           moveCallCount: 1,
           checkpointSeq: 1n,
           timestamp,
+          epoch: 0n,
+          errorKind: null,
+          errorDescription: null,
+          errorCommandIndex: null,
+          errorAbortCode: null,
+          errorModule: null,
+          errorFunction: null,
+          eventsDigest: null,
+          lamportVersion: null,
+          dependencyCount: 0,
         },
       ],
       moveCalls: [

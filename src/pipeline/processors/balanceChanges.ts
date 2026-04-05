@@ -6,6 +6,7 @@
  * Filters by coin type if configured.
  */
 import type { Processor, Checkpoint, ProcessedCheckpoint, BalanceChange } from "../types.ts";
+import { emptyProcessed } from "../types.ts";
 import { normalizeCoinType } from "../../normalize.ts";
 import { computeBalanceChangesFromArchive } from "../../archive-balance.ts";
 import type { Logger } from "../../logger.ts";
@@ -33,7 +34,7 @@ export function createBalanceTracker(config: BalanceTrackerConfig): Processor {
       // Use pre-computed balance changes from archive worker if available
       if (checkpoint.precomputedBalanceChanges !== undefined) {
         changes = checkpoint.precomputedBalanceChanges;
-        return { checkpoint, events: [], balanceChanges: changes, transactions: [], moveCalls: [] };
+        return { ...emptyProcessed(checkpoint), balanceChanges: changes };
       }
 
       if (checkpoint.rawProto) {
@@ -66,7 +67,7 @@ export function createBalanceTracker(config: BalanceTrackerConfig): Processor {
         }
       }
 
-      return { checkpoint, events: [], balanceChanges: changes, transactions: [], moveCalls: [] };
+      return { ...emptyProcessed(checkpoint), balanceChanges: changes };
     },
 
     reload(newConfig: BalanceTrackerConfig): void {

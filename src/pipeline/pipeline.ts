@@ -34,6 +34,7 @@ import type {
   PipelineConfig,
   ProcessedCheckpoint,
 } from "./types.ts";
+import { emptyProcessed } from "./types.ts";
 import type { WriterChannel } from "./writer.ts";
 import { createPipelineWriteBuffer, type PipelineWriteBuffer, type PipelineFlushStats } from "./write-buffer.ts";
 import { createSqliteWriterChannel } from "./writers/sqlite.ts";
@@ -422,13 +423,7 @@ async function runSource(
 
   for await (const checkpoint of source.stream()) {
     // Process through all processors
-    const processed: ProcessedCheckpoint = {
-      checkpoint,
-      events: [],
-      balanceChanges: [],
-      transactions: [],
-      moveCalls: [],
-    };
+    const processed: ProcessedCheckpoint = emptyProcessed(checkpoint);
 
     for (const processor of processors) {
       const result = processor.process(checkpoint);
@@ -436,6 +431,12 @@ async function runSource(
       processed.balanceChanges.push(...result.balanceChanges);
       processed.transactions.push(...result.transactions);
       processed.moveCalls.push(...result.moveCalls);
+      processed.objectChanges.push(...result.objectChanges);
+      processed.dependencies.push(...result.dependencies);
+      processed.inputs.push(...result.inputs);
+      processed.commands.push(...result.commands);
+      processed.systemTransactions.push(...result.systemTransactions);
+      processed.unchangedConsensusObjects.push(...result.unchangedConsensusObjects);
     }
 
     // Human output

@@ -16,6 +16,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { unlinkSync } from "fs";
 import type { Source, Processor, Checkpoint, ProcessedCheckpoint } from "./types.ts";
+import { DEFAULT_CHECKPOINT_SUMMARY } from "./types.ts";
 
 const log = createLogger();
 
@@ -172,6 +173,7 @@ describe("pipeline stop propagation", () => {
             timestamp: new Date(),
             transactions: [],
             source: "live" as const,
+            ...DEFAULT_CHECKPOINT_SUMMARY,
           };
           await Bun.sleep(10);
         }

@@ -6,6 +6,7 @@
  * Fields auto-resolved from chain if not provided.
  */
 import type { Processor, Checkpoint, ProcessedCheckpoint, DecodedEvent } from "../types.ts";
+import { emptyProcessed } from "../types.ts";
 import type { FieldDefs } from "../../schema.ts";
 import { buildBcsSchema, formatRow } from "../../schema.ts";
 import { normalizeEventType, stripGenerics } from "../../normalize.ts";
@@ -149,7 +150,7 @@ export function createEventDecoder(config: EventDecoderConfig): Processor {
         }
       }
 
-      return { checkpoint, events, balanceChanges: [], transactions: [], moveCalls: [] };
+      return { ...emptyProcessed(checkpoint), events };
     },
 
     reload(newHandlers: Record<string, EventHandlerConfig>): void {
