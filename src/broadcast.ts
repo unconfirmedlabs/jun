@@ -16,7 +16,7 @@
  */
 import { connect, type NatsConnection, StringCodec } from "nats";
 import type { Logger } from "./logger.ts";
-import type { GrpcCheckpointResponse, GrpcEvent } from "./grpc.ts";
+import type { GrpcCheckpointResponse, CheckpointEvent } from "./grpc.ts";
 import type { DecodedEvent } from "./pipeline/types.ts";
 
 // ---------------------------------------------------------------------------

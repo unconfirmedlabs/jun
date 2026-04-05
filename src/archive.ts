@@ -17,7 +17,7 @@ import protobuf from "protobufjs";
 import path from "path";
 import type {
   GrpcCheckpointResponse,
-  GrpcEvent,
+  CheckpointEvent,
   GrpcTransaction,
   GrpcChangedObject,
   GrpcOwner,
@@ -59,7 +59,7 @@ function formatTypeTag(tag: any): string {
 }
 
 /** Parse events using @mysten/sui/bcs. */
-function parseEvents(eventsBcs: Uint8Array): GrpcEvent[] {
+function parseEvents(eventsBcs: Uint8Array): CheckpointEvent[] {
   const decoded = NativeTransactionEvents.parse(eventsBcs);
   return decoded.data.map((ev: any) => {
     const typeParams = (ev.type.typeParams ?? []).map((tp: any) => formatTypeTag(tp));
@@ -70,6 +70,7 @@ function parseEvents(eventsBcs: Uint8Array): GrpcEvent[] {
       module: ev.transactionModule,
       sender: ev.sender,
       eventType,
+      typeParams,
       contents: { name: eventType, value: new Uint8Array(ev.contents) },
     };
   });
@@ -677,7 +678,7 @@ export async function decodeCheckpointFromProto(
 
     // Decode events from BCS
     const eventsBcs = tx.events?.bcs?.value as Uint8Array | undefined;
-    const events: GrpcEvent[] = eventsBcs && eventsBcs.length > 0
+    const events: CheckpointEvent[] = eventsBcs && eventsBcs.length > 0
       ? parseEvents(new Uint8Array(eventsBcs))
       : [];
 

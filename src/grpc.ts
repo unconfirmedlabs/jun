@@ -74,11 +74,16 @@ function loadProto() {
 // ---------------------------------------------------------------------------
 
 /** A single event from a gRPC checkpoint response */
-export interface GrpcEvent {
+export interface CheckpointEvent {
   packageId: string;
   module: string;
   sender: string;
   eventType: string;
+  /** Concrete type arguments from the event's StructTag.typeParams, formatted as
+   *  fully qualified type strings (e.g., ["0x2::sui::SUI", "0x456::my_share::MY_SHARE"]).
+   *  Populated by the archive source. For gRPC live events, not set — the event
+   *  processor falls back to parsing from eventType string. */
+  typeParams?: string[];
   contents: {
     name: string;
     value: Uint8Array;
@@ -251,7 +256,7 @@ export interface GrpcTransaction {
     };
   };
   events: {
-    events: GrpcEvent[];
+    events: CheckpointEvent[];
   } | null;
   effects?: {
     status: { success?: boolean; error?: GrpcExecutionError };

@@ -9,7 +9,7 @@ import type { Processor, Checkpoint, ProcessedCheckpoint, DecodedEvent } from ".
 import { emptyProcessed } from "../types.ts";
 import type { FieldDefs } from "../../schema.ts";
 import { buildBcsSchema, formatRow } from "../../schema.ts";
-import { normalizeEventType, stripGenerics } from "../../normalize.ts";
+import { normalizeEventType, stripGenerics, extractTypeParams } from "../../normalize.ts";
 import { resolveEventHandlerFields } from "../../resolve-fields.ts";
 import { createGrpcClient, type GrpcClient } from "../../grpc.ts";
 import type { Logger } from "../../logger.ts";
@@ -26,6 +26,8 @@ export interface EventHandlerConfig {
   fields?: FieldDefs;
   /** Optional: start checkpoint for backfill */
   startCheckpoint?: bigint | string;
+  /** Number of type parameters on the event struct (auto-resolved from chain). */
+  typeParamCount?: number;
 }
 
 export interface EventDecoderConfig {
@@ -41,6 +43,8 @@ interface CompiledHandler {
   strippedType: string;
   fields: FieldDefs;
   bcsSchema: any;
+  /** Number of type parameters from the struct descriptor (auto-resolved). */
+  typeParamCount: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -62,12 +66,19 @@ export function createEventDecoder(config: EventDecoderConfig): Processor {
   function compile(handlers: Record<string, EventHandlerConfig>): void {
     compiled = Object.entries(handlers).map(([name, handler]) => {
       const normalizedType = normalizeEventType(handler.type);
+      // BCS schema only includes actual struct fields — not type_param_N columns
+      // (phantom type params don't affect BCS encoding). Filter them out.
+      const bcsFields: FieldDefs = {};
+      for (const [k, v] of Object.entries(handler.fields!)) {
+        if (!k.startsWith("type_param_")) bcsFields[k] = v;
+      }
       return {
         name,
         type: normalizedType,
         strippedType: stripGenerics(normalizedType),
         fields: handler.fields!,
-        bcsSchema: buildBcsSchema(handler.fields!),
+        bcsSchema: buildBcsSchema(bcsFields),
+        typeParamCount: handler.typeParamCount ?? 0,
       };
     });
 
@@ -96,14 +107,15 @@ export function createEventDecoder(config: EventDecoderConfig): Processor {
         }
         const grpcClient = createGrpcClient({ url: config.grpcUrl });
         // Convert to EventHandler format for resolveEventHandlerFields
-        const handlers: Record<string, { type: string; fields?: FieldDefs }> = {};
+        const handlers: Record<string, { type: string; fields?: FieldDefs; typeParamCount?: number }> = {};
         for (const [name, handler] of Object.entries(config.handlers)) {
           handlers[name] = { type: handler.type, fields: handler.fields };
         }
         await resolveEventHandlerFields(handlers, grpcClient, log);
-        // Write resolved fields back
+        // Write resolved fields + type param count back
         for (const [name, handler] of Object.entries(handlers)) {
           config.handlers[name]!.fields = handler.fields;
+          config.handlers[name]!.typeParamCount = handler.typeParamCount;
         }
         grpcClient.close();
       }
@@ -134,6 +146,19 @@ export function createEventDecoder(config: EventDecoderConfig): Processor {
               value instanceof Uint8Array ? value : new Uint8Array(value),
             );
             const formatted = formatRow(decoded, handler.fields);
+
+            // Merge type params into the data map as type_param_0, type_param_1, etc.
+            if (handler.typeParamCount > 0) {
+              // Prefer pre-parsed typeParams array (archive path). Fall back to
+              // parsing from the eventType string (gRPC path where proto only
+              // provides the formatted type string).
+              const params = event.typeParams?.length
+                ? event.typeParams
+                : extractTypeParams(event.eventType);
+              for (let i = 0; i < handler.typeParamCount; i++) {
+                formatted[`type_param_${i}`] = params[i] ?? null;
+              }
+            }
 
             events.push({
               handlerName: handler.name,

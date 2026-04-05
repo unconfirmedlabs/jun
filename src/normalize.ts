@@ -75,3 +75,39 @@ export function stripGenerics(type: string): string {
   const index = type.indexOf("<");
   return index === -1 ? type : type.slice(0, index);
 }
+
+/**
+ * Extract the top-level type parameters from a Move type string.
+ * Splits on commas at depth 0 (respecting nested `<>`).
+ *
+ * "Event<0x2::sui::SUI>"                    → ["0x2::sui::SUI"]
+ * "BetResults<UP_USD, Coinflip>"            → ["UP_USD", "Coinflip"]
+ * "PositionClaimed<PositionName<A, B>, C>"  → ["PositionName<A, B>", "C"]
+ * "Event"                                   → []
+ */
+export function extractTypeParams(type: string): string[] {
+  const start = type.indexOf("<");
+  if (start === -1) return [];
+
+  // Find the matching closing `>` (last char, but verify)
+  const inner = type.slice(start + 1, type.lastIndexOf(">"));
+  if (!inner) return [];
+
+  // Split on commas at depth 0
+  const params: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i]!;
+    if (ch === "<") depth++;
+    else if (ch === ">") depth--;
+    else if (ch === "," && depth === 0) {
+      params.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) params.push(current.trim());
+  return params;
+}

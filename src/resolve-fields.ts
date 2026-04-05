@@ -17,6 +17,8 @@ export interface EventHandler {
   fields?: FieldDefs;
   /** Start checkpoint for backfill (optional) */
   startCheckpoint?: bigint | string;
+  /** Number of type parameters on the event struct (auto-resolved). */
+  typeParamCount?: number;
 }
 
 /**
@@ -64,7 +66,16 @@ export async function resolveEventHandlerFields(
       throw new Error(`Handler "${name}" (${handler.type}) has no primitive fields. Cannot create BCS schema.`);
     }
 
+    // Detect type parameters from the struct descriptor and add type_param_N columns.
+    // Phantom type params don't affect BCS encoding but carry important type identity
+    // (e.g., CompositionPublishedEvent<CompositionShare> — the share type is only in typeParams).
+    const typeParamCount = descriptor.typeParameters?.length ?? 0;
+    handler.typeParamCount = typeParamCount;
+    for (let i = 0; i < typeParamCount; i++) {
+      fields[`type_param_${i}`] = "string" as any;
+    }
+
     handler.fields = fields;
-    log.info({ handler: name, fields: Object.keys(fields) }, "fields resolved");
+    log.info({ handler: name, fields: Object.keys(fields), typeParamCount }, "fields resolved");
   }
 }

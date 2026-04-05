@@ -5,7 +5,7 @@
 import { program } from "commander";
 import pMap from "p-map";
 import pRetry from "p-retry";
-import { createGrpcClient, type GrpcCheckpointResponse, type GrpcEvent } from "./grpc.ts";
+import { createGrpcClient, type GrpcCheckpointResponse, type CheckpointEvent } from "./grpc.ts";
 import { createArchiveClient } from "./archive.ts";
 import { generateFieldDSL, formatCodegenResult } from "./codegen.ts";
 import { createSqliteWriter, type SqliteWriter } from "./output/sqlite.ts";
@@ -163,7 +163,7 @@ function formatTimestamp(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-function formatEvent(ev: GrpcEvent, txDigest: string): string {
+function formatEvent(ev: CheckpointEvent, txDigest: string): string {
   const bcsLen = ev.contents?.value ? ev.contents.value.length : 0;
   return [
     `    type:   ${ev.eventType}`,

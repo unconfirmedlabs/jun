@@ -5,7 +5,7 @@
  * No effects table — status and gas are on the transactions table.
  * Uses bun:sqlite with WAL mode and prepared statements for write performance.
  */
-import type { GrpcEvent } from "../grpc.ts";
+import type { CheckpointEvent } from "../grpc.ts";
 import { createSqliteConnection } from "../db.ts";
 
 export interface SqliteWriterOptions {
@@ -25,7 +25,7 @@ export interface SqliteWriter {
       gasComputation?: number;
       gasStorage?: number;
       gasRebate?: number;
-      events: GrpcEvent[];
+      events: CheckpointEvent[];
       balanceChanges: any[];
     }>;
   }): void;
