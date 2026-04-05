@@ -404,9 +404,10 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
   // --- Processors ---
   const processorConfig = config.processors;
 
-  if (processorConfig?.events) {
+  const eventConfig = processorConfig?.events;
+  if (eventConfig) {
     const handlers: Record<string, { type: string; fields?: any; startCheckpoint?: any; typeParamCount?: number }> = {};
-    for (const [name, handler] of Object.entries(processorConfig.events) as [string, any][]) {
+    for (const [name, handler] of Object.entries(eventConfig) as [string, any][]) {
       if (!handler.type) {
         throw new Error(`Invalid config: event processor "${name}" is missing "type"`);
       }
@@ -428,17 +429,19 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
       resolveClient.close();
     }
 
-    // Write resolved fields back to processorConfig so handlerTables picks them up
+    // Write resolved fields back to eventConfig so handlerTables picks them up
     for (const [name, handler] of Object.entries(handlers)) {
-      processorConfig!.events![name]!.fields = handler.fields;
-      processorConfig!.events![name]!.typeParamCount = handler.typeParamCount;
+      const entry = eventConfig[name];
+      if (entry) {
+        entry.fields = handler.fields;
+        entry.typeParamCount = handler.typeParamCount;
+      }
     }
 
     const proc = createEventDecoder({
       handlers,
       grpcUrl,
     });
-    // Attach reload config so auto-reload can extract it
     (proc as any)._reloadConfig = handlers;
     processors.push(proc);
   }
