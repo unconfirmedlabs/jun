@@ -170,6 +170,14 @@ const PG_BULK_CHUNK = 10000;
 // We chunk to 30000 to stay comfortably under the limit with headroom.
 const MAX_SQLITE_PARAMS = 30000;
 
+/** Normalize missing-or-empty string values to null before NUMERIC inserts.
+ *  Postgres NUMERIC columns reject the empty string literal; SQLite NUMERIC
+ *  affinity silently stores it as TEXT (losing numeric ordering). Either way,
+ *  missing values should be SQL NULL, not "". */
+function numOrNull(v: string | null | undefined): string | null {
+  return v == null || v === "" ? null : v;
+}
+
 // ---------------------------------------------------------------------------
 // Consolidated writers — one function per table, dialect dispatch inside.
 //
@@ -253,7 +261,7 @@ async function writeBalanceChanges(ctx: WriteContext, changes: BalanceChange[]):
     c.checkpointSeq.toString(),
     c.address,
     c.coinType,
-    c.amount,
+    numOrNull(c.amount),
     c.timestamp.toISOString(),
   ]);
   await insertRows(
@@ -335,10 +343,10 @@ async function writeTransactions(ctx: WriteContext, transactions: TransactionRec
     t.digest,
     t.sender,
     ctx.dialect === "postgres" ? t.success : (t.success ? 1 : 0),
-    t.computationCost,
-    t.storageCost,
-    t.storageRebate,
-    t.nonRefundableStorageFee ?? null,
+    numOrNull(t.computationCost),
+    numOrNull(t.storageCost),
+    numOrNull(t.storageRebate),
+    numOrNull(t.nonRefundableStorageFee),
     t.moveCallCount,
     t.checkpointSeq.toString(),
     t.timestamp.toISOString(),
@@ -346,11 +354,11 @@ async function writeTransactions(ctx: WriteContext, transactions: TransactionRec
     t.errorKind ?? null,
     t.errorDescription ?? null,
     t.errorCommandIndex ?? null,
-    t.errorAbortCode ?? null,
+    numOrNull(t.errorAbortCode),
     t.errorModule ?? null,
     t.errorFunction ?? null,
     t.eventsDigest ?? null,
-    t.lamportVersion ?? null,
+    numOrNull(t.lamportVersion),
     t.dependencyCount ?? 0,
   ]);
   await insertRows(
@@ -418,8 +426,8 @@ async function writeObjectChanges(ctx: WriteContext, records: ObjectChangeRecord
   const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (tx_digest, object_id) DO NOTHING";
   const rows = records.map(r => [
     r.txDigest, r.objectId, r.changeType, r.objectType,
-    r.inputVersion, r.inputDigest, r.inputOwner, r.inputOwnerKind,
-    r.outputVersion, r.outputDigest, r.outputOwner, r.outputOwnerKind,
+    numOrNull(r.inputVersion), r.inputDigest, r.inputOwner, r.inputOwnerKind,
+    numOrNull(r.outputVersion), r.outputDigest, r.outputOwner, r.outputOwnerKind,
     ctx.dialect === "postgres" ? r.isGasObject : (r.isGasObject ? 1 : 0),
     r.checkpointSeq.toString(),
     r.timestamp.toISOString(),
