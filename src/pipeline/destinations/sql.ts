@@ -4,7 +4,10 @@
  * Single implementation, two dialects. Handles event tables, balance tables,
  * and running totals identically for both databases.
  */
-import type { Storage, ProcessedCheckpoint, DecodedEvent, BalanceChange, TransactionRecord, MoveCallRecord } from "../types.ts";
+import type {
+  Storage, ProcessedCheckpoint, DecodedEvent, BalanceChange,
+  TransactionRecord, MoveCallRecord, Checkpoint,
+} from "../types.ts";
 import type { FieldDefs } from "../../schema.ts";
 import { generateDDL } from "../../schema.ts";
 import { validateIdentifier } from "../../output/storage.ts";
@@ -26,6 +29,20 @@ export interface SqlStorageConfig {
   balances?: boolean;
   /** Enable transaction tables (transactions + move_calls) */
   transactions?: boolean;
+  /** Enable checkpoints table (one row per checkpoint with summary stats) */
+  checkpoints?: boolean;
+  /** Enable object_changes table (per-object state change from effects) */
+  objectChanges?: boolean;
+  /** Enable transaction_dependencies table */
+  dependencies?: boolean;
+  /** Enable transaction_inputs table */
+  inputs?: boolean;
+  /** Enable commands table (superset of move_calls covering all PTB command types) */
+  commands?: boolean;
+  /** Enable system_transactions table */
+  systemTransactions?: boolean;
+  /** Enable unchanged_consensus_objects table */
+  unchangedConsensusObjects?: boolean;
   /** Defer index creation until shutdown (faster bulk inserts for snapshots) */
   deferIndexes?: boolean;
   /** Use UNLOGGED tables for Postgres (no WAL during inserts, faster bulk load) */
@@ -343,6 +360,42 @@ async function writeTransactions(ctx: WriteContext, transactions: TransactionRec
       "numeric", "text", "text", "integer",
       "numeric", "text", "text",
       "text", "numeric", "integer",
+    ],
+  );
+}
+
+async function writeCheckpoints(ctx: WriteContext, checkpoints: Checkpoint[]): Promise<void> {
+  if (checkpoints.length === 0) return;
+
+  const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (sequence_number) DO NOTHING";
+  const rows = checkpoints.map(cp => [
+    cp.sequenceNumber.toString(),
+    (cp.epoch ?? 0n).toString(),
+    cp.digest ?? "",
+    cp.previousDigest ?? null,
+    cp.contentDigest ?? null,
+    ctx.dialect === "postgres" ? cp.timestamp : cp.timestamp.toISOString(),
+    (cp.totalNetworkTransactions ?? 0n).toString(),
+    cp.epochRollingGasCostSummary?.computationCost ?? "0",
+    cp.epochRollingGasCostSummary?.storageCost ?? "0",
+    cp.epochRollingGasCostSummary?.storageRebate ?? "0",
+    cp.epochRollingGasCostSummary?.nonRefundableStorageFee ?? "0",
+  ]);
+  await insertRows(
+    ctx,
+    "checkpoints",
+    [
+      "sequence_number", "epoch", "digest", "previous_digest", "content_digest",
+      "sui_timestamp", "total_network_transactions",
+      "rolling_computation_cost", "rolling_storage_cost", "rolling_storage_rebate",
+      "rolling_non_refundable_storage_fee",
+    ],
+    rows,
+    conflict,
+    [
+      "numeric", "numeric", "text", "text", "text",
+      "timestamptz", "numeric",
+      "numeric", "numeric", "numeric", "numeric",
     ],
   );
 }
@@ -830,6 +883,54 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         log.info("transaction tables created");
       }
 
+      // ─── Checkpoints table (one row per checkpoint) ─────────────────────
+      if (config.checkpoints) {
+        const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
+        if (driver.dialect === "postgres") {
+          const pkClause = snapshotMode ? "" : "PRIMARY KEY";
+          await driver.exec(`
+            CREATE ${unloggedKw} TABLE IF NOT EXISTS checkpoints (
+              sequence_number NUMERIC NOT NULL ${pkClause},
+              epoch NUMERIC NOT NULL,
+              digest TEXT NOT NULL,
+              previous_digest TEXT,
+              content_digest TEXT,
+              sui_timestamp TIMESTAMPTZ NOT NULL,
+              total_network_transactions NUMERIC NOT NULL,
+              rolling_computation_cost NUMERIC NOT NULL,
+              rolling_storage_cost NUMERIC NOT NULL,
+              rolling_storage_rebate NUMERIC NOT NULL,
+              rolling_non_refundable_storage_fee NUMERIC NOT NULL
+            );
+          `);
+          if (snapshotMode) {
+            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoints_seq ON checkpoints(sequence_number)`);
+          }
+        } else {
+          const pkClause = snapshotMode ? "" : "PRIMARY KEY";
+          await driver.exec(`
+            CREATE TABLE IF NOT EXISTS checkpoints (
+              sequence_number TEXT NOT NULL ${pkClause},
+              epoch TEXT NOT NULL,
+              digest TEXT NOT NULL,
+              previous_digest TEXT,
+              content_digest TEXT,
+              sui_timestamp TEXT NOT NULL,
+              total_network_transactions TEXT NOT NULL,
+              rolling_computation_cost TEXT NOT NULL,
+              rolling_storage_cost TEXT NOT NULL,
+              rolling_storage_rebate TEXT NOT NULL,
+              rolling_non_refundable_storage_fee TEXT NOT NULL
+            );
+          `);
+          if (snapshotMode) {
+            deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoints_seq ON checkpoints(sequence_number)`);
+          }
+        }
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_checkpoints_epoch ON checkpoints(epoch)`);
+        log.info("checkpoints table created");
+      }
+
       if (deferredIndexes.length > 0) {
         log.info({ count: deferredIndexes.length }, "indexes deferred to shutdown");
       }
@@ -889,6 +990,21 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
             `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES ${rowClauses.join(", ")} ${conflictClause}`,
             values,
           );
+        }
+      }
+
+      // Write checkpoints (one row per checkpoint; dedup by sequence number)
+      if (config.checkpoints) {
+        const seen = new Set<string>();
+        const uniqueCheckpoints: Checkpoint[] = [];
+        for (const processed of batch) {
+          const seq = processed.checkpoint.sequenceNumber.toString();
+          if (seen.has(seq)) continue;
+          seen.add(seq);
+          uniqueCheckpoints.push(processed.checkpoint);
+        }
+        if (uniqueCheckpoints.length > 0) {
+          await writeCheckpoints(ctx, uniqueCheckpoints);
         }
       }
 
