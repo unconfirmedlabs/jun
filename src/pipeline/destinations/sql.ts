@@ -161,14 +161,21 @@ function pgArray(values: (string | number | boolean | null)[]): string {
   );
 }
 
-const PG_BC_CHUNK = 10000;
+const PG_BULK_CHUNK = 10000;
+
+// SQLite's hard upper limit for host parameters in a single SQL statement is
+// 32767 — parameter numbers are stored in a signed 16-bit integer (2^15 - 1).
+// SQLITE_LIMIT_VARIABLE_NUMBER defaults to 32766 since SQLite 3.32.0 (2020).
+// Reference: https://www.sqlite.org/limits.html#max_variable_number
+// We chunk to 30000 to stay comfortably under the limit with headroom.
+const MAX_SQLITE_PARAMS = 30000;
 
 // ---------------------------------------------------------------------------
 // Consolidated writers — one function per table, dialect dispatch inside.
 //
-// Postgres uses unnest(...) for columnar bulk insert.
-// SQLite uses multi-row VALUES (...) insert.
-// Chunked to PG_BC_CHUNK rows per statement for both.
+// Postgres uses unnest(...) for columnar bulk insert, chunked at PG_BULK_CHUNK.
+// SQLite uses multi-row VALUES (...) insert, chunked to stay under the
+// parameter limit (MAX_SQLITE_PARAMS / column_count rows per statement).
 // ---------------------------------------------------------------------------
 
 /** Build placeholders for a multi-row VALUES insert — ($1,$2,$3), ($4,$5,$6), ... for Postgres or (?,?,?), (?,?,?), ... for SQLite. */
@@ -196,8 +203,12 @@ async function insertRows(
 ): Promise<void> {
   if (rows.length === 0) return;
 
-  for (let offset = 0; offset < rows.length; offset += PG_BC_CHUNK) {
-    const chunk = rows.slice(offset, Math.min(offset + PG_BC_CHUNK, rows.length));
+  const chunkSize = ctx.dialect === "postgres"
+    ? PG_BULK_CHUNK
+    : Math.max(1, Math.floor(MAX_SQLITE_PARAMS / columns.length));
+
+  for (let offset = 0; offset < rows.length; offset += chunkSize) {
+    const chunk = rows.slice(offset, Math.min(offset + chunkSize, rows.length));
 
     if (ctx.dialect === "postgres" && ctx.rawTx && pgTypes) {
       // Postgres: unnest bulk path. Build columnar arrays per column.
