@@ -271,7 +271,8 @@ struct DecodedSummary {
 // Extraction
 // ---------------------------------------------------------------------------
 
-pub fn extract_checkpoint(decompressed: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+/// Extract checkpoint into the struct (shared by JSON and binary output paths).
+pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<ExtractedCheckpoint, Box<dyn std::error::Error>> {
     let parsed = proto::parse_checkpoint(decompressed).map_err(|e| format!("proto parse: {e}"))?;
 
     let summary = parsed
@@ -376,7 +377,20 @@ pub fn extract_checkpoint(decompressed: &[u8]) -> Result<String, Box<dyn std::er
         unchanged_consensus_objects,
     };
 
+    Ok(result)
+}
+
+/// Extract checkpoint and serialize to JSON string.
+pub fn extract_checkpoint(decompressed: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    let result = extract_checkpoint_data(decompressed)?;
     Ok(serde_json::to_string(&result)?)
+}
+
+/// Extract checkpoint and serialize to flat binary format.
+/// Returns the number of bytes written to the output buffer.
+pub fn extract_checkpoint_binary(decompressed: &[u8], output: &mut [u8]) -> Result<usize, Box<dyn std::error::Error>> {
+    let result = extract_checkpoint_data(decompressed)?;
+    Ok(crate::binary::write_binary(&result, output))
 }
 
 struct TxContext<'a> {

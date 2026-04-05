@@ -7,6 +7,7 @@
 
 use std::io::Read;
 
+mod binary;
 mod canonical;
 mod extract;
 mod proto;
@@ -89,16 +90,35 @@ pub extern "C" fn decode_get_checkpoint_response(
     write_json_result(output, canonical::decode_get_checkpoint_response(input))
 }
 
-fn decode_checkpoint_inner(compressed: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
-    // 1. Decompress zstd
+/// FFI entry point: decode compressed checkpoint to flat binary format.
+/// Much faster than JSON — no serde_json, no JSON.parse on the JS side.
+#[no_mangle]
+pub extern "C" fn decode_checkpoint_binary(
+    input_ptr: *const u8,
+    input_len: u32,
+    output_ptr: *mut u8,
+    output_capacity: u32,
+) -> u32 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, output_capacity as usize) };
+
+    match decode_checkpoint_binary_inner(input, output) {
+        Ok(n) => n as u32,
+        Err(_) => 0,
+    }
+}
+
+fn decode_checkpoint_binary_inner(compressed: &[u8], output: &mut [u8]) -> Result<usize, Box<dyn std::error::Error>> {
     let mut decoder = zstd::Decoder::new(compressed)?;
     let mut decompressed = Vec::new();
     decoder.read_to_end(&mut decompressed)?;
+    extract::extract_checkpoint_binary(&decompressed, output)
+}
 
-    // 2. Parse protobuf to extract BCS byte ranges
-    // 3. BCS decode using sui-types
-    // 4. Extract records
-    // 5. Serialize to JSON
+fn decode_checkpoint_inner(compressed: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut decoder = zstd::Decoder::new(compressed)?;
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed)?;
     let result = extract::extract_checkpoint(&decompressed)?;
     Ok(result)
 }
