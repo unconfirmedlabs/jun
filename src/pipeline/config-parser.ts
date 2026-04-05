@@ -29,6 +29,8 @@ import { createNatsBroadcast } from "./destinations/nats.ts";
 import { createStdoutBroadcast } from "./destinations/stdout.ts";
 import { normalizeEventType, normalizeCoinType, validateEventTypeAddress } from "../normalize.ts";
 import { createLogger } from "../logger.ts";
+import { resolveEventHandlerFields } from "../resolve-fields.ts";
+import { createGrpcClient } from "../grpc.ts";
 
 // ---------------------------------------------------------------------------
 // Canonical config schema — matches CLI flags 1:1
@@ -403,7 +405,7 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
   const processorConfig = config.processors;
 
   if (processorConfig?.events) {
-    const handlers: Record<string, { type: string; fields?: any; startCheckpoint?: any }> = {};
+    const handlers: Record<string, { type: string; fields?: any; startCheckpoint?: any; typeParamCount?: number }> = {};
     for (const [name, handler] of Object.entries(processorConfig.events) as [string, any][]) {
       if (!handler.type) {
         throw new Error(`Invalid config: event processor "${name}" is missing "type"`);
@@ -415,6 +417,17 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
         startCheckpoint: handler.startCheckpoint,
       };
     }
+
+    // Eagerly resolve fields from chain so that storage DDL and the event
+    // processor both see the same complete FieldDefs (incl. type_param_N).
+    const needsResolution = Object.values(handlers).some(h => !h.fields);
+    if (needsResolution && grpcUrl) {
+      const resolveLog = createLogger().child({ component: "config-parser" });
+      const resolveClient = createGrpcClient({ url: grpcUrl });
+      await resolveEventHandlerFields(handlers, resolveClient, resolveLog);
+      resolveClient.close();
+    }
+
     const proc = createEventDecoder({
       handlers,
       grpcUrl,
