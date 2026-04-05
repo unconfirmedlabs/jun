@@ -101,21 +101,32 @@ const CheckpointSummary = bcs.struct("CheckpointSummary", {
 
 // ─── Effects extraction via @mysten/sui/bcs ────────────────────────────────
 
+/** Inferred output type from @mysten/sui/bcs TransactionEffects schema. */
+type ParsedEffects = ReturnType<typeof suiBcs.TransactionEffects.parse>;
+/** Inferred Owner enum output type. */
+type ParsedOwner = ReturnType<typeof suiBcs.Owner.parse>;
+
+/** Convert string|undefined|"" to string|undefined, rejecting empty strings
+ *  (Postgres NUMERIC columns reject the empty-string literal). */
+function strOrUndef(v: string | number | bigint | null | undefined): string | undefined {
+  if (v == null || v === "") return undefined;
+  return String(v);
+}
+
 /** Flatten a Mysten Owner enum into the GrpcOwner shape. */
-function flattenOwner(owner: any): GrpcOwner | undefined {
+function flattenOwner(owner: ParsedOwner | undefined): GrpcOwner | undefined {
   if (!owner) return undefined;
-  const kind = owner.$kind;
-  if (kind === "AddressOwner") return { kind: "ADDRESS", address: owner.AddressOwner };
-  if (kind === "ObjectOwner") return { kind: "OBJECT", address: owner.ObjectOwner };
-  if (kind === "Shared") {
-    return { kind: "SHARED", version: String(owner.Shared?.initialSharedVersion ?? owner.Shared) };
+  switch (owner.$kind) {
+    case "AddressOwner": return { kind: "ADDRESS", address: owner.AddressOwner };
+    case "ObjectOwner": return { kind: "OBJECT", address: owner.ObjectOwner };
+    case "Shared": return { kind: "SHARED", version: String(owner.Shared) };
+    case "Immutable": return { kind: "IMMUTABLE" };
+    case "ConsensusV2": {
+      const inner = owner.ConsensusV2;
+      return { kind: "CONSENSUS_ADDRESS", address: inner.owner, version: String(inner.startVersion) };
+    }
+    default: return undefined;
   }
-  if (kind === "Immutable") return { kind: "IMMUTABLE" };
-  if (kind === "ConsensusAddressOwner" || kind === "ConsensusV2") {
-    const inner = owner.ConsensusAddressOwner ?? owner.ConsensusV2;
-    return { kind: "CONSENSUS_ADDRESS", address: inner?.owner, version: String(inner?.startVersion ?? "") };
-  }
-  return undefined;
 }
 
 /**
@@ -127,95 +138,85 @@ function extractEffects(effectsBcs: Uint8Array): {
   effects: NonNullable<GrpcTransaction["effects"]>;
 } | null {
   try {
-    const parsed: any = suiBcs.TransactionEffects.parse(effectsBcs);
+    const parsed = suiBcs.TransactionEffects.parse(effectsBcs);
+    if (parsed.$kind !== "V2") return null;
     const v2 = parsed.V2;
-    if (!v2) return null;
 
     // Status + error
-    const statusKind = v2.status?.$kind;
-    const success = statusKind === "Success";
+    const success = v2.status.$kind === "Success";
     let error: GrpcExecutionError | undefined;
-    if (!success && v2.status?.Failed) {
+    if (v2.status.$kind === "Failed") {
       const failed = v2.status.Failed;
-      const errKind = failed.error?.$kind ?? "Unknown";
-      const moveAbort = failed.error?.MoveAbort;
-      error = {
-        kind: errKind,
-        commandIndex: failed.command != null ? Number(failed.command) : undefined,
-        abortCode: moveAbort ? String(moveAbort[1] ?? moveAbort.abortCode ?? "") : undefined,
-        moveLocation: moveAbort
-          ? (() => {
-              const loc = Array.isArray(moveAbort) ? moveAbort[0] : moveAbort.moveLocation;
-              return loc
-                ? {
-                    package: loc.module?.address ?? loc.package ?? "",
-                    module: loc.module?.name ?? loc.module ?? "",
-                    function: loc.functionName ?? loc.function ?? "",
-                    instruction: loc.instruction != null ? Number(loc.instruction) : undefined,
-                  }
-                : undefined;
-            })()
-          : undefined,
-      };
+      const errorEnum = failed.error;
+      error = { kind: errorEnum.$kind };
+      if (failed.command != null) error.commandIndex = Number(failed.command);
+      if (errorEnum.$kind === "MoveAbort") {
+        const [location, abortCode] = errorEnum.MoveAbort;
+        error.abortCode = String(abortCode);
+        error.moveLocation = {
+          package: location.module.address,
+          module: location.module.name,
+          function: location.functionName,
+          instruction: location.instruction != null ? Number(location.instruction) : undefined,
+        };
+      }
     }
 
     // Changed objects
     const changedObjects: GrpcChangedObject[] = [];
-    for (const entry of v2.changedObjects ?? []) {
-      const [objectId, change] = entry as [string, any];
-      const inputKind = change.inputState?.$kind;
-      const outputKind = change.outputState?.$kind;
-      const idOpKind = change.idOperation?.$kind;
+    for (const [objectId, change] of v2.changedObjects) {
+      const inputExists = change.inputState.$kind === "Exist";
 
-      // Derive input state shape — use undefined (→ SQL NULL) for missing fields,
-      // never empty strings (Postgres NUMERIC columns reject "").
-      const inputExists = inputKind === "Exist";
-      const inputTuple = inputExists ? change.inputState.Exist : null;
-      // Exist = ((version, digest), Owner) in rust, but mysten schema usually maps as [[version, digest], owner]
-      const inputVersionRaw = inputTuple ? (inputTuple[0]?.[0] ?? inputTuple[0]) : undefined;
-      const inputVersion = inputVersionRaw != null && inputVersionRaw !== "" ? String(inputVersionRaw) : undefined;
-      const inputDigestRaw = inputTuple ? inputTuple[0]?.[1] : undefined;
-      const inputDigest = inputDigestRaw != null && inputDigestRaw !== "" ? String(inputDigestRaw) : undefined;
-      const inputOwner = inputTuple ? flattenOwner(inputTuple[1]) : undefined;
+      // Exist = [[version, digest], Owner]
+      let inputVersion: string | undefined;
+      let inputDigest: string | undefined;
+      let inputOwner: GrpcOwner | undefined;
+      if (inputExists) {
+        const [[version, digest], owner] = change.inputState.Exist;
+        inputVersion = strOrUndef(version);
+        inputDigest = strOrUndef(digest);
+        inputOwner = flattenOwner(owner);
+      }
 
       let outputState: GrpcChangedObject["outputState"] = "DOES_NOT_EXIST";
       let outputVersion: string | undefined;
       let outputDigest: string | undefined;
       let outputOwner: GrpcOwner | undefined;
-      let objectType: string | undefined;
       let accumulatorWrite: GrpcChangedObject["accumulatorWrite"];
 
-      if (outputKind === "ObjectWrite") {
-        outputState = "OBJECT_WRITE";
-        // ObjectWrite = (ObjectDigest, Owner)
-        const tuple = change.outputState.ObjectWrite;
-        if (tuple?.[0] != null && tuple[0] !== "") outputDigest = String(tuple[0]);
-        outputOwner = flattenOwner(tuple?.[1]);
-        // object_type from the accessor attached by mysten, if present
-        objectType = (change as any).objectType;
-      } else if (outputKind === "PackageWrite") {
-        outputState = "PACKAGE_WRITE";
-        const tuple = change.outputState.PackageWrite;
-        if (tuple?.[0] != null && tuple[0] !== "") outputVersion = String(tuple[0]);
-        if (tuple?.[1] != null && tuple[1] !== "") outputDigest = String(tuple[1]);
-      } else if (outputKind === "AccumulatorWriteV1") {
-        outputState = "ACCUMULATOR_WRITE";
-        const write = change.outputState.AccumulatorWriteV1;
-        const address = write?.address?.address;
-        const ty = write?.address?.ty;
-        const op = write?.operation?.$kind;
-        const valueKind = write?.value?.$kind;
-        const amount = valueKind === "Integer" ? String(write.value.Integer) : "0";
-        if (address && ty) {
-          accumulatorWrite = {
-            address: String(address),
-            type: String(ty),
-            operation: op === "Split" ? "SPLIT" : "MERGE",
-            value: amount,
-          };
+      switch (change.outputState.$kind) {
+        case "ObjectWrite": {
+          outputState = "OBJECT_WRITE";
+          const [digest, owner] = change.outputState.ObjectWrite;
+          outputDigest = strOrUndef(digest);
+          outputOwner = flattenOwner(owner);
+          break;
         }
+        case "PackageWrite": {
+          outputState = "PACKAGE_WRITE";
+          const [version, digest] = change.outputState.PackageWrite;
+          outputVersion = strOrUndef(version);
+          outputDigest = strOrUndef(digest);
+          break;
+        }
+        case "AccumulatorWriteV1": {
+          outputState = "ACCUMULATOR_WRITE";
+          const write = change.outputState.AccumulatorWriteV1;
+          if (write.address) {
+            const amount = write.value.$kind === "Integer" ? String(write.value.Integer) : "0";
+            accumulatorWrite = {
+              address: String(write.address.address),
+              type: String(write.address.ty),
+              operation: write.operation.$kind === "Split" ? "SPLIT" : "MERGE",
+              value: amount,
+            };
+          }
+          break;
+        }
+        // case "NotExist": outputState stays "DOES_NOT_EXIST"
       }
 
+      const idOpKind = change.idOperation.$kind;
       const idOperation: GrpcChangedObject["idOperation"] =
         idOpKind === "Created" ? "CREATED" : idOpKind === "Deleted" ? "DELETED" : "NONE";
 
@@ -230,43 +231,42 @@ function extractEffects(effectsBcs: Uint8Array): {
         outputDigest,
         outputOwner,
         idOperation,
-        objectType,
         accumulatorWrite,
       });
     }
 
     // Unchanged consensus objects
     const unchangedConsensusObjects: GrpcUnchangedConsensusObject[] = [];
-    for (const entry of v2.unchangedConsensusObjects ?? []) {
-      // entry is [objectId, UnchangedSharedKind] or similar tuple
-      const objectId = Array.isArray(entry) ? entry[0] : entry.objectId;
-      const inner = Array.isArray(entry) ? entry[1] : entry;
-      const kindRaw = inner?.$kind;
+    for (const [objectId, sharedKind] of v2.unchangedConsensusObjects) {
       let kind: GrpcUnchangedConsensusObject["kind"] = "READ_ONLY_ROOT";
       let version: string | undefined;
       let digest: string | undefined;
-      // Normalize values to string|undefined — never empty strings (Postgres
-      // NUMERIC columns reject "").
-      const strOrUndef = (v: any): string | undefined =>
-        v != null && v !== "" ? String(v) : undefined;
-      if (kindRaw === "ReadOnlyRoot") {
-        kind = "READ_ONLY_ROOT";
-        const tuple = inner.ReadOnlyRoot;
-        version = strOrUndef(tuple?.[0]);
-        digest = strOrUndef(tuple?.[1]);
-      } else if (kindRaw === "MutateConsensusStreamEnded" || kindRaw === "MutateDeleted") {
-        kind = "MUTATE_CONSENSUS_STREAM_ENDED";
-        version = strOrUndef(inner[kindRaw]);
-      } else if (kindRaw === "ReadConsensusStreamEnded" || kindRaw === "ReadDeleted") {
-        kind = "READ_CONSENSUS_STREAM_ENDED";
-        version = strOrUndef(inner[kindRaw]);
-      } else if (kindRaw === "Canceled" || kindRaw === "Cancelled") {
-        kind = "CANCELED";
-        version = strOrUndef(inner[kindRaw]);
-      } else if (kindRaw === "PerEpochConfig" || kindRaw === "PerEpochConfigWithVersion") {
-        kind = "PER_EPOCH_CONFIG";
+
+      switch (sharedKind.$kind) {
+        case "ReadOnlyRoot": {
+          kind = "READ_ONLY_ROOT";
+          const [v, d] = sharedKind.ReadOnlyRoot;
+          version = strOrUndef(v);
+          digest = strOrUndef(d);
+          break;
+        }
+        case "MutateConsensusStreamEnded":
+          kind = "MUTATE_CONSENSUS_STREAM_ENDED";
+          version = strOrUndef(sharedKind.MutateConsensusStreamEnded);
+          break;
+        case "ReadConsensusStreamEnded":
+          kind = "READ_CONSENSUS_STREAM_ENDED";
+          version = strOrUndef(sharedKind.ReadConsensusStreamEnded);
+          break;
+        case "Cancelled":
+          kind = "CANCELED";
+          version = strOrUndef(sharedKind.Cancelled);
+          break;
+        case "PerEpochConfig":
+          kind = "PER_EPOCH_CONFIG";
+          break;
       }
-      unchangedConsensusObjects.push({ kind, objectId: String(objectId), version, digest });
+      unchangedConsensusObjects.push({ kind, objectId, version, digest });
     }
 
     return {
@@ -277,16 +277,14 @@ function extractEffects(effectsBcs: Uint8Array): {
           computationCost: String(v2.gasUsed.computationCost),
           storageCost: String(v2.gasUsed.storageCost),
           storageRebate: String(v2.gasUsed.storageRebate),
-          nonRefundableStorageFee: v2.gasUsed.nonRefundableStorageFee != null
-            ? String(v2.gasUsed.nonRefundableStorageFee)
-            : undefined,
+          nonRefundableStorageFee: strOrUndef(v2.gasUsed.nonRefundableStorageFee),
         },
-        epoch: v2.executedEpoch != null ? String(v2.executedEpoch) : undefined,
-        dependencies: (v2.dependencies ?? []).map((d: any) => String(d)),
+        epoch: strOrUndef(v2.executedEpoch),
+        dependencies: v2.dependencies.map(String),
         changedObjects,
         unchangedConsensusObjects,
-        eventsDigest: v2.eventsDigest != null ? String(v2.eventsDigest) : undefined,
-        lamportVersion: v2.lamportVersion != null ? String(v2.lamportVersion) : undefined,
+        eventsDigest: strOrUndef(v2.eventsDigest),
+        lamportVersion: strOrUndef(v2.lamportVersion),
       },
     };
   } catch {
