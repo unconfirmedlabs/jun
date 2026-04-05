@@ -428,6 +428,12 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
       resolveClient.close();
     }
 
+    // Write resolved fields back to processorConfig so handlerTables picks them up
+    for (const [name, handler] of Object.entries(handlers)) {
+      (processorConfig!.events as any)[name].fields = handler.fields;
+      (processorConfig!.events as any)[name].typeParamCount = handler.typeParamCount;
+    }
+
     const proc = createEventDecoder({
       handlers,
       grpcUrl,
