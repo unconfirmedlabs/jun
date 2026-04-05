@@ -2011,6 +2011,14 @@ function addPipelineOptions(cmd: any) {
     .option("--transaction-blocks", "enable transaction block indexing")
     .option("--coin-type <type...>", "coin types to track balances for (repeatable, or \"*\" for all)")
     .option("--event-type <type...>", "Move event types to index (repeatable)")
+    .option("--checkpoints", "index checkpoint summaries (one row per checkpoint)")
+    .option("--object-changes", "index per-object state changes from effects")
+    .option("--dependencies", "index transaction dependencies from effects")
+    .option("--inputs", "index programmable transaction inputs")
+    .option("--commands", "index all PTB commands (superset of move_calls)")
+    .option("--system-transactions", "index non-programmable (system) transactions")
+    .option("--unchanged-consensus-objects", "index read-only consensus object refs")
+    .option("--everything", "enable all indexers (transaction-blocks, object-changes, dependencies, inputs, commands, system-transactions, unchanged-consensus-objects, checkpoints, and coin-type '*')")
     .option("--sqlite <path>", "write to SQLite database at path")
     .option("--postgres <url>", "write to Postgres database at URL")
     .option("--sqlite-export <s3url>", "after pipeline: VACUUM + upload to S3 (e.g. s3://bucket/key.db)")
@@ -2037,6 +2045,14 @@ interface PipelineOpts {
     transactionBlocks?: boolean;
     coinType?: string[];
     eventType?: string[];
+    checkpoints?: boolean;
+    objectChanges?: boolean;
+    dependencies?: boolean;
+    inputs?: boolean;
+    commands?: boolean;
+    systemTransactions?: boolean;
+    unchangedConsensusObjects?: boolean;
+    everything?: boolean;
     sqlite?: string;
     postgres?: string;
     sqliteExport?: string;
@@ -2115,13 +2131,37 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
         if (opts.workers) baseConfig.sources.workers = parseInt(opts.workers);
       }
 
+      // --everything: convenience flag that enables every indexer + all coin types
+      if (opts.everything) {
+        opts.transactionBlocks = true;
+        opts.checkpoints = true;
+        opts.objectChanges = true;
+        opts.dependencies = true;
+        opts.inputs = true;
+        opts.commands = true;
+        opts.systemTransactions = true;
+        opts.unchangedConsensusObjects = true;
+        if (!opts.coinType) opts.coinType = ["*"];
+      }
+
       // Processor overrides
-      if (opts.transactionBlocks || opts.coinType || opts.eventType) {
+      const anyProcessorFlag =
+        opts.transactionBlocks || opts.coinType || opts.eventType ||
+        opts.checkpoints || opts.objectChanges || opts.dependencies ||
+        opts.inputs || opts.commands || opts.systemTransactions ||
+        opts.unchangedConsensusObjects;
+
+      if (anyProcessorFlag) {
         baseConfig.processors = baseConfig.processors ?? {};
 
-        if (opts.transactionBlocks) {
-          baseConfig.processors.transactionBlocks = true;
-        }
+        if (opts.transactionBlocks) baseConfig.processors.transactionBlocks = true;
+        if (opts.checkpoints) baseConfig.processors.checkpoints = true;
+        if (opts.objectChanges) baseConfig.processors.objectChanges = true;
+        if (opts.dependencies) baseConfig.processors.dependencies = true;
+        if (opts.inputs) baseConfig.processors.inputs = true;
+        if (opts.commands) baseConfig.processors.commands = true;
+        if (opts.systemTransactions) baseConfig.processors.systemTransactions = true;
+        if (opts.unchangedConsensusObjects) baseConfig.processors.unchangedConsensusObjects = true;
 
         if (opts.coinType) {
           // "*" means track all coin types. Shell may expand * to filenames,
@@ -2264,6 +2304,13 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       if (baseConfig.processors?.transactionBlocks) enabledProcessors.push("transaction-blocks");
       if (baseConfig.processors?.balances) enabledProcessors.push("balance-changes");
       if (baseConfig.processors?.events) enabledProcessors.push(`events (${Object.keys(baseConfig.processors.events).length} handlers)`);
+      if (baseConfig.processors?.checkpoints) enabledProcessors.push("checkpoints");
+      if (baseConfig.processors?.objectChanges) enabledProcessors.push("object-changes");
+      if (baseConfig.processors?.dependencies) enabledProcessors.push("dependencies");
+      if (baseConfig.processors?.inputs) enabledProcessors.push("inputs");
+      if (baseConfig.processors?.commands) enabledProcessors.push("commands");
+      if (baseConfig.processors?.systemTransactions) enabledProcessors.push("system-transactions");
+      if (baseConfig.processors?.unchangedConsensusObjects) enabledProcessors.push("unchanged-consensus-objects");
 
       console.error("");
       console.error("  Pipeline Summary");

@@ -17,6 +17,12 @@ import { createArchiveSource } from "./sources/archive.ts";
 import { createEventDecoder } from "./processors/events.ts";
 import { createBalanceTracker } from "./processors/balanceChanges.ts";
 import { createTransactionTracker } from "./processors/transactionBlocks.ts";
+import { createObjectChangeTracker } from "./processors/objectChanges.ts";
+import { createDependencyTracker } from "./processors/dependencies.ts";
+import { createInputTracker } from "./processors/transactionInputs.ts";
+import { createCommandTracker } from "./processors/commands.ts";
+import { createSystemTransactionTracker } from "./processors/systemTransactions.ts";
+import { createUnchangedConsensusObjectTracker } from "./processors/unchangedConsensusObjects.ts";
 import { createSqlStorage } from "./destinations/sql.ts";
 import { createSseBroadcast } from "./destinations/sse.ts";
 import { createNatsBroadcast } from "./destinations/nats.ts";
@@ -51,6 +57,13 @@ export interface CanonicalConfig {
     transactionBlocks?: boolean;
     balances?: { coinTypes: string[] | "*" };
     events?: Record<string, { type: string; fields?: any; startCheckpoint?: any }>;
+    checkpoints?: boolean;
+    objectChanges?: boolean;
+    dependencies?: boolean;
+    inputs?: boolean;
+    commands?: boolean;
+    systemTransactions?: boolean;
+    unchangedConsensusObjects?: boolean;
     // Legacy key (backwards compat)
     transactions?: boolean;
   };
@@ -429,6 +442,30 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
     processors.push(createTransactionTracker());
   }
 
+  if (processorConfig?.objectChanges) {
+    processors.push(createObjectChangeTracker());
+  }
+
+  if (processorConfig?.dependencies) {
+    processors.push(createDependencyTracker());
+  }
+
+  if (processorConfig?.inputs) {
+    processors.push(createInputTracker());
+  }
+
+  if (processorConfig?.commands) {
+    processors.push(createCommandTracker());
+  }
+
+  if (processorConfig?.systemTransactions) {
+    processors.push(createSystemTransactionTracker());
+  }
+
+  if (processorConfig?.unchangedConsensusObjects) {
+    processors.push(createUnchangedConsensusObjectTracker());
+  }
+
   // --- Storage ---
   const storageConfig = config.storage ?? {};
 
@@ -441,12 +478,23 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
     }
   }
 
+  const extraTableFlags = {
+    balances: !!processorConfig?.balances,
+    transactions: !!processorConfig?.transactionBlocks,
+    checkpoints: !!processorConfig?.checkpoints,
+    objectChanges: !!processorConfig?.objectChanges,
+    dependencies: !!processorConfig?.dependencies,
+    inputs: !!processorConfig?.inputs,
+    commands: !!processorConfig?.commands,
+    systemTransactions: !!processorConfig?.systemTransactions,
+    unchangedConsensusObjects: !!processorConfig?.unchangedConsensusObjects,
+  };
+
   if (storageConfig.postgres) {
     storages.push(createSqlStorage({
       url: storageConfig.postgres,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
-      balances: !!processorConfig?.balances,
-      transactions: !!processorConfig?.transactionBlocks,
+      ...extraTableFlags,
       deferIndexes: !!storageConfig.deferIndexes,
       pgUnlogged: !!storageConfig.pgUnlogged,
     }));
@@ -456,8 +504,7 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
     storages.push(createSqlStorage({
       url: `sqlite:${storageConfig.sqlite}`,
       handlers: Object.keys(handlerTables).length > 0 ? handlerTables : undefined,
-      balances: !!processorConfig?.balances,
-      transactions: !!processorConfig?.transactionBlocks,
+      ...extraTableFlags,
       deferIndexes: !!storageConfig.deferIndexes,
     }));
   }
