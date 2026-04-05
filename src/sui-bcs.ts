@@ -14,7 +14,7 @@
  * TODO: Remove once @mysten/sui/bcs adds these variants.
  * Tracking: https://github.com/unconfirmedlabs/jun/issues/1
  */
-import { bcs } from "@mysten/sui/bcs";
+import { suiBcs as bcs } from "./bcs-provider.ts";
 
 // ─── Digest types (all wrap Vec<u8> in BCS) ──────────────────────────────────
 

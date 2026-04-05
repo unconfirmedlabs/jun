@@ -8,8 +8,7 @@
  * (summary + effects + events). Pure Mysten baseline — no fast paths.
  */
 import { zstdDecompressSync } from "zlib";
-import { bcs as suiBcs } from "@mysten/sui/bcs";
-import { bcs } from "@mysten/bcs";
+import { suiBcs, bcs } from "./bcs-provider.ts";
 import { verifyCheckpoint as keiVerify, PreparedCommittee } from "@unconfirmed/kei";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";

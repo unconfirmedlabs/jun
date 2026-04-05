@@ -13,7 +13,7 @@
  * Algorithm matches Sui's official indexer (tx_balance_changes.rs). This is the
  * pure Mysten BCS baseline — every BCS value is decoded via @mysten/sui/bcs.
  */
-import { bcs as suiBcs } from "@mysten/sui/bcs";
+import { suiBcs } from "./bcs-provider.ts";
 import type { BalanceChange } from "./balance-processor.ts";
 import { normalizeSuiAddress, normalizeCoinType } from "./normalize.ts";
 

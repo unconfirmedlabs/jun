@@ -5,7 +5,8 @@
  * Field order matters — BCS is positional, so declarations must match
  * the on-chain struct field order exactly.
  */
-import { bcs, type BcsType } from "@mysten/bcs";
+import { bcs } from "./bcs-provider.ts";
+import type { BcsType } from "@mysten/bcs";
 
 // ---------------------------------------------------------------------------
 // Sui Address BCS type — 32-byte fixed array with hex string transform
