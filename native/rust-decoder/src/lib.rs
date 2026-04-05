@@ -8,6 +8,7 @@
 use std::io::Read;
 
 mod extract;
+mod proto;
 
 /// FFI entry point: decode a compressed checkpoint and return JSON.
 ///
