@@ -6,7 +6,7 @@ import { program } from "commander";
 import pMap from "p-map";
 import pRetry from "p-retry";
 import { createGrpcClient, type GrpcCheckpointResponse, type GrpcEvent } from "./grpc.ts";
-import { createArchiveClient, cachedGetCheckpoint } from "./archive.ts";
+import { createArchiveClient } from "./archive.ts";
 import { generateFieldDSL, formatCodegenResult } from "./codegen.ts";
 import { createSqliteWriter, type SqliteWriter } from "./output/sqlite.ts";
 import { loadConfig } from "./config.ts";
@@ -2286,10 +2286,7 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       if (baseConfig.sources?.concurrency) console.error(`  concurrency     ${baseConfig.sources.concurrency}`);
       if (baseConfig.sources?.workers) console.error(`  workers         ${baseConfig.sources.workers}`);
       if (baseConfig.sources?.archiveUrl || baseConfig.sources?.epoch || baseConfig.sources?.startCheckpoint) {
-        try {
-          const { isNativeDecoderAvailable } = await import("./checkpoint-decoder-pool.ts");
-          console.error(`  decoder         ${isNativeDecoderAvailable() ? "native (Zig)" : "JavaScript"}`);
-        } catch {}
+        console.error(`  decoder         Mysten BCS (baseline)`);
       }
       console.error("");
 

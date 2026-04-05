@@ -5,7 +5,33 @@
  * the BCS-encoded module map to extract individual module bytecodes.
  */
 import { SuiGrpcClient } from "@mysten/sui/grpc";
-import { readUleb128, readBcsString } from "./uleb.ts";
+
+// ---------------------------------------------------------------------------
+// BCS primitives (local — BCS package layout is simple enough to inline)
+// ---------------------------------------------------------------------------
+
+/** Read a ULEB128 integer from a buffer. Returns [value, bytesConsumed]. */
+function readUleb128(buf: Uint8Array, offset: number): [number, number] {
+  let value = 0;
+  let shift = 0;
+  let pos = offset;
+  for (;;) {
+    const byte = buf[pos]!;
+    value |= (byte & 0x7f) << shift;
+    pos++;
+    if ((byte & 0x80) === 0) break;
+    shift += 7;
+  }
+  return [value, pos - offset];
+}
+
+/** Read a BCS string (ULEB128 length prefix + UTF-8 bytes). Returns [string, newOffset]. */
+function readBcsString(buf: Uint8Array, offset: number): [string, number] {
+  const [len, lenBytes] = readUleb128(buf, offset);
+  offset += lenBytes;
+  const str = new TextDecoder().decode(buf.slice(offset, offset + len));
+  return [str, offset + len];
+}
 
 // ---------------------------------------------------------------------------
 // Types
