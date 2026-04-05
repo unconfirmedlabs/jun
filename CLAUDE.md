@@ -243,6 +243,12 @@ Jun exports browser-compatible variants:
 - `jun/decompiler/wasm` — Move bytecode decompiler (87KB WASM)
 - `jun/package-reader` — fetch + parse package modules
 
+## Code Quality
+
+- **No `as any`** — define proper types or use generics. If interfacing with untyped external libraries (e.g., `@mysten/sui/bcs` parse output), create typed wrappers.
+- **No non-null assertions (`!`)** — use narrowing, optional chaining, or extract to a guarded local variable. Exception: array index access in a bounded loop where the index is provably in-range (e.g., `array[i]!` inside `for (let i = 0; i < array.length; i++)`).
+- **No `any` in function signatures** — parameters and return types must be explicit. `unknown` is acceptable when the type genuinely cannot be known.
+
 ## Key Rules
 
 - BCS field order must match Move struct exactly (positional encoding)
