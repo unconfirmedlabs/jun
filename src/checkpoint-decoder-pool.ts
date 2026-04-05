@@ -2,13 +2,14 @@
  * jun/checkpoint-decoder-pool — Pool of Bun Workers for parallel archive
  * checkpoint decoding.
  *
- * Workers decode compressed archive checkpoints into the shared checkpoint
- * response shape and optionally precompute archive balance changes.
+ * Workers decode compressed archive checkpoints either into:
+ * - zero-copy Rust binary payloads (fast path), or
+ * - JSON checkpoint payloads (fallback path).
  *
- * IPC protocol: workers postMessage a single JSON string (zero-copy in
- * Bun 1.2.21+) prefixed with the job ID + newline. Errors are sent as
- * small objects { id, error }. This avoids structured clone overhead
- * for the large payload path.
+ * IPC protocol:
+ * - binary fast path: Uint8Array with first 4 bytes = job ID (u32 LE)
+ * - JSON fallback: string "id\\n{...}"
+ * - error path: object { id, error }
  */
 import type { GrpcCheckpointResponse } from "./grpc.ts";
 import type { SerializedBalanceChange } from "./checkpoint-response.ts";
@@ -24,7 +25,13 @@ export interface SerializedDecodedCheckpoint {
 }
 
 export interface DecodeResult {
-  payload: SerializedDecodedCheckpoint;
+  binary?: Uint8Array;
+  payload?: SerializedDecodedCheckpoint;
+}
+
+export interface CheckpointDecoderPoolOptions {
+  balanceCoinTypes?: string[] | "*";
+  useBinaryPreprocessing?: boolean;
 }
 
 export interface CheckpointDecoderPool {
@@ -52,8 +59,9 @@ export function defaultWorkerCount(): number {
 
 export function createCheckpointDecoderPool(
   size: number,
-  balanceCoinTypes?: string[] | "*",
+  options: CheckpointDecoderPoolOptions = {},
 ): CheckpointDecoderPool {
+  const { balanceCoinTypes, useBinaryPreprocessing = false } = options;
   const workerBalanceCoinTypes: string[] | null = balanceCoinTypes === undefined
     ? null
     : balanceCoinTypes === "*"
@@ -72,7 +80,17 @@ export function createCheckpointDecoderPool(
     worker.onmessage = (event: MessageEvent) => {
       const msg = event.data;
 
-      if (typeof msg === "string") {
+      if (msg instanceof Uint8Array || msg instanceof ArrayBuffer) {
+        const bytes = msg instanceof Uint8Array ? msg : new Uint8Array(msg);
+        if (bytes.byteLength < 4) return;
+
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const id = view.getUint32(0, true);
+        const job = pending.get(id);
+        if (!job) return;
+        pending.delete(id);
+        job.resolve({ binary: bytes.subarray(4) });
+      } else if (typeof msg === "string") {
         // Fast path: JSON string with "id\n{...}" format
         const newlineIdx = msg.indexOf("\n");
         const id = parseInt(msg.slice(0, newlineIdx), 10);
@@ -124,6 +142,7 @@ export function createCheckpointDecoderPool(
             seq: seq.toString(),
             compressed,
             balanceCoinTypes: workerBalanceCoinTypes,
+            useBinary: useBinaryPreprocessing,
           },
           [compressed.buffer], // transfer compressed bytes (zero-copy to worker)
         );

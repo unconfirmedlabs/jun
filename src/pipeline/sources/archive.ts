@@ -9,6 +9,8 @@
  * as soon as the next sequential one is ready — no window boundaries.
  */
 import { checkpointFromGrpcResponse } from "../../checkpoint-response.ts";
+import { parseBinaryCheckpoint } from "../../binary-parser.ts";
+import type { BalanceChange, ProcessedCheckpoint } from "../types.ts";
 
 /** Direct fetch from archive — no cache read or write. */
 async function fetchDirect(seq: bigint, archiveUrl: string, signal?: AbortSignal): Promise<Uint8Array> {
@@ -35,8 +37,55 @@ export interface ArchiveSourceConfig {
   workers?: number;
   /** Coin types for archive balance computation (null = disabled) */
   balanceCoinTypes?: string[] | "*";
+  /** When true, workers may return preprocessed Rust binary rows instead of checkpoint JSON. */
+  useBinaryPreprocessing?: boolean;
+  /** Enabled processor set used to filter worker-preprocessed rows. */
+  enabledProcessors?: {
+    balances: boolean;
+    transactions: boolean;
+    objectChanges: boolean;
+    dependencies: boolean;
+    inputs: boolean;
+    commands: boolean;
+    systemTransactions: boolean;
+    unchangedConsensusObjects: boolean;
+    events: boolean;
+  };
   /** gRPC URL for fetching latest checkpoint */
   grpcUrl?: string;
+}
+
+function filterBalanceChanges(
+  changes: BalanceChange[],
+  balanceCoinTypes: string[] | "*" | undefined,
+): BalanceChange[] {
+  if (balanceCoinTypes === undefined || balanceCoinTypes === "*") return changes;
+  const allowed = new Set(balanceCoinTypes);
+  return changes.filter(change => allowed.has(change.coinType));
+}
+
+function filterPreProcessedCheckpoint(
+  processed: ProcessedCheckpoint,
+  enabled: ArchiveSourceConfig["enabledProcessors"],
+  balanceCoinTypes: string[] | "*" | undefined,
+): ProcessedCheckpoint {
+  return {
+    ...processed,
+    events: enabled?.events ? processed.events : [],
+    balanceChanges: enabled?.balances
+      ? filterBalanceChanges(processed.balanceChanges, balanceCoinTypes)
+      : [],
+    transactions: enabled?.transactions ? processed.transactions : [],
+    moveCalls: enabled?.transactions ? processed.moveCalls : [],
+    objectChanges: enabled?.objectChanges ? processed.objectChanges : [],
+    dependencies: enabled?.dependencies ? processed.dependencies : [],
+    inputs: enabled?.inputs ? processed.inputs : [],
+    commands: enabled?.commands ? processed.commands : [],
+    systemTransactions: enabled?.systemTransactions ? processed.systemTransactions : [],
+    unchangedConsensusObjects: enabled?.unchangedConsensusObjects
+      ? processed.unchangedConsensusObjects
+      : [],
+  };
 }
 
 export function createArchiveSource(config: ArchiveSourceConfig): Source {
@@ -51,8 +100,12 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
       const fetchConcurrency = config.concurrency ?? 50;
       const workerCount = config.workers ?? Math.max(1, Math.min(4, (navigator.hardwareConcurrency ?? 4) - 1));
       const balanceCoinTypes = config.balanceCoinTypes;
+      const useBinaryPreprocessing = !!config.useBinaryPreprocessing;
 
-      decoderPool = createCheckpointDecoderPool(workerCount, balanceCoinTypes);
+      decoderPool = createCheckpointDecoderPool(workerCount, {
+        balanceCoinTypes,
+        useBinaryPreprocessing,
+      });
       log.info({ workers: workerCount, fetchConcurrency, from: config.from.toString() }, "archive source starting");
 
       // Determine upper bound
@@ -128,11 +181,25 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           const result = await pool.decode(seq, compressed);
           if (stopped) return;
 
-          const checkpoint = checkpointFromGrpcResponse(
-            result.payload.decoded,
-            "backfill",
-            result.payload.precomputedBalanceChanges,
-          );
+          let checkpoint: Checkpoint;
+          if (result.binary) {
+            const parsed = parseBinaryCheckpoint(result.binary);
+            const processed = filterPreProcessedCheckpoint(
+              parsed.processed,
+              config.enabledProcessors,
+              balanceCoinTypes,
+            );
+            checkpoint = parsed.checkpoint;
+            (checkpoint as Checkpoint & { _preProcessed?: ProcessedCheckpoint })._preProcessed = processed;
+          } else if (result.payload) {
+            checkpoint = checkpointFromGrpcResponse(
+              result.payload.decoded,
+              "backfill",
+              result.payload.precomputedBalanceChanges,
+            );
+          } else {
+            throw new Error(`Checkpoint ${seq} decode returned no payload`);
+          }
           pending.set(seq, checkpoint);
         } catch (error) {
           log.error({ checkpoint: seq.toString(), error }, "failed to fetch/decode checkpoint");

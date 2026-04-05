@@ -15,6 +15,7 @@ type NativeCheckpointDecoder = {
   decode_checkpoint_proto: NativeDecodeFn;
   decode_subscribe_checkpoints_response: NativeDecodeFn;
   decode_get_checkpoint_response: NativeDecodeFn;
+  decode_checkpoint_binary: NativeDecodeFn;
 };
 
 const LIB_NAME = `libjun_checkpoint_decoder.${suffix}`;
@@ -45,6 +46,10 @@ for (const libPath of LIB_PATHS) {
         args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32],
         returns: FFIType.u32,
       },
+      decode_checkpoint_binary: {
+        args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32],
+        returns: FFIType.u32,
+      },
     });
     nativeDecoder = lib.symbols;
     break;
@@ -54,6 +59,8 @@ for (const libPath of LIB_PATHS) {
 const decoder = new TextDecoder();
 const DEFAULT_CAPACITY = 16 * 1024 * 1024;
 const MAX_CAPACITY = 128 * 1024 * 1024;
+const BINARY_DEFAULT_CAPACITY = 64 * 1024 * 1024;
+const BINARY_MAX_CAPACITY = 256 * 1024 * 1024;
 
 let outputBuf = new Uint8Array(DEFAULT_CAPACITY);
 let outputPtr = ptr(outputBuf);
@@ -107,6 +114,22 @@ function decodeResponse(symbol: keyof NativeCheckpointDecoder, input: Uint8Array
   return hydrateResponse(JSON.parse(json) as GrpcCheckpointResponse);
 }
 
+function decodeBinary(symbol: keyof NativeCheckpointDecoder, input: Uint8Array): Uint8Array | null {
+  if (!nativeDecoder) return null;
+
+  let capacity = BINARY_DEFAULT_CAPACITY;
+  while (capacity <= BINARY_MAX_CAPACITY) {
+    const outBuf = new Uint8Array(capacity);
+    const bytesWritten = nativeDecoder[symbol](ptr(input), input.length, ptr(outBuf), outBuf.length);
+    if (bytesWritten > 0) {
+      return outBuf.subarray(0, bytesWritten);
+    }
+    capacity *= 2;
+  }
+
+  throw new Error(`Native checkpoint decoder failed for ${symbol}`);
+}
+
 export function isNativeCheckpointDecoderAvailable(): boolean {
   if (process.env.JUN_BCS_DECODER === "js") return false;
   return nativeDecoder !== null;
@@ -116,6 +139,10 @@ export function decodeArchiveCheckpointCompressedNative(
   input: Uint8Array,
 ): GrpcCheckpointResponse | null {
   return decodeResponse("decode_archive_checkpoint", input);
+}
+
+export function decodeArchiveCheckpointBinary(input: Uint8Array): Uint8Array | null {
+  return decodeBinary("decode_checkpoint_binary", input);
 }
 
 export function decodeCheckpointProtoNative(

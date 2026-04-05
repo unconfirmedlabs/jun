@@ -326,6 +326,7 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
   const storages: Storage[] = [];
   const broadcasts: Broadcast[] = [];
   let resolvedRange: { start: bigint; end: bigint } | undefined;
+  const processorConfig = config.processors;
 
   // --- Sources ---
   const sourceConfig = config.sources;
@@ -390,9 +391,21 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
       grpcUrl,
       concurrency: sourceConfig.concurrency,
       workers: sourceConfig.workers,
-      balanceCoinTypes: config.processors?.balances?.coinTypes === "*"
+      balanceCoinTypes: processorConfig?.balances?.coinTypes === "*"
         ? "*"
-        : config.processors?.balances?.coinTypes?.map((coinType: string) => normalizeCoinType(coinType)),
+        : processorConfig?.balances?.coinTypes?.map((coinType: string) => normalizeCoinType(coinType)),
+      useBinaryPreprocessing: !processorConfig?.events,
+      enabledProcessors: {
+        balances: !!processorConfig?.balances,
+        transactions: !!processorConfig?.transactionBlocks,
+        objectChanges: !!processorConfig?.objectChanges,
+        dependencies: !!processorConfig?.dependencies,
+        inputs: !!processorConfig?.inputs,
+        commands: !!processorConfig?.commands,
+        systemTransactions: !!processorConfig?.systemTransactions,
+        unchangedConsensusObjects: !!processorConfig?.unchangedConsensusObjects,
+        events: !!processorConfig?.events,
+      },
     }));
   }
 
@@ -401,8 +414,6 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
   }
 
   // --- Processors ---
-  const processorConfig = config.processors;
-
   const eventConfig = processorConfig?.events;
   if (eventConfig) {
     const handlers: Record<string, { type: string; fields?: any; startCheckpoint?: any; typeParamCount?: number }> = {};

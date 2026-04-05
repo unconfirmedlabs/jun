@@ -1,18 +1,18 @@
 /**
  * Archive checkpoint worker.
  *
- * When the native Rust decoder is available, the worker does zero JS decode —
- * Rust handles zstd + proto + BCS + balance computation in a single FFI call.
- * The result is JSON-stringified and sent via postMessage (zero-copy in Bun).
+ * Fast path:
+ *   Rust binary FFI -> Uint8Array -> postMessage(buffer, [buffer.buffer])
  *
- * Falls back to JS decode (protobufjs + @mysten/sui/bcs) when the native
- * decoder is unavailable or returns null.
+ * Fallback path:
+ *   Rust JSON FFI or JS protobuf/BCS decode -> JSON string message
  */
 /// <reference lib="webworker" />
 import { computeBalanceChangesFromArchive } from "./archive-balance.ts";
 import { decodeCheckpointFromProto, getCheckpointType } from "./archive.ts";
 import type { BalanceChange } from "./balance-processor.ts";
 import {
+  decodeArchiveCheckpointBinary,
   decodeArchiveCheckpointCompressedNative,
   isNativeCheckpointDecoderAvailable,
 } from "./checkpoint-native-decoder.ts";
@@ -35,36 +35,57 @@ function serializeBalanceChanges(changes: BalanceChange[]): SerializedBalanceCha
 }
 
 self.onmessage = async (event: MessageEvent) => {
-  const { id, seq, compressed, balanceCoinTypes } = event.data as {
+  const { id, seq, compressed, balanceCoinTypes, useBinary } = event.data as {
     id: number;
     seq: string;
     compressed: Uint8Array;
     balanceCoinTypes: string[] | null;
+    useBinary: boolean;
   };
 
   try {
     const compressedBytes = new Uint8Array(compressed);
     const sequenceNumber = BigInt(seq);
 
-    // --- Fast path: Rust native decode (zstd + proto + BCS + balances in one call) ---
-    if (isNativeCheckpointDecoderAvailable()) {
-      const decoded = decodeArchiveCheckpointCompressedNative(compressedBytes);
-      if (decoded) {
-        // Rust already computed balance changes — no JS fallback needed
-        postMessage(`${id}\n${JSON.stringify({ decoded })}`);
+    // --- Fast path: Rust binary decode, transferred zero-copy back to main thread ---
+    if (useBinary && isNativeCheckpointDecoderAvailable()) {
+      const binary = decodeArchiveCheckpointBinary(compressedBytes);
+      if (binary) {
+        const result = new Uint8Array(4 + binary.length);
+        new DataView(result.buffer).setUint32(0, id, true);
+        result.set(binary, 4);
+        postMessage(result, [result.buffer]);
         return;
       }
     }
 
-    // --- Fallback: JS decode ---
-    const decompressed = zstdDecompressSync(Buffer.from(compressedBytes));
-    const Checkpoint = await getCheckpointType();
-    const protoDecoded = Checkpoint.decode(decompressed);
-    const checkpointProto = Checkpoint.toObject(protoDecoded, { longs: String, enums: String, defaults: false });
-    const decoded = await decodeCheckpointFromProto(sequenceNumber, checkpointProto);
+    let decoded: GrpcCheckpointResponse | null = null;
+    if (isNativeCheckpointDecoderAvailable()) {
+      decoded = decodeArchiveCheckpointCompressedNative(compressedBytes);
+    }
+
+    let checkpointProto: any | null = null;
+    if (!decoded || balanceCoinTypes !== null) {
+      const decompressed = zstdDecompressSync(Buffer.from(compressedBytes));
+      const Checkpoint = await getCheckpointType();
+      const protoDecoded = Checkpoint.decode(decompressed);
+      checkpointProto = Checkpoint.toObject(protoDecoded, { longs: String, enums: String, defaults: false });
+
+      if (!decoded) {
+        decoded = await decodeCheckpointFromProto(sequenceNumber, checkpointProto);
+      }
+    }
+
+    if (!decoded) {
+      throw new Error(`Checkpoint ${seq} could not be decoded`);
+    }
 
     let precomputedBalanceChanges: SerializedBalanceChange[] | undefined;
     if (balanceCoinTypes !== null) {
+      if (!checkpointProto) {
+        throw new Error("Archive balance computation requires decoded checkpoint proto");
+      }
+
       const summary = decoded.checkpoint.summary;
       const timestamp = parseTimestamp(summary?.timestamp);
       const coinTypeFilter = balanceCoinTypes.length === 0 ? null : new Set(balanceCoinTypes);
