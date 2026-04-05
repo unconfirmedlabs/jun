@@ -36,6 +36,15 @@ type Dialect = "postgres" | "sqlite";
 
 type ExecFn = (query: string, params?: unknown[]) => Promise<any>;
 
+/** Write context passed to consolidated writer functions. */
+interface WriteContext {
+  dialect: Dialect;
+  exec: ExecFn;
+  /** Bun.SQL transaction instance (Postgres only, used for unnest bulk path). */
+  rawTx?: any;
+  snapshotMode: boolean;
+}
+
 interface SqlDriver {
   dialect: Dialect;
   exec(query: string, params?: unknown[]): Promise<any>;
@@ -135,43 +144,99 @@ function pgArray(values: (string | number | boolean | null)[]): string {
 
 const PG_BC_CHUNK = 10000;
 
-async function writeBalanceChangesPgBulk(
-  tx: any,
-  changes: BalanceChange[],
-  snapshotMode: boolean,
-): Promise<void> {
-  // 1. Insert into balance_changes ledger using unnest (columnar)
-  for (let offset = 0; offset < changes.length; offset += PG_BC_CHUNK) {
-    const chunk = changes.slice(offset, Math.min(offset + PG_BC_CHUNK, changes.length));
-    const n = chunk.length;
-    const txDigests = new Array(n);
-    const checkpoints = new Array(n);
-    const addresses = new Array(n);
-    const coinTypes = new Array(n);
-    const amounts = new Array(n);
-    const timestamps = new Array(n);
+// ---------------------------------------------------------------------------
+// Consolidated writers — one function per table, dialect dispatch inside.
+//
+// Postgres uses unnest(...) for columnar bulk insert.
+// SQLite uses multi-row VALUES (...) insert.
+// Chunked to PG_BC_CHUNK rows per statement for both.
+// ---------------------------------------------------------------------------
 
-    for (let i = 0; i < n; i++) {
-      const c = chunk[i];
-      txDigests[i] = c.txDigest;
-      checkpoints[i] = c.checkpointSeq.toString();
-      addresses[i] = c.address;
-      coinTypes[i] = c.coinType;
-      amounts[i] = c.amount;
-      timestamps[i] = c.timestamp.toISOString();
+/** Build placeholders for a multi-row VALUES insert — ($1,$2,$3), ($4,$5,$6), ... for Postgres or (?,?,?), (?,?,?), ... for SQLite. */
+function buildRowPlaceholders(dialect: Dialect, columnCount: number, rowCount: number): string {
+  const rows: string[] = [];
+  let cursor = 0;
+  for (let i = 0; i < rowCount; i++) {
+    const phs: string[] = [];
+    for (let j = 0; j < columnCount; j++) {
+      phs.push(dialect === "postgres" ? `$${++cursor}` : "?");
     }
-
-    const conflict = snapshotMode ? "" : "ON CONFLICT (tx_digest, address, coin_type) DO NOTHING";
-    await tx.unsafe(
-      `INSERT INTO balance_changes (tx_digest, checkpoint_seq, address, coin_type, amount, sui_timestamp)
-       SELECT * FROM unnest($1::text[], $2::numeric[], $3::text[], $4::text[], $5::numeric[], $6::timestamptz[])
-       ${conflict}`,
-      [pgArray(txDigests), pgArray(checkpoints), pgArray(addresses), pgArray(coinTypes), pgArray(amounts), pgArray(timestamps)],
-    );
+    rows.push(`(${phs.join(", ")})`);
   }
+  return rows.join(", ");
+}
+
+/** Insert a batch of rows via multi-row VALUES (SQLite path) or unnest (Postgres path). */
+async function insertRows(
+  ctx: WriteContext,
+  table: string,
+  columns: string[],
+  rows: unknown[][],
+  conflictClause: string,
+  pgTypes?: string[],
+): Promise<void> {
+  if (rows.length === 0) return;
+
+  for (let offset = 0; offset < rows.length; offset += PG_BC_CHUNK) {
+    const chunk = rows.slice(offset, Math.min(offset + PG_BC_CHUNK, rows.length));
+
+    if (ctx.dialect === "postgres" && ctx.rawTx && pgTypes) {
+      // Postgres: unnest bulk path. Build columnar arrays per column.
+      const arrays: unknown[][] = columns.map(() => new Array(chunk.length));
+      for (let r = 0; r < chunk.length; r++) {
+        const row = chunk[r]!;
+        for (let c = 0; c < columns.length; c++) arrays[c]![r] = row[c];
+      }
+      const unnestArgs = pgTypes.map((t, i) => `$${i + 1}::${t}[]`).join(", ");
+      await ctx.rawTx.unsafe(
+        `INSERT INTO ${table} (${columns.join(", ")})
+         SELECT * FROM unnest(${unnestArgs})
+         ${conflictClause}`,
+        arrays.map((a) => pgArray(a as (string | number | boolean | null)[])),
+      );
+    } else {
+      // SQLite (or Postgres fallback without rawTx): multi-row VALUES insert.
+      const values: unknown[] = [];
+      for (const row of chunk) values.push(...row);
+      const placeholders = buildRowPlaceholders(ctx.dialect, columns.length, chunk.length);
+      await ctx.exec(
+        `INSERT INTO ${table} (${columns.join(", ")}) VALUES ${placeholders} ${conflictClause}`,
+        values,
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+async function writeBalanceChanges(ctx: WriteContext, changes: BalanceChange[]): Promise<void> {
+  if (changes.length === 0) return;
+
+  // 1. Insert into balance_changes ledger
+  const conflict = ctx.snapshotMode
+    ? ""
+    : ctx.dialect === "postgres"
+      ? "ON CONFLICT (tx_digest, address, coin_type) DO NOTHING"
+      : "ON CONFLICT (tx_digest, address, coin_type) DO NOTHING";
+  const rows = changes.map(c => [
+    c.txDigest,
+    c.checkpointSeq.toString(),
+    c.address,
+    c.coinType,
+    c.amount,
+    ctx.dialect === "postgres" ? c.timestamp : c.timestamp.toISOString(),
+  ]);
+  await insertRows(
+    ctx,
+    "balance_changes",
+    ["tx_digest", "checkpoint_seq", "address", "coin_type", "amount", "sui_timestamp"],
+    rows,
+    conflict,
+    ["text", "numeric", "text", "text", "numeric", "timestamptz"],
+  );
 
   // In snapshot mode, skip incremental balance upserts — materialized at shutdown
-  if (snapshotMode) return;
+  if (ctx.snapshotMode) return;
 
   // 2. Aggregate per (address, coinType)
   const aggregated = new Map<string, { address: string; coinType: string; totalAmount: bigint; maxCheckpoint: bigint }>();
@@ -191,8 +256,10 @@ async function writeBalanceChangesPgBulk(
     }
   }
 
-  // 3. Upsert into balances
-  if (aggregated.size > 0) {
+  // 3. Upsert into balances (running totals) — dialect-specific upsert clauses
+  if (aggregated.size === 0) return;
+
+  if (ctx.dialect === "postgres" && ctx.rawTx) {
     const addrs: string[] = [];
     const coins: string[] = [];
     const bals: string[] = [];
@@ -203,7 +270,7 @@ async function writeBalanceChangesPgBulk(
       bals.push(a.totalAmount.toString());
       cps.push(a.maxCheckpoint.toString());
     }
-    await tx.unsafe(
+    await ctx.rawTx.unsafe(
       `INSERT INTO balances (address, coin_type, balance, last_checkpoint)
        SELECT * FROM unnest($1::text[], $2::text[], $3::numeric[], $4::numeric[])
        ON CONFLICT (address, coin_type) DO UPDATE SET
@@ -212,85 +279,95 @@ async function writeBalanceChangesPgBulk(
          last_updated = NOW()`,
       [pgArray(addrs), pgArray(coins), pgArray(bals), pgArray(cps)],
     );
-  }
-}
-
-async function writeTransactionsPgBulk(
-  tx: any,
-  transactions: TransactionRecord[],
-  snapshotMode: boolean,
-): Promise<void> {
-  for (let offset = 0; offset < transactions.length; offset += PG_BC_CHUNK) {
-    const chunk = transactions.slice(offset, Math.min(offset + PG_BC_CHUNK, transactions.length));
-    const n = chunk.length;
-    const digests = new Array(n);
-    const senders = new Array(n);
-    const successes = new Array(n);
-    const compCosts = new Array(n);
-    const storCosts = new Array(n);
-    const storRebates = new Array(n);
-    const mcCounts = new Array(n);
-    const checkpoints = new Array(n);
-    const timestamps = new Array(n);
-
-    for (let i = 0; i < n; i++) {
-      const t = chunk[i];
-      digests[i] = t.digest;
-      senders[i] = t.sender;
-      successes[i] = t.success;
-      compCosts[i] = t.computationCost;
-      storCosts[i] = t.storageCost;
-      storRebates[i] = t.storageRebate;
-      mcCounts[i] = t.moveCallCount;
-      checkpoints[i] = t.checkpointSeq.toString();
-      timestamps[i] = t.timestamp.toISOString();
+  } else {
+    // SQLite: CAST for numeric addition on TEXT columns
+    const values: unknown[] = [];
+    const rowClauses: string[] = [];
+    for (const a of aggregated.values()) {
+      rowClauses.push("(?, ?, ?, ?)");
+      values.push(a.address, a.coinType, a.totalAmount.toString(), a.maxCheckpoint.toString());
     }
-
-    const conflict = snapshotMode ? "" : "ON CONFLICT (digest) DO NOTHING";
-    await tx.unsafe(
-      `INSERT INTO transactions (digest, sender, success, computation_cost, storage_cost, storage_rebate, move_call_count, checkpoint_seq, sui_timestamp)
-       SELECT * FROM unnest($1::text[], $2::text[], $3::boolean[], $4::numeric[], $5::numeric[], $6::numeric[], $7::integer[], $8::numeric[], $9::timestamptz[])
-       ${conflict}`,
-      [pgArray(digests), pgArray(senders), pgArray(successes), pgArray(compCosts), pgArray(storCosts), pgArray(storRebates), pgArray(mcCounts), pgArray(checkpoints), pgArray(timestamps)],
+    await ctx.exec(
+      `INSERT INTO balances (address, coin_type, balance, last_checkpoint) VALUES ${rowClauses.join(", ")}
+       ON CONFLICT (address, coin_type) DO UPDATE SET
+         balance = CAST(CAST(balances.balance AS INTEGER) + CAST(excluded.balance AS INTEGER) AS TEXT),
+         last_checkpoint = MAX(balances.last_checkpoint, excluded.last_checkpoint)`,
+      values,
     );
   }
 }
 
-async function writeMoveCallsPgBulk(
-  tx: any,
-  moveCalls: MoveCallRecord[],
-  snapshotMode: boolean,
-): Promise<void> {
-  for (let offset = 0; offset < moveCalls.length; offset += PG_BC_CHUNK) {
-    const chunk = moveCalls.slice(offset, Math.min(offset + PG_BC_CHUNK, moveCalls.length));
-    const n = chunk.length;
-    const txDigests = new Array(n);
-    const callIndexes = new Array(n);
-    const packages = new Array(n);
-    const modules = new Array(n);
-    const functions = new Array(n);
-    const checkpoints = new Array(n);
-    const timestamps = new Array(n);
+async function writeTransactions(ctx: WriteContext, transactions: TransactionRecord[]): Promise<void> {
+  if (transactions.length === 0) return;
 
-    for (let i = 0; i < n; i++) {
-      const mc = chunk[i];
-      txDigests[i] = mc.txDigest;
-      callIndexes[i] = mc.callIndex;
-      packages[i] = mc.package;
-      modules[i] = mc.module;
-      functions[i] = mc.function;
-      checkpoints[i] = mc.checkpointSeq.toString();
-      timestamps[i] = mc.timestamp.toISOString();
-    }
+  const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (digest) DO NOTHING";
+  const rows = transactions.map(t => [
+    t.digest,
+    t.sender,
+    ctx.dialect === "postgres" ? t.success : (t.success ? 1 : 0),
+    t.computationCost,
+    t.storageCost,
+    t.storageRebate,
+    t.nonRefundableStorageFee ?? null,
+    t.moveCallCount,
+    t.checkpointSeq.toString(),
+    ctx.dialect === "postgres" ? t.timestamp : t.timestamp.toISOString(),
+    (t.epoch ?? 0n).toString(),
+    t.errorKind ?? null,
+    t.errorDescription ?? null,
+    t.errorCommandIndex ?? null,
+    t.errorAbortCode ?? null,
+    t.errorModule ?? null,
+    t.errorFunction ?? null,
+    t.eventsDigest ?? null,
+    t.lamportVersion ?? null,
+    t.dependencyCount ?? 0,
+  ]);
+  await insertRows(
+    ctx,
+    "transactions",
+    [
+      "digest", "sender", "success",
+      "computation_cost", "storage_cost", "storage_rebate", "non_refundable_storage_fee",
+      "move_call_count", "checkpoint_seq", "sui_timestamp",
+      "epoch", "error_kind", "error_description", "error_command_index",
+      "error_abort_code", "error_module", "error_function",
+      "events_digest", "lamport_version", "dependency_count",
+    ],
+    rows,
+    conflict,
+    [
+      "text", "text", "boolean",
+      "numeric", "numeric", "numeric", "numeric",
+      "integer", "numeric", "timestamptz",
+      "numeric", "text", "text", "integer",
+      "numeric", "text", "text",
+      "text", "numeric", "integer",
+    ],
+  );
+}
 
-    const conflict = snapshotMode ? "" : "ON CONFLICT (tx_digest, call_index) DO NOTHING";
-    await tx.unsafe(
-      `INSERT INTO move_calls (tx_digest, call_index, package, module, function, checkpoint_seq, sui_timestamp)
-       SELECT * FROM unnest($1::text[], $2::integer[], $3::text[], $4::text[], $5::text[], $6::numeric[], $7::timestamptz[])
-       ${conflict}`,
-      [pgArray(txDigests), pgArray(callIndexes), pgArray(packages), pgArray(modules), pgArray(functions), pgArray(checkpoints), pgArray(timestamps)],
-    );
-  }
+async function writeMoveCalls(ctx: WriteContext, moveCalls: MoveCallRecord[]): Promise<void> {
+  if (moveCalls.length === 0) return;
+
+  const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (tx_digest, call_index) DO NOTHING";
+  const rows = moveCalls.map(mc => [
+    mc.txDigest,
+    mc.callIndex,
+    mc.package,
+    mc.module,
+    mc.function,
+    mc.checkpointSeq.toString(),
+    ctx.dialect === "postgres" ? mc.timestamp : mc.timestamp.toISOString(),
+  ]);
+  await insertRows(
+    ctx,
+    "move_calls",
+    ["tx_digest", "call_index", "package", "module", "function", "checkpoint_seq", "sui_timestamp"],
+    rows,
+    conflict,
+    ["text", "integer", "text", "text", "text", "numeric", "timestamptz"],
+  );
 }
 
 function isDuplicateIndexError(error: unknown): error is Error {
@@ -583,9 +660,20 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
                 computation_cost NUMERIC NOT NULL,
                 storage_cost NUMERIC NOT NULL,
                 storage_rebate NUMERIC NOT NULL,
+                non_refundable_storage_fee NUMERIC,
                 move_call_count INTEGER NOT NULL DEFAULT 0,
                 checkpoint_seq NUMERIC NOT NULL,
-                sui_timestamp TIMESTAMPTZ NOT NULL
+                sui_timestamp TIMESTAMPTZ NOT NULL,
+                epoch NUMERIC NOT NULL DEFAULT 0,
+                error_kind TEXT,
+                error_description TEXT,
+                error_command_index INTEGER,
+                error_abort_code NUMERIC,
+                error_module TEXT,
+                error_function TEXT,
+                events_digest TEXT,
+                lamport_version NUMERIC,
+                dependency_count INTEGER NOT NULL DEFAULT 0
               );
             `);
             deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_digest ON transactions(digest)`);
@@ -598,12 +686,25 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
                 computation_cost NUMERIC NOT NULL,
                 storage_cost NUMERIC NOT NULL,
                 storage_rebate NUMERIC NOT NULL,
+                non_refundable_storage_fee NUMERIC,
                 move_call_count INTEGER NOT NULL DEFAULT 0,
                 checkpoint_seq NUMERIC NOT NULL,
-                sui_timestamp TIMESTAMPTZ NOT NULL
+                sui_timestamp TIMESTAMPTZ NOT NULL,
+                epoch NUMERIC NOT NULL DEFAULT 0,
+                error_kind TEXT,
+                error_description TEXT,
+                error_command_index INTEGER,
+                error_abort_code NUMERIC,
+                error_module TEXT,
+                error_function TEXT,
+                events_digest TEXT,
+                lamport_version NUMERIC,
+                dependency_count INTEGER NOT NULL DEFAULT 0
               );
             `);
           }
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_epoch ON transactions(epoch)`);
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_error_kind ON transactions(error_kind) WHERE error_kind IS NOT NULL`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_checkpoint ON transactions(checkpoint_seq)`);
           if (snapshotMode) {
@@ -647,9 +748,20 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
                 computation_cost TEXT NOT NULL,
                 storage_cost TEXT NOT NULL,
                 storage_rebate TEXT NOT NULL,
+                non_refundable_storage_fee TEXT,
                 move_call_count INTEGER NOT NULL DEFAULT 0,
                 checkpoint_seq TEXT NOT NULL,
-                sui_timestamp TEXT NOT NULL
+                sui_timestamp TEXT NOT NULL,
+                epoch TEXT NOT NULL DEFAULT '0',
+                error_kind TEXT,
+                error_description TEXT,
+                error_command_index INTEGER,
+                error_abort_code TEXT,
+                error_module TEXT,
+                error_function TEXT,
+                events_digest TEXT,
+                lamport_version TEXT,
+                dependency_count INTEGER NOT NULL DEFAULT 0
               );
             `);
             deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_digest ON transactions(digest)`);
@@ -662,12 +774,24 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
                 computation_cost TEXT NOT NULL,
                 storage_cost TEXT NOT NULL,
                 storage_rebate TEXT NOT NULL,
+                non_refundable_storage_fee TEXT,
                 move_call_count INTEGER NOT NULL DEFAULT 0,
                 checkpoint_seq TEXT NOT NULL,
-                sui_timestamp TEXT NOT NULL
+                sui_timestamp TEXT NOT NULL,
+                epoch TEXT NOT NULL DEFAULT '0',
+                error_kind TEXT,
+                error_description TEXT,
+                error_command_index INTEGER,
+                error_abort_code TEXT,
+                error_module TEXT,
+                error_function TEXT,
+                events_digest TEXT,
+                lamport_version TEXT,
+                dependency_count INTEGER NOT NULL DEFAULT 0
               );
             `);
           }
+          await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_epoch ON transactions(epoch)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender)`);
           await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_tx_checkpoint ON transactions(checkpoint_seq)`);
           if (snapshotMode) {
@@ -737,6 +861,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
       // Wrap all writes in a single transaction
       await d.transaction(async (exec, rawTx) => {
+      const ctx: WriteContext = { dialect, exec, rawTx, snapshotMode };
 
       // Write events (uses exec for both dialects — user-defined schemas)
       for (const [handlerName, events] of groupedEvents) {
@@ -767,31 +892,19 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         }
       }
 
-      // Write balance changes — Postgres uses unnest() bulk path
+      // Write balance changes
       if (config.balances && allBalanceChanges.length > 0) {
-        if (rawTx) {
-          await writeBalanceChangesPgBulk(rawTx, allBalanceChanges, snapshotMode);
-        } else {
-          await writeBalanceChangesWithExec(exec, dialect, allBalanceChanges, snapshotMode);
-        }
+        await writeBalanceChanges(ctx, allBalanceChanges);
       }
 
       // Write transactions
       if (config.transactions && allTransactions.length > 0) {
-        if (rawTx) {
-          await writeTransactionsPgBulk(rawTx, allTransactions, snapshotMode);
-        } else {
-          await writeTransactionsWithExec(exec, dialect, allTransactions, snapshotMode);
-        }
+        await writeTransactions(ctx, allTransactions);
       }
 
       // Write move calls
       if (config.transactions && allMoveCalls.length > 0) {
-        if (rawTx) {
-          await writeMoveCallsPgBulk(rawTx, allMoveCalls, snapshotMode);
-        } else {
-          await writeMoveCallsWithExec(exec, dialect, allMoveCalls, snapshotMode);
-        }
+        await writeMoveCalls(ctx, allMoveCalls);
       }
       }); // end transaction
     },
@@ -888,160 +1001,3 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
   return storageObj;
 }
 
-// ---------------------------------------------------------------------------
-// Balance change writer (shared between Postgres and SQLite)
-// ---------------------------------------------------------------------------
-
-async function writeBalanceChangesWithExec(
-  exec: (query: string, params?: unknown[]) => Promise<any>,
-  dialect: Dialect,
-  changes: BalanceChange[],
-  snapshotMode = false,
-): Promise<void> {
-  // 1. Insert into balance_changes ledger
-  const ledgerValues: unknown[] = [];
-  const ledgerRows: string[] = [];
-
-  for (const change of changes) {
-    const ph = placeholders(dialect, 6, ledgerValues.length);
-    ledgerRows.push(`(${ph.join(", ")})`);
-    ledgerValues.push(
-      change.txDigest,
-      change.checkpointSeq.toString(),
-      change.address,
-      change.coinType,
-      change.amount,
-      dialect === "postgres" ? change.timestamp : change.timestamp.toISOString(),
-    );
-  }
-
-  const conflictClause = snapshotMode ? "" : "ON CONFLICT (tx_digest, address, coin_type) DO NOTHING";
-  await exec(
-    `INSERT INTO balance_changes (tx_digest, checkpoint_seq, address, coin_type, amount, sui_timestamp) VALUES ${ledgerRows.join(", ")} ${conflictClause}`,
-    ledgerValues,
-  );
-
-  // In snapshot mode, skip incremental balance upserts — materialized at shutdown
-  if (snapshotMode) return;
-
-  // 2. Aggregate per (address, coinType)
-  const aggregated = new Map<string, { address: string; coinType: string; totalAmount: bigint; maxCheckpoint: bigint }>();
-
-  for (const change of changes) {
-    const key = `${change.address}:${change.coinType}`;
-    const existing = aggregated.get(key);
-    if (existing) {
-      existing.totalAmount += BigInt(change.amount);
-      if (change.checkpointSeq > existing.maxCheckpoint) existing.maxCheckpoint = change.checkpointSeq;
-    } else {
-      aggregated.set(key, {
-        address: change.address,
-        coinType: change.coinType,
-        totalAmount: BigInt(change.amount),
-        maxCheckpoint: change.checkpointSeq,
-      });
-    }
-  }
-
-  // 3. Upsert into balances (running totals)
-  const balanceValues: unknown[] = [];
-  const balanceRows: string[] = [];
-
-  for (const aggregation of aggregated.values()) {
-    const ph = placeholders(dialect, 4, balanceValues.length);
-    balanceRows.push(`(${ph.join(", ")})`);
-    balanceValues.push(
-      aggregation.address,
-      aggregation.coinType,
-      aggregation.totalAmount.toString(),
-      aggregation.maxCheckpoint.toString(),
-    );
-  }
-
-  if (balanceRows.length > 0) {
-    if (dialect === "postgres") {
-      await exec(
-        `INSERT INTO balances (address, coin_type, balance, last_checkpoint) VALUES ${balanceRows.join(", ")} ON CONFLICT (address, coin_type) DO UPDATE SET balance = balances.balance + EXCLUDED.balance, last_checkpoint = GREATEST(balances.last_checkpoint, EXCLUDED.last_checkpoint), last_updated = NOW()`,
-        balanceValues,
-      );
-    } else {
-      // SQLite: CAST for numeric addition on TEXT columns
-      await exec(
-        `INSERT INTO balances (address, coin_type, balance, last_checkpoint) VALUES ${balanceRows.join(", ")} ON CONFLICT (address, coin_type) DO UPDATE SET balance = CAST(CAST(balances.balance AS INTEGER) + CAST(excluded.balance AS INTEGER) AS TEXT), last_checkpoint = MAX(balances.last_checkpoint, excluded.last_checkpoint)`,
-        balanceValues,
-      );
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Transaction writer
-// ---------------------------------------------------------------------------
-
-async function writeTransactionsWithExec(
-  exec: (query: string, params?: unknown[]) => Promise<any>,
-  dialect: Dialect,
-  transactions: TransactionRecord[],
-  snapshotMode = false,
-): Promise<void> {
-  const values: unknown[] = [];
-  const rows: string[] = [];
-
-  for (const tx of transactions) {
-    const ph = placeholders(dialect, 9, values.length);
-    rows.push(`(${ph.join(", ")})`);
-    values.push(
-      tx.digest,
-      tx.sender,
-      dialect === "postgres" ? tx.success : (tx.success ? 1 : 0),
-      tx.computationCost,
-      tx.storageCost,
-      tx.storageRebate,
-      tx.moveCallCount,
-      tx.checkpointSeq.toString(),
-      dialect === "postgres" ? tx.timestamp : tx.timestamp.toISOString(),
-    );
-  }
-
-  if (rows.length > 0) {
-    await exec(
-      `INSERT ${snapshotMode ? "" : "OR IGNORE "}INTO transactions (digest, sender, success, computation_cost, storage_cost, storage_rebate, move_call_count, checkpoint_seq, sui_timestamp) VALUES ${rows.join(", ")}`,
-      values,
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Move call writer
-// ---------------------------------------------------------------------------
-
-async function writeMoveCallsWithExec(
-  exec: (query: string, params?: unknown[]) => Promise<any>,
-  dialect: Dialect,
-  moveCalls: MoveCallRecord[],
-  snapshotMode = false,
-): Promise<void> {
-  const values: unknown[] = [];
-  const rows: string[] = [];
-
-  for (const mc of moveCalls) {
-    const ph = placeholders(dialect, 7, values.length);
-    rows.push(`(${ph.join(", ")})`);
-    values.push(
-      mc.txDigest,
-      mc.callIndex,
-      mc.package,
-      mc.module,
-      mc.function,
-      mc.checkpointSeq.toString(),
-      dialect === "postgres" ? mc.timestamp : mc.timestamp.toISOString(),
-    );
-  }
-
-  if (rows.length > 0) {
-    await exec(
-      `INSERT ${snapshotMode ? "" : "OR IGNORE "}INTO move_calls (tx_digest, call_index, package, module, function, checkpoint_seq, sui_timestamp) VALUES ${rows.join(", ")}`,
-      values,
-    );
-  }
-}
