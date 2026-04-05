@@ -393,21 +393,28 @@ async function runSource(
   const startTime = performance.now();
 
   for await (const checkpoint of source.stream()) {
-    // Process through all processors
-    const processed: ProcessedCheckpoint = emptyProcessed(checkpoint);
+    // If workers already ran processors (archive backfill), skip the loop.
+    // Live (gRPC) checkpoints still run processors on the main thread.
+    let processed: ProcessedCheckpoint;
+    const preProcessed = (checkpoint as any)._preProcessed as ProcessedCheckpoint | undefined;
 
-    for (const processor of processors) {
-      const result = processor.process(checkpoint);
-      processed.events.push(...result.events);
-      processed.balanceChanges.push(...result.balanceChanges);
-      processed.transactions.push(...result.transactions);
-      processed.moveCalls.push(...result.moveCalls);
-      processed.objectChanges.push(...result.objectChanges);
-      processed.dependencies.push(...result.dependencies);
-      processed.inputs.push(...result.inputs);
-      processed.commands.push(...result.commands);
-      processed.systemTransactions.push(...result.systemTransactions);
-      processed.unchangedConsensusObjects.push(...result.unchangedConsensusObjects);
+    if (preProcessed) {
+      processed = preProcessed;
+    } else {
+      processed = emptyProcessed(checkpoint);
+      for (const processor of processors) {
+        const result = processor.process(checkpoint);
+        processed.events.push(...result.events);
+        processed.balanceChanges.push(...result.balanceChanges);
+        processed.transactions.push(...result.transactions);
+        processed.moveCalls.push(...result.moveCalls);
+        processed.objectChanges.push(...result.objectChanges);
+        processed.dependencies.push(...result.dependencies);
+        processed.inputs.push(...result.inputs);
+        processed.commands.push(...result.commands);
+        processed.systemTransactions.push(...result.systemTransactions);
+        processed.unchangedConsensusObjects.push(...result.unchangedConsensusObjects);
+      }
     }
 
     // Human output
