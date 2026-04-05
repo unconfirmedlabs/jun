@@ -254,7 +254,7 @@ async function writeBalanceChanges(ctx: WriteContext, changes: BalanceChange[]):
     c.address,
     c.coinType,
     c.amount,
-    ctx.dialect === "postgres" ? c.timestamp : c.timestamp.toISOString(),
+    c.timestamp.toISOString(),
   ]);
   await insertRows(
     ctx,
@@ -341,7 +341,7 @@ async function writeTransactions(ctx: WriteContext, transactions: TransactionRec
     t.nonRefundableStorageFee ?? null,
     t.moveCallCount,
     t.checkpointSeq.toString(),
-    ctx.dialect === "postgres" ? t.timestamp : t.timestamp.toISOString(),
+    t.timestamp.toISOString(),
     (t.epoch ?? 0n).toString(),
     t.errorKind ?? null,
     t.errorDescription ?? null,
@@ -387,7 +387,7 @@ async function writeCheckpoints(ctx: WriteContext, checkpoints: Checkpoint[]): P
     cp.digest ?? "",
     cp.previousDigest ?? null,
     cp.contentDigest ?? null,
-    ctx.dialect === "postgres" ? cp.timestamp : cp.timestamp.toISOString(),
+    cp.timestamp.toISOString(),
     (cp.totalNetworkTransactions ?? 0n).toString(),
     cp.epochRollingGasCostSummary?.computationCost ?? "0",
     cp.epochRollingGasCostSummary?.storageCost ?? "0",
@@ -422,7 +422,7 @@ async function writeObjectChanges(ctx: WriteContext, records: ObjectChangeRecord
     r.outputVersion, r.outputDigest, r.outputOwner, r.outputOwnerKind,
     ctx.dialect === "postgres" ? r.isGasObject : (r.isGasObject ? 1 : 0),
     r.checkpointSeq.toString(),
-    ctx.dialect === "postgres" ? r.timestamp : r.timestamp.toISOString(),
+    r.timestamp.toISOString(),
   ]);
   await insertRows(
     ctx,
@@ -451,7 +451,7 @@ async function writeDependencies(ctx: WriteContext, records: TransactionDependen
     r.txDigest,
     r.dependsOnDigest,
     r.checkpointSeq.toString(),
-    ctx.dialect === "postgres" ? r.timestamp : r.timestamp.toISOString(),
+    r.timestamp.toISOString(),
   ]);
   await insertRows(
     ctx,
@@ -471,7 +471,7 @@ async function writeTransactionInputs(ctx: WriteContext, records: TransactionInp
     r.objectId, r.version, r.digest, r.mutability, r.initialSharedVersion,
     r.pureBytes, r.amount, r.coinType, r.source,
     r.checkpointSeq.toString(),
-    ctx.dialect === "postgres" ? r.timestamp : r.timestamp.toISOString(),
+    r.timestamp.toISOString(),
   ]);
   await insertRows(
     ctx,
@@ -500,7 +500,7 @@ async function writeCommands(ctx: WriteContext, records: CommandRecord[]): Promi
     r.txDigest, r.commandIndex, r.kind,
     r.package, r.module, r.function, r.typeArguments, r.args,
     r.checkpointSeq.toString(),
-    ctx.dialect === "postgres" ? r.timestamp : r.timestamp.toISOString(),
+    r.timestamp.toISOString(),
   ]);
   await insertRows(
     ctx,
@@ -526,7 +526,7 @@ async function writeSystemTransactions(ctx: WriteContext, records: SystemTransac
   const rows = records.map(r => [
     r.txDigest, r.kind, r.data,
     r.checkpointSeq.toString(),
-    ctx.dialect === "postgres" ? r.timestamp : r.timestamp.toISOString(),
+    r.timestamp.toISOString(),
   ]);
   await insertRows(
     ctx,
@@ -545,7 +545,7 @@ async function writeUnchangedConsensusObjects(ctx: WriteContext, records: Unchan
     r.txDigest, r.objectId, r.kind,
     r.version, r.digest, r.objectType,
     r.checkpointSeq.toString(),
-    ctx.dialect === "postgres" ? r.timestamp : r.timestamp.toISOString(),
+    r.timestamp.toISOString(),
   ]);
   await insertRows(
     ctx,
@@ -576,7 +576,7 @@ async function writeMoveCalls(ctx: WriteContext, moveCalls: MoveCallRecord[]): P
     mc.module,
     mc.function,
     mc.checkpointSeq.toString(),
-    ctx.dialect === "postgres" ? mc.timestamp : mc.timestamp.toISOString(),
+    mc.timestamp.toISOString(),
   ]);
   await insertRows(
     ctx,
@@ -1409,7 +1409,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
             if (column === "tx_digest") values.push(event.txDigest);
             else if (column === "event_seq") values.push(event.eventSeq);
             else if (column === "sender") values.push(event.sender);
-            else if (column === "sui_timestamp") values.push(dialect === "postgres" ? event.timestamp : event.timestamp.toISOString());
+            else if (column === "sui_timestamp") values.push(event.timestamp.toISOString());
             else values.push(event.data[column]);
           }
         }
