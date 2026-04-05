@@ -122,6 +122,23 @@ storage:
     path: ./events.db
 ```
 
+#### SQLite vs Postgres schema differences
+
+Jun aims to produce identical row counts and semantically equivalent data in both dialects, but a few column types differ because the databases have different native types. **Every schema change must preserve the following invariants.**
+
+| Jun field | Postgres type | SQLite type | Why different |
+|---|---|---|---|
+| u64 / u128 / u256 (gas costs, epochs, versions, amounts) | `NUMERIC` | `NUMERIC` (type affinity) | SQLite NUMERIC auto-coerces strings to INTEGER for values ≤ 2^63−1 (all Sui u64 values). Larger values degrade to REAL with precision loss — jun's built-in tables never populate u128/u256, so this only matters for user-defined event fields. Neither Postgres nor SQLite have a native `uint64` type; [industry consensus](https://github.com/launchbadge/sqlx/discussions/2977) is to use `NUMERIC` in Postgres for arbitrary-precision integers beyond BIGINT's 2^63−1 limit. |
+| Timestamps (`sui_timestamp`, `indexed_at`) | `TIMESTAMPTZ` | `TEXT` | SQLite has no dedicated timestamp type. All values are written as ISO 8601 strings so they sort and compare lexicographically in both dialects. |
+| Booleans (`success`, `is_gas_object`) | `BOOLEAN` | `INTEGER` (0/1) | SQLite has no boolean type. Writers emit `true`/`false` for Postgres and `1`/`0` for SQLite. |
+| JSON blobs (`commands.args`, `system_transactions.data`) | `TEXT` | `TEXT` | Jun currently uses TEXT in both for portability. `JSONB` is available in Postgres for future optimization but is not schema-portable. |
+| User event fields (`FieldDefs`) | Generated per-type (`schema.ts`) | Generated per-type (`sql-helpers.ts`) | The DSL maps `address` → TEXT, `u8/u16/u32` → INTEGER, `u64/u128/u256` → NUMERIC (PG) / TEXT (SQLite), `vector<T>` → JSONB (PG) / TEXT (SQLite). |
+
+Practical consequences:
+- All numeric columns are nullable and the writer converts `""` and `undefined` to SQL `NULL` via `numOrNull()`. Postgres `NUMERIC` rejects the empty-string literal; SQLite would silently store it as TEXT, losing numeric ordering. Normalizing to NULL keeps both behaviors identical.
+- Timestamp columns are written as `.toISOString()` in both dialects. Do not pass raw `Date` objects — Bun.SQL does not auto-convert them.
+- When adding or modifying a storage table, verify the DDL in both `src/pipeline/destinations/sql.ts` (SQLite branch and Postgres branch) and update this table if a new column type divergence is introduced.
+
 ### Broadcast (fire-and-forget, low latency)
 
 | Broadcast | Description |

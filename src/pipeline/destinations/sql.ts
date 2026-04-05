@@ -3,6 +3,16 @@
  *
  * Single implementation, two dialects. Handles event tables, balance tables,
  * and running totals identically for both databases.
+ *
+ * ⚠️ Schema divergence between dialects is documented in README.md under
+ * "SQLite vs Postgres schema differences". **When adding or modifying a
+ * storage table, update that section if a new column type divergence is
+ * introduced.** The invariants are:
+ *   - u64+ numeric columns: NUMERIC in both (SQLite relies on type affinity)
+ *   - timestamps: TIMESTAMPTZ (PG) / TEXT (SQLite), written as .toISOString()
+ *   - booleans: BOOLEAN (PG) / INTEGER 0/1 (SQLite)
+ *   - row counts and semantic content must match across dialects
+ *   - empty strings for numeric columns must be converted to NULL via numOrNull()
  */
 import type {
   Storage, ProcessedCheckpoint, DecodedEvent, BalanceChange,
