@@ -41,13 +41,28 @@ export function createGrpcLiveSource(config: GrpcLiveSourceConfig): Source {
           for await (const response of grpcStream) {
             if (stopped) break;
 
-            const timestampDate = parseTimestamp(response.checkpoint.summary?.timestamp);
+            const summary = response.checkpoint.summary;
+            const timestampDate = parseTimestamp(summary?.timestamp);
+            const rollingGas = summary?.epochRollingGasCostSummary;
 
             yield {
               sequenceNumber: BigInt(response.cursor),
               timestamp: timestampDate,
               transactions: response.checkpoint.transactions,
               source: "live",
+              epoch: summary?.epoch ? BigInt(summary.epoch) : 0n,
+              digest: summary?.digest ?? "",
+              previousDigest: summary?.previousDigest ?? null,
+              contentDigest: summary?.contentDigest ?? null,
+              totalNetworkTransactions: summary?.totalNetworkTransactions
+                ? BigInt(summary.totalNetworkTransactions)
+                : 0n,
+              epochRollingGasCostSummary: {
+                computationCost: rollingGas?.computationCost ?? "0",
+                storageCost: rollingGas?.storageCost ?? "0",
+                storageRebate: rollingGas?.storageRebate ?? "0",
+                nonRefundableStorageFee: rollingGas?.nonRefundableStorageFee ?? "0",
+              },
             };
           }
         } catch (error) {

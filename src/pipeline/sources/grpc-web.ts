@@ -4,6 +4,7 @@
  */
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Source, Checkpoint } from "../types.ts";
+import { DEFAULT_CHECKPOINT_SUMMARY } from "../types.ts";
 
 export interface GrpcWebSourceConfig {
   network: "mainnet" | "testnet" | "devnet";
@@ -51,6 +52,7 @@ export function createGrpcWebSource(config: GrpcWebSourceConfig): Source {
           timestamp: timestampDate,
           transactions: cp.transactions as any,
           source: "live",
+          ...DEFAULT_CHECKPOINT_SUMMARY,
         };
       }
     },

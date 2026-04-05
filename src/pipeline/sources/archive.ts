@@ -131,7 +131,9 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           const result = await pool.decode(seq, compressed);
           if (stopped) return;
 
-          const timestampDate = parseTimestamp(result.decoded.checkpoint.summary?.timestamp);
+          const summary = result.decoded.checkpoint.summary;
+          const timestampDate = parseTimestamp(summary?.timestamp);
+          const rollingGas = summary?.epochRollingGasCostSummary;
 
           pending.set(seq, {
             sequenceNumber: seq,
@@ -139,6 +141,19 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
             transactions: result.decoded.checkpoint.transactions,
             source: "backfill",
             precomputedBalanceChanges: result.balanceChanges ?? undefined,
+            epoch: summary?.epoch ? BigInt(summary.epoch) : 0n,
+            digest: summary?.digest ?? "",
+            previousDigest: summary?.previousDigest ?? null,
+            contentDigest: summary?.contentDigest ?? null,
+            totalNetworkTransactions: summary?.totalNetworkTransactions
+              ? BigInt(summary.totalNetworkTransactions)
+              : 0n,
+            epochRollingGasCostSummary: {
+              computationCost: rollingGas?.computationCost ?? "0",
+              storageCost: rollingGas?.storageCost ?? "0",
+              storageRebate: rollingGas?.storageRebate ?? "0",
+              nonRefundableStorageFee: rollingGas?.nonRefundableStorageFee ?? "0",
+            },
           });
         } catch (error) {
           log.error({ checkpoint: seq.toString(), error }, "failed to fetch/decode checkpoint");

@@ -15,8 +15,19 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import protobuf from "protobufjs";
 import path from "path";
-import type { GrpcCheckpointResponse, GrpcEvent } from "./grpc.ts";
-import { parseSender } from "./sui-bcs.ts";
+import type {
+  GrpcCheckpointResponse,
+  GrpcEvent,
+  GrpcTransaction,
+  GrpcChangedObject,
+  GrpcOwner,
+  GrpcUnchangedConsensusObject,
+  GrpcInput,
+  GrpcCommand,
+  GrpcSystemTransactionKind,
+  GrpcExecutionError,
+} from "./grpc.ts";
+import { parseSender, TransactionData } from "./sui-bcs.ts";
 
 // ─── Event parsing via @mysten/sui/bcs ──────────────────────────────────────
 
@@ -87,28 +98,372 @@ const CheckpointSummary = bcs.struct("CheckpointSummary", {
   // are not needed — BCS parse stops here.
 });
 
-/** Decoded transaction metadata from effects BCS. */
-interface TxMeta {
-  digest: string;
-  status: string;
-  gasComputation: number;
-  gasStorage: number;
-  gasRebate: number;
+// ─── Effects extraction via @mysten/sui/bcs ────────────────────────────────
+
+/** Flatten a Mysten Owner enum into the GrpcOwner shape. */
+function flattenOwner(owner: any): GrpcOwner | undefined {
+  if (!owner) return undefined;
+  const kind = owner.$kind;
+  if (kind === "AddressOwner") return { kind: "ADDRESS", address: owner.AddressOwner };
+  if (kind === "ObjectOwner") return { kind: "OBJECT", address: owner.ObjectOwner };
+  if (kind === "Shared") {
+    return { kind: "SHARED", version: String(owner.Shared?.initialSharedVersion ?? owner.Shared) };
+  }
+  if (kind === "Immutable") return { kind: "IMMUTABLE" };
+  if (kind === "ConsensusAddressOwner" || kind === "ConsensusV2") {
+    const inner = owner.ConsensusAddressOwner ?? owner.ConsensusV2;
+    return { kind: "CONSENSUS_ADDRESS", address: inner?.owner, version: String(inner?.startVersion ?? "") };
+  }
+  return undefined;
 }
 
-/** Extract transaction metadata from TransactionEffects BCS using @mysten/sui/bcs. */
-function decodeTxEffects(effectsBcs: Uint8Array): TxMeta | null {
+/**
+ * Extract effects-level data from a TransactionEffects BCS blob.
+ * Returns the full effects object for GrpcTransaction.effects, or null on parse failure.
+ */
+function extractEffects(effectsBcs: Uint8Array): {
+  digest: string;
+  effects: NonNullable<GrpcTransaction["effects"]>;
+} | null {
   try {
-    const effects = suiBcs.TransactionEffects.parse(effectsBcs);
-    const v2 = effects.V2;
+    const parsed: any = suiBcs.TransactionEffects.parse(effectsBcs);
+    const v2 = parsed.V2;
     if (!v2) return null;
+
+    // Status + error
+    const statusKind = v2.status?.$kind;
+    const success = statusKind === "Success";
+    let error: GrpcExecutionError | undefined;
+    if (!success && v2.status?.Failed) {
+      const failed = v2.status.Failed;
+      const errKind = failed.error?.$kind ?? "Unknown";
+      const moveAbort = failed.error?.MoveAbort;
+      error = {
+        kind: errKind,
+        commandIndex: failed.command != null ? Number(failed.command) : undefined,
+        abortCode: moveAbort ? String(moveAbort[1] ?? moveAbort.abortCode ?? "") : undefined,
+        moveLocation: moveAbort
+          ? (() => {
+              const loc = Array.isArray(moveAbort) ? moveAbort[0] : moveAbort.moveLocation;
+              return loc
+                ? {
+                    package: loc.module?.address ?? loc.package ?? "",
+                    module: loc.module?.name ?? loc.module ?? "",
+                    function: loc.functionName ?? loc.function ?? "",
+                    instruction: loc.instruction != null ? Number(loc.instruction) : undefined,
+                  }
+                : undefined;
+            })()
+          : undefined,
+      };
+    }
+
+    // Changed objects
+    const changedObjects: GrpcChangedObject[] = [];
+    for (const entry of v2.changedObjects ?? []) {
+      const [objectId, change] = entry as [string, any];
+      const inputKind = change.inputState?.$kind;
+      const outputKind = change.outputState?.$kind;
+      const idOpKind = change.idOperation?.$kind;
+
+      // Derive input state shape
+      const inputExists = inputKind === "Exist";
+      const inputTuple = inputExists ? change.inputState.Exist : null;
+      // Exist = ((version, digest), Owner) in rust, but mysten schema usually maps as [[version, digest], owner]
+      const inputVersion = inputTuple ? String(inputTuple[0]?.[0] ?? inputTuple[0] ?? "") : undefined;
+      const inputDigest = inputTuple ? String(inputTuple[0]?.[1] ?? "") : undefined;
+      const inputOwner = inputTuple ? flattenOwner(inputTuple[1]) : undefined;
+
+      let outputState: GrpcChangedObject["outputState"] = "DOES_NOT_EXIST";
+      let outputVersion: string | undefined;
+      let outputDigest: string | undefined;
+      let outputOwner: GrpcOwner | undefined;
+      let objectType: string | undefined;
+      let accumulatorWrite: GrpcChangedObject["accumulatorWrite"];
+
+      if (outputKind === "ObjectWrite") {
+        outputState = "OBJECT_WRITE";
+        // ObjectWrite = (ObjectDigest, Owner)
+        const tuple = change.outputState.ObjectWrite;
+        outputDigest = String(tuple?.[0] ?? "");
+        outputOwner = flattenOwner(tuple?.[1]);
+        // object_type from the accessor attached by mysten, if present
+        objectType = (change as any).objectType;
+      } else if (outputKind === "PackageWrite") {
+        outputState = "PACKAGE_WRITE";
+        const tuple = change.outputState.PackageWrite;
+        outputVersion = String(tuple?.[0] ?? "");
+        outputDigest = String(tuple?.[1] ?? "");
+      } else if (outputKind === "AccumulatorWriteV1") {
+        outputState = "ACCUMULATOR_WRITE";
+        const write = change.outputState.AccumulatorWriteV1;
+        const address = write?.address?.address;
+        const ty = write?.address?.ty;
+        const op = write?.operation?.$kind;
+        const valueKind = write?.value?.$kind;
+        const amount = valueKind === "Integer" ? String(write.value.Integer) : "0";
+        if (address && ty) {
+          accumulatorWrite = {
+            address: String(address),
+            type: String(ty),
+            operation: op === "Split" ? "SPLIT" : "MERGE",
+            value: amount,
+          };
+        }
+      }
+
+      const idOperation: GrpcChangedObject["idOperation"] =
+        idOpKind === "Created" ? "CREATED" : idOpKind === "Deleted" ? "DELETED" : "NONE";
+
+      changedObjects.push({
+        objectId,
+        inputState: inputExists ? "EXISTS" : "DOES_NOT_EXIST",
+        inputVersion,
+        inputDigest,
+        inputOwner,
+        outputState,
+        outputVersion,
+        outputDigest,
+        outputOwner,
+        idOperation,
+        objectType,
+        accumulatorWrite,
+      });
+    }
+
+    // Unchanged consensus objects
+    const unchangedConsensusObjects: GrpcUnchangedConsensusObject[] = [];
+    for (const entry of v2.unchangedConsensusObjects ?? []) {
+      // entry is [objectId, UnchangedSharedKind] or similar tuple
+      const objectId = Array.isArray(entry) ? entry[0] : entry.objectId;
+      const inner = Array.isArray(entry) ? entry[1] : entry;
+      const kindRaw = inner?.$kind;
+      let kind: GrpcUnchangedConsensusObject["kind"] = "READ_ONLY_ROOT";
+      let version: string | undefined;
+      let digest: string | undefined;
+      if (kindRaw === "ReadOnlyRoot") {
+        kind = "READ_ONLY_ROOT";
+        const tuple = inner.ReadOnlyRoot;
+        version = String(tuple?.[0] ?? "");
+        digest = String(tuple?.[1] ?? "");
+      } else if (kindRaw === "MutateConsensusStreamEnded" || kindRaw === "MutateDeleted") {
+        kind = "MUTATE_CONSENSUS_STREAM_ENDED";
+        version = String(inner[kindRaw] ?? "");
+      } else if (kindRaw === "ReadConsensusStreamEnded" || kindRaw === "ReadDeleted") {
+        kind = "READ_CONSENSUS_STREAM_ENDED";
+        version = String(inner[kindRaw] ?? "");
+      } else if (kindRaw === "Canceled" || kindRaw === "Cancelled") {
+        kind = "CANCELED";
+        version = String(inner[kindRaw] ?? "");
+      } else if (kindRaw === "PerEpochConfig" || kindRaw === "PerEpochConfigWithVersion") {
+        kind = "PER_EPOCH_CONFIG";
+      }
+      unchangedConsensusObjects.push({ kind, objectId: String(objectId), version, digest });
+    }
 
     return {
       digest: v2.transactionDigest,
-      status: v2.status.$kind === "Success" ? "success" : "failure",
-      gasComputation: Number(v2.gasUsed.computationCost),
-      gasStorage: Number(v2.gasUsed.storageCost),
-      gasRebate: Number(v2.gasUsed.storageRebate),
+      effects: {
+        status: { success, error },
+        gasUsed: {
+          computationCost: String(v2.gasUsed.computationCost),
+          storageCost: String(v2.gasUsed.storageCost),
+          storageRebate: String(v2.gasUsed.storageRebate),
+          nonRefundableStorageFee: v2.gasUsed.nonRefundableStorageFee != null
+            ? String(v2.gasUsed.nonRefundableStorageFee)
+            : undefined,
+        },
+        epoch: v2.executedEpoch != null ? String(v2.executedEpoch) : undefined,
+        dependencies: (v2.dependencies ?? []).map((d: any) => String(d)),
+        changedObjects,
+        unchangedConsensusObjects,
+        eventsDigest: v2.eventsDigest != null ? String(v2.eventsDigest) : undefined,
+        lamportVersion: v2.lamportVersion != null ? String(v2.lamportVersion) : undefined,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Transaction data extraction via local TransactionData schema ──────────
+
+/** Map a TransactionKind $kind discriminator to our GrpcSystemTransactionKind. */
+function mapSystemKind(kind: string): GrpcSystemTransactionKind | undefined {
+  switch (kind) {
+    case "ProgrammableTransaction": return undefined;
+    case "Genesis": return "GENESIS";
+    case "ChangeEpoch": return "CHANGE_EPOCH";
+    case "ConsensusCommitPrologue": return "CONSENSUS_COMMIT_PROLOGUE_V1";
+    case "ConsensusCommitPrologueV2": return "CONSENSUS_COMMIT_PROLOGUE_V2";
+    case "ConsensusCommitPrologueV3": return "CONSENSUS_COMMIT_PROLOGUE_V3";
+    case "ConsensusCommitPrologueV4": return "CONSENSUS_COMMIT_PROLOGUE_V4";
+    case "AuthenticatorStateUpdate": return "AUTHENTICATOR_STATE_UPDATE";
+    case "EndOfEpochTransaction": return "END_OF_EPOCH";
+    case "RandomnessStateUpdate": return "RANDOMNESS_STATE_UPDATE";
+    case "ProgrammableSystemTransaction": return "PROGRAMMABLE_SYSTEM_TRANSACTION";
+    default: return undefined;
+  }
+}
+
+/** Extract a PTB command into the GrpcCommand shape (one of the variants is set). */
+function extractCommand(cmd: any): GrpcCommand {
+  const kind = cmd?.$kind;
+  switch (kind) {
+    case "MoveCall": {
+      const mc = cmd.MoveCall;
+      return {
+        moveCall: {
+          package: String(mc?.package ?? ""),
+          module: String(mc?.module ?? ""),
+          function: String(mc?.function ?? ""),
+          typeArguments: (mc?.typeArguments ?? []).map((t: any) => String(t)),
+        },
+      };
+    }
+    case "TransferObjects":
+      return { transferObjects: { objects: cmd.TransferObjects?.[0] ?? [], address: cmd.TransferObjects?.[1] } };
+    case "SplitCoins":
+      return { splitCoins: { coin: cmd.SplitCoins?.[0], amounts: cmd.SplitCoins?.[1] ?? [] } };
+    case "MergeCoins":
+      return { mergeCoins: { coin: cmd.MergeCoins?.[0], coins: cmd.MergeCoins?.[1] ?? [] } };
+    case "Publish": {
+      const p = cmd.Publish;
+      return {
+        publish: {
+          modules: (p?.[0] ?? []).map((m: any) => new Uint8Array(m)),
+          dependencies: (p?.[1] ?? []).map((d: any) => String(d)),
+        },
+      };
+    }
+    case "Upgrade": {
+      const u = cmd.Upgrade;
+      return {
+        upgrade: {
+          modules: (u?.[0] ?? []).map((m: any) => new Uint8Array(m)),
+          dependencies: (u?.[1] ?? []).map((d: any) => String(d)),
+          package: String(u?.[2] ?? ""),
+          ticket: u?.[3],
+        },
+      };
+    }
+    case "MakeMoveVec":
+    case "MakeMoveVector":
+      return { makeMoveVector: { elementType: cmd[kind]?.[0], elements: cmd[kind]?.[1] ?? [] } };
+    default:
+      return { moveCall: undefined };
+  }
+}
+
+/** Extract a CallArg (PTB input) into the GrpcInput shape. */
+function extractInput(inp: any): GrpcInput {
+  const kind = inp?.$kind;
+  switch (kind) {
+    case "Pure":
+      return { kind: "PURE", pure: new Uint8Array(inp.Pure ?? []) };
+    case "Object": {
+      const objKind = inp.Object?.$kind;
+      if (objKind === "ImmOrOwnedObject") {
+        const o = inp.Object.ImmOrOwnedObject;
+        return {
+          kind: "IMMUTABLE_OR_OWNED",
+          objectId: String(o?.[0] ?? ""),
+          version: String(o?.[1] ?? ""),
+          digest: String(o?.[2] ?? ""),
+        };
+      }
+      if (objKind === "SharedObject") {
+        const s = inp.Object.SharedObject;
+        return {
+          kind: "SHARED",
+          objectId: String(s?.objectId ?? s?.id ?? ""),
+          initialSharedVersion: String(s?.initialSharedVersion ?? ""),
+          mutability: s?.mutable ? "MUTABLE" : "IMMUTABLE",
+        };
+      }
+      if (objKind === "Receiving") {
+        const r = inp.Object.Receiving;
+        return {
+          kind: "RECEIVING",
+          objectId: String(r?.[0] ?? ""),
+          version: String(r?.[1] ?? ""),
+          digest: String(r?.[2] ?? ""),
+        };
+      }
+      return { kind: "IMMUTABLE_OR_OWNED" };
+    }
+    case "BalanceWithdraw":
+    case "FundsWithdrawal": {
+      const w = inp.BalanceWithdraw ?? inp.FundsWithdrawal;
+      return {
+        kind: "FUNDS_WITHDRAWAL",
+        amount: w?.amount?.Entire != null ? String(w.amount.Entire) : undefined,
+        coinType: String(w?.typeParam ?? w?.coinType ?? ""),
+        source: w?.reservation?.$kind === "EntireSponsor" ? "SPONSOR" : "SENDER",
+      };
+    }
+    default:
+      return { kind: "PURE" };
+  }
+}
+
+/**
+ * Extract the transaction-level part of a GrpcTransaction from TransactionData BCS.
+ * Returns sender + commands + inputs + system kind + gas + expiration.
+ */
+function extractTransaction(txDataBcs: Uint8Array): NonNullable<GrpcTransaction["transaction"]> | null {
+  try {
+    const parsed: any = TransactionData.parse(txDataBcs);
+    const v1 = parsed.V1;
+    if (!v1) return null;
+
+    const kindKind = v1.kind?.$kind;
+    const systemKind = mapSystemKind(kindKind);
+
+    // Commands + inputs for programmable transactions
+    let commands: GrpcCommand[] | undefined;
+    let inputs: GrpcInput[] | undefined;
+    if (kindKind === "ProgrammableTransaction" || kindKind === "ProgrammableSystemTransaction") {
+      const ptb = v1.kind.ProgrammableTransaction ?? v1.kind.ProgrammableSystemTransaction;
+      if (ptb) {
+        commands = (ptb.commands ?? []).map(extractCommand);
+        inputs = (ptb.inputs ?? []).map(extractInput);
+      }
+    }
+
+    // Gas payment
+    const gasData = v1.gasData;
+    const gasPayment = gasData
+      ? {
+          objects: (gasData.payment ?? []).map((p: any) => ({
+            objectId: String(p?.[0] ?? ""),
+            version: String(p?.[1] ?? ""),
+            digest: String(p?.[2] ?? ""),
+          })),
+          owner: String(gasData.owner ?? ""),
+          price: String(gasData.price ?? "0"),
+          budget: String(gasData.budget ?? "0"),
+        }
+      : undefined;
+
+    // Expiration
+    const expKind = v1.expiration?.$kind;
+    const expiration =
+      expKind === "Epoch"
+        ? { kind: "EPOCH" as const, epoch: String(v1.expiration.Epoch) }
+        : expKind === "None"
+          ? { kind: "NONE" as const }
+          : undefined;
+
+    return {
+      sender: v1.sender,
+      systemKind,
+      systemData: systemKind ? v1.kind[kindKind] : undefined,
+      programmableTransaction: commands ? { commands } : undefined,
+      commands,
+      inputs,
+      gasPayment,
+      expiration,
     };
   } catch {
     return null;
@@ -237,6 +592,17 @@ export async function decodeCompressedCheckpoint(
   return decodeCheckpointFromProto(seq, cp, verifyOpts);
 }
 
+/** Hex-encode a Uint8Array as "0x..." */
+function toHex(bytes: Uint8Array | number[] | null | undefined): string {
+  if (!bytes) return "";
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let s = "0x";
+  for (let i = 0; i < arr.length; i++) {
+    s += arr[i]!.toString(16).padStart(2, "0");
+  }
+  return s;
+}
+
 /**
  * Decode a checkpoint from an already-decoded protobuf object.
  * Avoids re-decompression when the protobuf is already available (e.g., in workers).
@@ -247,13 +613,31 @@ export async function decodeCheckpointFromProto(
   verifyOpts?: { grpcUrl: string },
 ): Promise<GrpcCheckpointResponse> {
 
-  // BCS decode CheckpointSummary for timestamp + epoch
+  // BCS decode CheckpointSummary for full summary data
   let timestampMs = 0;
+  let epochStr = "0";
+  let totalTxStr = "0";
+  let contentDigest = "";
+  let previousDigest: string | null = null;
+  let rollingComputation = "0";
+  let rollingStorage = "0";
+  let rollingRebate = "0";
+  let rollingNonRefundable = "0";
+
   const summaryBcsRaw = cp.summary?.bcs?.value;
   if (summaryBcsRaw) {
     const summaryBcs = new Uint8Array(summaryBcsRaw);
-    const summary = CheckpointSummary.parse(summaryBcs);
+    const summary: any = CheckpointSummary.parse(summaryBcs);
     timestampMs = Number(summary.timestampMs);
+    epochStr = String(summary.epoch);
+    totalTxStr = String(summary.networkTotalTransactions);
+    contentDigest = toHex(summary.contentDigest);
+    previousDigest = summary.previousDigest ? toHex(summary.previousDigest) : null;
+    const gas = summary.epochRollingGasCostSummary;
+    rollingComputation = String(gas?.computationCost ?? "0");
+    rollingStorage = String(gas?.storageCost ?? "0");
+    rollingRebate = String(gas?.storageRebate ?? "0");
+    rollingNonRefundable = String(gas?.nonRefundableStorageFee ?? "0");
 
     // Cryptographic verification via kei
     if (verifyOpts && cp.signature) {
@@ -275,14 +659,14 @@ export async function decodeCheckpointFromProto(
   const transactions: GrpcCheckpointResponse["checkpoint"]["transactions"] = [];
 
   for (const tx of cp.transactions ?? []) {
-    // Decode tx metadata from effects BCS (proto fields aren't populated in archive)
+    // Decode full effects from BCS
     const effectsBcs = tx.effects?.bcs?.value as Uint8Array | undefined;
-    const txMeta = effectsBcs ? decodeTxEffects(new Uint8Array(effectsBcs)) : null;
-    const digest = tx.digest || txMeta?.digest || "";
+    const effectsResult = effectsBcs ? extractEffects(new Uint8Array(effectsBcs)) : null;
+    const digest = tx.digest || effectsResult?.digest || "";
 
-    // Decode sender from TransactionData BCS
+    // Decode full transaction data from BCS
     const txDataBcs = tx.transaction?.bcs?.value as Uint8Array | undefined;
-    const sender = txDataBcs ? parseSender(new Uint8Array(txDataBcs)) : undefined;
+    const transactionData = txDataBcs ? extractTransaction(new Uint8Array(txDataBcs)) : null;
 
     // Decode events from BCS
     const eventsBcs = tx.events?.bcs?.value as Uint8Array | undefined;
@@ -299,24 +683,13 @@ export async function decodeCheckpointFromProto(
         amount: bc.amount ?? "0",
       }));
 
-    const txResult: any = {
+    const txResult: GrpcTransaction = {
       digest,
-      transaction: sender ? { sender } : undefined,
+      transaction: transactionData ?? undefined,
       events: events.length > 0 ? { events } : null,
+      effects: effectsResult?.effects,
       balanceChanges: balanceChanges.length > 0 ? balanceChanges : undefined,
     };
-
-    // Attach effects metadata for SQLite writer
-    if (txMeta) {
-      txResult.effects = {
-        status: { success: txMeta.status === "success" },
-        gasUsed: {
-          computationCost: String(txMeta.gasComputation),
-          storageCost: String(txMeta.gasStorage),
-          storageRebate: String(txMeta.gasRebate),
-        },
-      };
-    }
 
     transactions.push(txResult);
   }
@@ -325,7 +698,20 @@ export async function decodeCheckpointFromProto(
     cursor: seq.toString(),
     checkpoint: {
       sequenceNumber: cp.sequenceNumber ?? seq.toString(),
-      summary: { timestamp: { seconds, nanos } },
+      summary: {
+        timestamp: { seconds, nanos },
+        epoch: epochStr,
+        digest: undefined, // archive doesn't carry the checkpoint digest directly; computed separately if needed
+        previousDigest: previousDigest ?? undefined,
+        contentDigest: contentDigest || undefined,
+        totalNetworkTransactions: totalTxStr,
+        epochRollingGasCostSummary: {
+          computationCost: rollingComputation,
+          storageCost: rollingStorage,
+          storageRebate: rollingRebate,
+          nonRefundableStorageFee: rollingNonRefundable,
+        },
+      },
       transactions,
     },
   };
