@@ -58,7 +58,7 @@ export interface CanonicalConfig {
   processors?: {
     transactionBlocks?: boolean;
     balances?: { coinTypes: string[] | "*" };
-    events?: Record<string, { type: string; fields?: any; startCheckpoint?: any }>;
+    events?: Record<string, { type: string; fields?: any; startCheckpoint?: any; typeParamCount?: number }>;
     checkpoints?: boolean;
     objectChanges?: boolean;
     dependencies?: boolean;
@@ -430,8 +430,8 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
 
     // Write resolved fields back to processorConfig so handlerTables picks them up
     for (const [name, handler] of Object.entries(handlers)) {
-      (processorConfig!.events as any)[name].fields = handler.fields;
-      (processorConfig!.events as any)[name].typeParamCount = handler.typeParamCount;
+      processorConfig!.events![name]!.fields = handler.fields;
+      processorConfig!.events![name]!.typeParamCount = handler.typeParamCount;
     }
 
     const proc = createEventDecoder({
