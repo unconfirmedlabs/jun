@@ -2008,7 +2008,8 @@ function addPipelineOptions(cmd: any) {
     .option("--batch-size <n>", "write buffer batch size in checkpoints (default: 500)")
     .option("-y, --yes", "skip confirmation prompt")
     .option("--network <network>", "network name (mainnet, testnet, devnet)")
-    .option("--bcs-provider <provider>", "BCS decoder: mysten (default) or unconfirmed")
+    .option("--bcs-provider <provider>", "JS BCS runtime: mysten (default) or unconfirmed")
+    .option("--bcs-decoder <decoder>", "checkpoint decoder: native (default, Rust FFI) or js")
     .option("--transaction-blocks", "enable transaction block indexing")
     .option("--coin-type <type...>", "coin types to track balances for (repeatable, or \"*\" for all)")
     .option("--event-type <type...>", "Move event types to index (repeatable)")
@@ -2055,6 +2056,7 @@ interface PipelineOpts {
     unchangedConsensusObjects?: boolean;
     everything?: boolean;
     bcsProvider?: string;
+    bcsDecoder?: string;
     sqlite?: string;
     postgres?: string;
     sqliteExport?: string;
@@ -2068,6 +2070,9 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
     // Set BCS provider before any dynamic imports that trigger bcs-provider.ts
     if (opts.bcsProvider) {
       process.env.JUN_BCS_PROVIDER = opts.bcsProvider;
+    }
+    if (opts.bcsDecoder) {
+      process.env.JUN_BCS_DECODER = opts.bcsDecoder;
     }
 
     try {
@@ -2340,7 +2345,10 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
       if (baseConfig.sources?.concurrency) console.error(`  concurrency     ${baseConfig.sources.concurrency}`);
       if (baseConfig.sources?.workers) console.error(`  workers         ${baseConfig.sources.workers}`);
       if (baseConfig.sources?.archiveUrl || baseConfig.sources?.epoch || baseConfig.sources?.startCheckpoint) {
-        console.error(`  decoder         ${process.env.JUN_BCS_PROVIDER === "unconfirmed" ? "@unconfirmed/bcs" : "@mysten/bcs"} (baseline)`);
+        const decoderLabel = process.env.JUN_BCS_DECODER === "js"
+          ? `JS (${process.env.JUN_BCS_PROVIDER === "unconfirmed" ? "@unconfirmed/bcs" : "@mysten/bcs"})`
+          : "native (Rust FFI)";
+        console.error(`  decoder         ${decoderLabel}`);
       }
       console.error("");
 

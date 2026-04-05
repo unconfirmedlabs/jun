@@ -108,6 +108,7 @@ function decodeResponse(symbol: keyof NativeCheckpointDecoder, input: Uint8Array
 }
 
 export function isNativeCheckpointDecoderAvailable(): boolean {
+  if (process.env.JUN_BCS_DECODER === "js") return false;
   return nativeDecoder !== null;
 }
 
