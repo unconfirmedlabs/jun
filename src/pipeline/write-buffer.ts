@@ -1,16 +1,18 @@
 /**
- * Pipeline write buffer — batches ProcessedCheckpoints and sends to WriterChannels.
+ * Pipeline write buffer — batches ProcessedCheckpoints and writes to storages.
  *
- * Same patterns as before (timer + threshold flush, backpressure, p-retry,
- * cursor coalescing) but flushes to WriterChannel[] instead of Storage[].
+ * Directly calls storage.write() on the main thread. No worker offload, no
+ * serialization across thread boundaries, no silent error swallowing. The
+ * worker/WriterChannel layer was removed when consolidating to the Mysten
+ * BCS baseline — it will be reintroduced in a later branch as a measured
+ * optimization.
  *
- * Cursor updates and broadcast notifications happen in the onAck callback
- * so they reflect actual writes, not just enqueue.
+ * Patterns preserved from the old implementation: timer + threshold flush,
+ * backpressure via awaited flush, p-retry on transient failures, cursor
+ * coalescing, onFlush stats callback for metrics.
  */
 import pRetry from "p-retry";
-import type { ProcessedCheckpoint } from "./types.ts";
-import type { WriterChannel, WriteAck } from "./writer.ts";
-import { serializeBatch } from "./writer.ts";
+import type { ProcessedCheckpoint, Storage } from "./types.ts";
 import type { StateManager } from "../state.ts";
 import type { Logger } from "../logger.ts";
 
@@ -35,9 +37,9 @@ export interface PipelineWriteBufferConfig {
   maxBatchSize: number;
   /** p-retry attempts on flush failure (default: 3) */
   retries?: number;
-  /** Callback invoked after each successful flush (fired on ack from writer) */
+  /** Callback invoked after each successful flush */
   onFlush?: (stats: PipelineFlushStats) => void;
-  /** Callback invoked with the flushed batch (for broadcasts, fired on ack) */
+  /** Callback invoked with the flushed batch (for broadcasts) */
   onBatchFlushed?: (batch: ProcessedCheckpoint[]) => void;
 }
 
@@ -57,7 +59,7 @@ export interface PipelineWriteBuffer {
 // ---------------------------------------------------------------------------
 
 export function createPipelineWriteBuffer(
-  channels: WriterChannel[],
+  storages: Storage[],
   state: StateManager | null,
   cursorKey: string,
   config: PipelineWriteBufferConfig,
@@ -71,26 +73,6 @@ export function createPipelineWriteBuffer(
   let flushing: Promise<void> | null = null;
   let timer: Timer | null = null;
   let stopped = false;
-
-  // Register ack callbacks on all channels
-  for (const channel of channels) {
-    channel.onAck(async (ack: WriteAck) => {
-      // Update cursors from ack
-      if (state) {
-        const cursor = BigInt(ack.cursor);
-        await state.setCheckpointCursor(cursorKey, cursor);
-      }
-
-      // Fire stats callback
-      onFlush?.({
-        eventsWritten: ack.eventsWritten,
-        balanceChangesWritten: ack.balanceChangesWritten,
-        checkpointsFlushed: 1, // per-batch ack
-        flushDurationMs: ack.flushDurationMs,
-        bufferSizeAfter: buffer.length,
-      });
-    });
-  }
 
   function countEvents(): number {
     let total = 0;
@@ -118,16 +100,21 @@ export function createPipelineWriteBuffer(
         async () => {
           const start = performance.now();
 
-          // Serialize batch and send to all channels as one message
-          const serialized = serializeBatch(batch);
-          if (channels.length > 0) {
-            await Promise.all(channels.map(channel => channel.send(serialized)));
+          // Write to all storages on the main thread. Errors propagate.
+          if (storages.length > 0) {
+            await Promise.all(storages.map(s => s.write(batch)));
           }
 
-          // Record processed seqs (for gap detection) — done eagerly since
-          // the channel will handle actual write ordering
+          // Record processed seqs (for gap detection)
           if (state && seqSnapshot.size > 0) {
             await state.recordProcessedCheckpoints([...seqSnapshot]);
+          }
+
+          // Advance cursor to highest seq from this batch
+          if (state) {
+            for (const [, seq] of cursorSnapshot) {
+              await state.setCheckpointCursor(cursorKey, seq);
+            }
           }
 
           const durationMs = performance.now() - start;
@@ -144,7 +131,15 @@ export function createPipelineWriteBuffer(
             "flush complete",
           );
 
-          // Notify broadcasts (fire-and-forget, not tied to ack)
+          onFlush?.({
+            eventsWritten,
+            balanceChangesWritten,
+            checkpointsFlushed: batch.length,
+            flushDurationMs: durationMs,
+            bufferSizeAfter: buffer.length,
+          });
+
+          // Notify broadcasts (fire-and-forget)
           if (onBatchFlushed) {
             try { onBatchFlushed(batch); } catch {}
           }
@@ -161,6 +156,7 @@ export function createPipelineWriteBuffer(
       for (const seq of seqSnapshot) {
         processedSeqs.add(seq);
       }
+      log.error({ err, label, checkpoints: batch.length }, "flush failed after retries");
       throw err;
     }
   }
@@ -186,7 +182,13 @@ export function createPipelineWriteBuffer(
           log.debug({ bufferSize: countEvents(), label }, "backpressure — awaiting in-flight flush");
           await flushing;
         }
-        await doFlush();
+        const flushPromise = doFlush();
+        flushing = flushPromise;
+        try {
+          await flushPromise;
+        } finally {
+          flushing = null;
+        }
       }
     },
 
@@ -197,6 +199,7 @@ export function createPipelineWriteBuffer(
     start(): void {
       if (timer) return;
       timer = setInterval(async () => {
+        if (stopped) return;
         try {
           const flushPromise = doFlush();
           flushing = flushPromise;
@@ -216,7 +219,7 @@ export function createPipelineWriteBuffer(
         timer = null;
       }
       if (flushing) await flushing;
-      await doFlush(); // final flush
+      await doFlush(); // final flush — any errors here propagate to caller
     },
   };
 }

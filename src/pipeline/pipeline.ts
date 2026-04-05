@@ -35,10 +35,7 @@ import type {
   ProcessedCheckpoint,
 } from "./types.ts";
 import { emptyProcessed } from "./types.ts";
-import type { WriterChannel } from "./writer.ts";
 import { createPipelineWriteBuffer, type PipelineWriteBuffer, type PipelineFlushStats } from "./write-buffer.ts";
-import { createSqliteWriterChannel } from "./writers/sqlite.ts";
-import { createPostgresWriterChannel } from "./writers/postgres.ts";
 import { createLogger } from "../logger.ts";
 import type { Logger } from "../logger.ts";
 import { createMetrics, type IndexerMetrics } from "../serve.ts";
@@ -109,31 +106,10 @@ export function createPipeline(): Pipeline {
         }
       }
 
-      // Wrap storages in WriterChannels
-      const writerChannels: WriterChannel[] = [];
+      // Initialize storages directly (creates tables, etc.) — no worker layer.
       for (const storage of storages) {
-        if (storage.name === "sqlite") {
-          // SQLite: extract config and create a worker-based channel
-          const sqliteConfig = (storage as any)._config;
-          if (sqliteConfig) {
-            const channel = createSqliteWriterChannel(sqliteConfig);
-            writerChannels.push(channel);
-          } else {
-            // Fallback: wrap in postgres-style async channel
-            const channel = createPostgresWriterChannel(storage);
-            writerChannels.push(channel);
-          }
-        } else {
-          // Postgres and others: in-process async channel
-          const channel = createPostgresWriterChannel(storage);
-          writerChannels.push(channel);
-        }
-      }
-
-      // Initialize writer channels (creates tables, etc.)
-      for (const channel of writerChannels) {
-        await channel.initialize();
-        log.info({ channel: channel.name }, "writer channel initialized");
+        await storage.initialize();
+        log.info({ storage: storage.name }, "storage initialized");
       }
 
       // Initialize broadcast destinations
@@ -301,7 +277,7 @@ export function createPipeline(): Pipeline {
         const cursorKey = `${source.name}:${config.network ?? "default"}`;
 
         const buffer = createPipelineWriteBuffer(
-          writerChannels,
+          storages,
           state,
           cursorKey,
           {
@@ -359,19 +335,14 @@ export function createPipeline(): Pipeline {
       if (metricsInterval) clearInterval(metricsInterval);
       if (httpWorker) httpWorker.terminate();
 
-      // Stop write buffers (flushes remaining data)
+      // Stop write buffers (flushes remaining data synchronously — errors throw here)
       for (const buffer of writeBuffers.values()) {
         await buffer.stop();
       }
 
-      // Drain all writer channels (wait for in-flight writes)
-      for (const channel of writerChannels) {
-        await channel.drain();
-      }
-
-      // Close all writer channels (triggers deferred indexes, materialization)
-      for (const channel of writerChannels) {
-        await channel.close();
+      // Shutdown storages (triggers deferred indexes, balance materialization, VACUUM)
+      for (const storage of storages) {
+        await storage.shutdown();
       }
 
       // Shutdown broadcasts

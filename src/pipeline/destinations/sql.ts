@@ -703,7 +703,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
   const tables = new Map<string, { name: string; columns: string[] }>();
   const deferredIndexes: string[] = [];
 
-  const storageObj: Storage & { _config?: SqlStorageConfig } = {
+  const storageObj: Storage = {
     name: isPostgres ? "postgres" : "sqlite",
 
     async initialize(): Promise<void> {
@@ -1559,9 +1559,6 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       log.info("sql storage shut down");
     },
   };
-
-  // Expose config for WriterChannel extraction
-  storageObj._config = config;
 
   return storageObj;
 }
