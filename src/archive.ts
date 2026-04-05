@@ -166,12 +166,15 @@ function extractEffects(effectsBcs: Uint8Array): {
       const outputKind = change.outputState?.$kind;
       const idOpKind = change.idOperation?.$kind;
 
-      // Derive input state shape
+      // Derive input state shape — use undefined (→ SQL NULL) for missing fields,
+      // never empty strings (Postgres NUMERIC columns reject "").
       const inputExists = inputKind === "Exist";
       const inputTuple = inputExists ? change.inputState.Exist : null;
       // Exist = ((version, digest), Owner) in rust, but mysten schema usually maps as [[version, digest], owner]
-      const inputVersion = inputTuple ? String(inputTuple[0]?.[0] ?? inputTuple[0] ?? "") : undefined;
-      const inputDigest = inputTuple ? String(inputTuple[0]?.[1] ?? "") : undefined;
+      const inputVersionRaw = inputTuple ? (inputTuple[0]?.[0] ?? inputTuple[0]) : undefined;
+      const inputVersion = inputVersionRaw != null && inputVersionRaw !== "" ? String(inputVersionRaw) : undefined;
+      const inputDigestRaw = inputTuple ? inputTuple[0]?.[1] : undefined;
+      const inputDigest = inputDigestRaw != null && inputDigestRaw !== "" ? String(inputDigestRaw) : undefined;
       const inputOwner = inputTuple ? flattenOwner(inputTuple[1]) : undefined;
 
       let outputState: GrpcChangedObject["outputState"] = "DOES_NOT_EXIST";
@@ -185,15 +188,15 @@ function extractEffects(effectsBcs: Uint8Array): {
         outputState = "OBJECT_WRITE";
         // ObjectWrite = (ObjectDigest, Owner)
         const tuple = change.outputState.ObjectWrite;
-        outputDigest = String(tuple?.[0] ?? "");
+        if (tuple?.[0] != null && tuple[0] !== "") outputDigest = String(tuple[0]);
         outputOwner = flattenOwner(tuple?.[1]);
         // object_type from the accessor attached by mysten, if present
         objectType = (change as any).objectType;
       } else if (outputKind === "PackageWrite") {
         outputState = "PACKAGE_WRITE";
         const tuple = change.outputState.PackageWrite;
-        outputVersion = String(tuple?.[0] ?? "");
-        outputDigest = String(tuple?.[1] ?? "");
+        if (tuple?.[0] != null && tuple[0] !== "") outputVersion = String(tuple[0]);
+        if (tuple?.[1] != null && tuple[1] !== "") outputDigest = String(tuple[1]);
       } else if (outputKind === "AccumulatorWriteV1") {
         outputState = "ACCUMULATOR_WRITE";
         const write = change.outputState.AccumulatorWriteV1;
@@ -241,20 +244,24 @@ function extractEffects(effectsBcs: Uint8Array): {
       let kind: GrpcUnchangedConsensusObject["kind"] = "READ_ONLY_ROOT";
       let version: string | undefined;
       let digest: string | undefined;
+      // Normalize values to string|undefined — never empty strings (Postgres
+      // NUMERIC columns reject "").
+      const strOrUndef = (v: any): string | undefined =>
+        v != null && v !== "" ? String(v) : undefined;
       if (kindRaw === "ReadOnlyRoot") {
         kind = "READ_ONLY_ROOT";
         const tuple = inner.ReadOnlyRoot;
-        version = String(tuple?.[0] ?? "");
-        digest = String(tuple?.[1] ?? "");
+        version = strOrUndef(tuple?.[0]);
+        digest = strOrUndef(tuple?.[1]);
       } else if (kindRaw === "MutateConsensusStreamEnded" || kindRaw === "MutateDeleted") {
         kind = "MUTATE_CONSENSUS_STREAM_ENDED";
-        version = String(inner[kindRaw] ?? "");
+        version = strOrUndef(inner[kindRaw]);
       } else if (kindRaw === "ReadConsensusStreamEnded" || kindRaw === "ReadDeleted") {
         kind = "READ_CONSENSUS_STREAM_ENDED";
-        version = String(inner[kindRaw] ?? "");
+        version = strOrUndef(inner[kindRaw]);
       } else if (kindRaw === "Canceled" || kindRaw === "Cancelled") {
         kind = "CANCELED";
-        version = String(inner[kindRaw] ?? "");
+        version = strOrUndef(inner[kindRaw]);
       } else if (kindRaw === "PerEpochConfig" || kindRaw === "PerEpochConfigWithVersion") {
         kind = "PER_EPOCH_CONFIG";
       }

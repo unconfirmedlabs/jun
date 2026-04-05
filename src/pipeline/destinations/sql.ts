@@ -468,8 +468,8 @@ async function writeTransactionInputs(ctx: WriteContext, records: TransactionInp
   const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (tx_digest, input_index) DO NOTHING";
   const rows = records.map(r => [
     r.txDigest, r.inputIndex, r.kind,
-    r.objectId, r.version, r.digest, r.mutability, r.initialSharedVersion,
-    r.pureBytes, r.amount, r.coinType, r.source,
+    r.objectId, numOrNull(r.version), r.digest, r.mutability, numOrNull(r.initialSharedVersion),
+    r.pureBytes, numOrNull(r.amount), r.coinType, r.source,
     r.checkpointSeq.toString(),
     r.timestamp.toISOString(),
   ]);
@@ -543,7 +543,7 @@ async function writeUnchangedConsensusObjects(ctx: WriteContext, records: Unchan
   const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (tx_digest, object_id) DO NOTHING";
   const rows = records.map(r => [
     r.txDigest, r.objectId, r.kind,
-    r.version, r.digest, r.objectType,
+    numOrNull(r.version), r.digest, r.objectType,
     r.checkpointSeq.toString(),
     r.timestamp.toISOString(),
   ]);
