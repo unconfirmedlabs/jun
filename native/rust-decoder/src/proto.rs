@@ -120,8 +120,7 @@ fn extract_bcs_value(buf: &[u8]) -> Option<&[u8]> {
 
         if field_number == 1 && wire_type == 2 {
             // This is the bcs field (length-delimited message)
-            let (bcs_msg, new_pos) = read_length_delimited(buf, pos).ok()?;
-            pos = new_pos;
+            let (bcs_msg, _) = read_length_delimited(buf, pos).ok()?;
             // Parse the Bcs message to find field 1 (value: bytes)
             let result = extract_bcs_value_field(bcs_msg);
             return result;
