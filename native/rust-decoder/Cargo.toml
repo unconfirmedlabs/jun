@@ -1,0 +1,23 @@
+[package]
+name = "jun-checkpoint-decoder"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Sui types — all BCS struct/enum definitions from the validator codebase
+sui-types = { git = "https://github.com/MystenLabs/sui.git", branch = "mainnet" }
+# BCS codec (same one Sui uses)
+bcs = "0.1"
+# zstd decompression
+zstd = "0.13"
+# JSON output for FFI boundary
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = true
+opt-level = 3
+codegen-units = 1

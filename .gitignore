@@ -53,3 +53,5 @@ native/*.o
 defi-tracker.db
 defi-tracker.db-shm
 defi-tracker.db-wal
+native/rust-decoder/target/
+native/rust-decoder/test-data/
