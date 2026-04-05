@@ -6,7 +6,9 @@
  */
 import type {
   Storage, ProcessedCheckpoint, DecodedEvent, BalanceChange,
-  TransactionRecord, MoveCallRecord, Checkpoint,
+  TransactionRecord, MoveCallRecord, Checkpoint, ObjectChangeRecord,
+  TransactionDependencyRecord, TransactionInputRecord, CommandRecord,
+  SystemTransactionRecord, UnchangedConsensusObjectRecord,
 } from "../types.ts";
 import type { FieldDefs } from "../../schema.ts";
 import { generateDDL } from "../../schema.ts";
@@ -101,7 +103,7 @@ function createSqliteDriver(path: string): SqlDriver {
     dialect: "sqlite",
     async exec(query: string, params?: unknown[]) {
       if (params && params.length > 0) {
-        return database.prepare(query).all(...params);
+        return database.prepare(query).all(...(params as any[]));
       }
       return database.exec(query);
     },
@@ -109,7 +111,7 @@ function createSqliteDriver(path: string): SqlDriver {
       database.exec("BEGIN");
       try {
         const exec = async (query: string, params?: unknown[]) => {
-          if (params && params.length > 0) return database.prepare(query).all(...params);
+          if (params && params.length > 0) return database.prepare(query).all(...(params as any[]));
           return database.exec(query);
         };
         await fn(exec);
@@ -400,6 +402,158 @@ async function writeCheckpoints(ctx: WriteContext, checkpoints: Checkpoint[]): P
   );
 }
 
+async function writeObjectChanges(ctx: WriteContext, records: ObjectChangeRecord[]): Promise<void> {
+  if (records.length === 0) return;
+  const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (tx_digest, object_id) DO NOTHING";
+  const rows = records.map(r => [
+    r.txDigest, r.objectId, r.changeType, r.objectType,
+    r.inputVersion, r.inputDigest, r.inputOwner, r.inputOwnerKind,
+    r.outputVersion, r.outputDigest, r.outputOwner, r.outputOwnerKind,
+    ctx.dialect === "postgres" ? r.isGasObject : (r.isGasObject ? 1 : 0),
+    r.checkpointSeq.toString(),
+    ctx.dialect === "postgres" ? r.timestamp : r.timestamp.toISOString(),
+  ]);
+  await insertRows(
+    ctx,
+    "object_changes",
+    [
+      "tx_digest", "object_id", "change_type", "object_type",
+      "input_version", "input_digest", "input_owner", "input_owner_kind",
+      "output_version", "output_digest", "output_owner", "output_owner_kind",
+      "is_gas_object", "checkpoint_seq", "sui_timestamp",
+    ],
+    rows,
+    conflict,
+    [
+      "text", "text", "text", "text",
+      "numeric", "text", "text", "text",
+      "numeric", "text", "text", "text",
+      "boolean", "numeric", "timestamptz",
+    ],
+  );
+}
+
+async function writeDependencies(ctx: WriteContext, records: TransactionDependencyRecord[]): Promise<void> {
+  if (records.length === 0) return;
+  const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (tx_digest, depends_on_digest) DO NOTHING";
+  const rows = records.map(r => [
+    r.txDigest,
+    r.dependsOnDigest,
+    r.checkpointSeq.toString(),
+    ctx.dialect === "postgres" ? r.timestamp : r.timestamp.toISOString(),
+  ]);
+  await insertRows(
+    ctx,
+    "transaction_dependencies",
+    ["tx_digest", "depends_on_digest", "checkpoint_seq", "sui_timestamp"],
+    rows,
+    conflict,
+    ["text", "text", "numeric", "timestamptz"],
+  );
+}
+
+async function writeTransactionInputs(ctx: WriteContext, records: TransactionInputRecord[]): Promise<void> {
+  if (records.length === 0) return;
+  const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (tx_digest, input_index) DO NOTHING";
+  const rows = records.map(r => [
+    r.txDigest, r.inputIndex, r.kind,
+    r.objectId, r.version, r.digest, r.mutability, r.initialSharedVersion,
+    r.pureBytes, r.amount, r.coinType, r.source,
+    r.checkpointSeq.toString(),
+    ctx.dialect === "postgres" ? r.timestamp : r.timestamp.toISOString(),
+  ]);
+  await insertRows(
+    ctx,
+    "transaction_inputs",
+    [
+      "tx_digest", "input_index", "kind",
+      "object_id", "version", "digest", "mutability", "initial_shared_version",
+      "pure_bytes", "amount", "coin_type", "source",
+      "checkpoint_seq", "sui_timestamp",
+    ],
+    rows,
+    conflict,
+    [
+      "text", "integer", "text",
+      "text", "numeric", "text", "text", "numeric",
+      "text", "numeric", "text", "text",
+      "numeric", "timestamptz",
+    ],
+  );
+}
+
+async function writeCommands(ctx: WriteContext, records: CommandRecord[]): Promise<void> {
+  if (records.length === 0) return;
+  const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (tx_digest, command_index) DO NOTHING";
+  const rows = records.map(r => [
+    r.txDigest, r.commandIndex, r.kind,
+    r.package, r.module, r.function, r.typeArguments, r.args,
+    r.checkpointSeq.toString(),
+    ctx.dialect === "postgres" ? r.timestamp : r.timestamp.toISOString(),
+  ]);
+  await insertRows(
+    ctx,
+    "commands",
+    [
+      "tx_digest", "command_index", "kind",
+      "package", "module", "function", "type_arguments", "args",
+      "checkpoint_seq", "sui_timestamp",
+    ],
+    rows,
+    conflict,
+    [
+      "text", "integer", "text",
+      "text", "text", "text", "text", "text",
+      "numeric", "timestamptz",
+    ],
+  );
+}
+
+async function writeSystemTransactions(ctx: WriteContext, records: SystemTransactionRecord[]): Promise<void> {
+  if (records.length === 0) return;
+  const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (tx_digest) DO NOTHING";
+  const rows = records.map(r => [
+    r.txDigest, r.kind, r.data,
+    r.checkpointSeq.toString(),
+    ctx.dialect === "postgres" ? r.timestamp : r.timestamp.toISOString(),
+  ]);
+  await insertRows(
+    ctx,
+    "system_transactions",
+    ["tx_digest", "kind", "data", "checkpoint_seq", "sui_timestamp"],
+    rows,
+    conflict,
+    ["text", "text", "text", "numeric", "timestamptz"],
+  );
+}
+
+async function writeUnchangedConsensusObjects(ctx: WriteContext, records: UnchangedConsensusObjectRecord[]): Promise<void> {
+  if (records.length === 0) return;
+  const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (tx_digest, object_id) DO NOTHING";
+  const rows = records.map(r => [
+    r.txDigest, r.objectId, r.kind,
+    r.version, r.digest, r.objectType,
+    r.checkpointSeq.toString(),
+    ctx.dialect === "postgres" ? r.timestamp : r.timestamp.toISOString(),
+  ]);
+  await insertRows(
+    ctx,
+    "unchanged_consensus_objects",
+    [
+      "tx_digest", "object_id", "kind",
+      "version", "digest", "object_type",
+      "checkpoint_seq", "sui_timestamp",
+    ],
+    rows,
+    conflict,
+    [
+      "text", "text", "text",
+      "numeric", "text", "text",
+      "numeric", "timestamptz",
+    ],
+  );
+}
+
 async function writeMoveCalls(ctx: WriteContext, moveCalls: MoveCallRecord[]): Promise<void> {
   if (moveCalls.length === 0) return;
 
@@ -479,7 +633,7 @@ async function repairPostgresSnapshotDuplicates(
 ): Promise<boolean> {
   // Extract index name from error: 'could not create unique index "idx_tx_digest"'
   const indexMatch = error.message.match(/could not create unique index "(\w+)"/);
-  if (!indexMatch) return false;
+  if (!indexMatch || !indexMatch[1]) return false;
   const indexName = indexMatch[1];
 
   const repairs: Record<string, { table: string; sql: string }> = {
@@ -931,6 +1085,259 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         log.info("checkpoints table created");
       }
 
+      // ─── object_changes ──────────────────────────────────────────────────
+      if (config.objectChanges) {
+        const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
+        const pkClause = snapshotMode ? "" : ", PRIMARY KEY (tx_digest, object_id)";
+        if (driver.dialect === "postgres") {
+          await driver.exec(`
+            CREATE ${unloggedKw} TABLE IF NOT EXISTS object_changes (
+              tx_digest TEXT NOT NULL,
+              object_id TEXT NOT NULL,
+              change_type TEXT NOT NULL,
+              object_type TEXT,
+              input_version NUMERIC,
+              input_digest TEXT,
+              input_owner TEXT,
+              input_owner_kind TEXT,
+              output_version NUMERIC,
+              output_digest TEXT,
+              output_owner TEXT,
+              output_owner_kind TEXT,
+              is_gas_object BOOLEAN NOT NULL,
+              checkpoint_seq NUMERIC NOT NULL,
+              sui_timestamp TIMESTAMPTZ NOT NULL${pkClause}
+            );
+          `);
+        } else {
+          await driver.exec(`
+            CREATE TABLE IF NOT EXISTS object_changes (
+              tx_digest TEXT NOT NULL,
+              object_id TEXT NOT NULL,
+              change_type TEXT NOT NULL,
+              object_type TEXT,
+              input_version TEXT,
+              input_digest TEXT,
+              input_owner TEXT,
+              input_owner_kind TEXT,
+              output_version TEXT,
+              output_digest TEXT,
+              output_owner TEXT,
+              output_owner_kind TEXT,
+              is_gas_object INTEGER NOT NULL,
+              checkpoint_seq TEXT NOT NULL,
+              sui_timestamp TEXT NOT NULL${pkClause}
+            );
+          `);
+        }
+        if (snapshotMode) {
+          deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_oc_pk ON object_changes(tx_digest, object_id)`);
+        }
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_oc_object_id ON object_changes(object_id)`);
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_oc_change_type ON object_changes(change_type)`);
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_oc_output_owner ON object_changes(output_owner)`);
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_oc_object_type ON object_changes(object_type)`);
+        log.info("object_changes table created");
+      }
+
+      // ─── transaction_dependencies ────────────────────────────────────────
+      if (config.dependencies) {
+        const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
+        const pkClause = snapshotMode ? "" : ", PRIMARY KEY (tx_digest, depends_on_digest)";
+        if (driver.dialect === "postgres") {
+          await driver.exec(`
+            CREATE ${unloggedKw} TABLE IF NOT EXISTS transaction_dependencies (
+              tx_digest TEXT NOT NULL,
+              depends_on_digest TEXT NOT NULL,
+              checkpoint_seq NUMERIC NOT NULL,
+              sui_timestamp TIMESTAMPTZ NOT NULL${pkClause}
+            );
+          `);
+        } else {
+          await driver.exec(`
+            CREATE TABLE IF NOT EXISTS transaction_dependencies (
+              tx_digest TEXT NOT NULL,
+              depends_on_digest TEXT NOT NULL,
+              checkpoint_seq TEXT NOT NULL,
+              sui_timestamp TEXT NOT NULL${pkClause}
+            );
+          `);
+        }
+        if (snapshotMode) {
+          deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_td_pk ON transaction_dependencies(tx_digest, depends_on_digest)`);
+        }
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_td_depends_on ON transaction_dependencies(depends_on_digest)`);
+        log.info("transaction_dependencies table created");
+      }
+
+      // ─── transaction_inputs ──────────────────────────────────────────────
+      if (config.inputs) {
+        const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
+        const pkClause = snapshotMode ? "" : ", PRIMARY KEY (tx_digest, input_index)";
+        if (driver.dialect === "postgres") {
+          await driver.exec(`
+            CREATE ${unloggedKw} TABLE IF NOT EXISTS transaction_inputs (
+              tx_digest TEXT NOT NULL,
+              input_index INTEGER NOT NULL,
+              kind TEXT NOT NULL,
+              object_id TEXT,
+              version NUMERIC,
+              digest TEXT,
+              mutability TEXT,
+              initial_shared_version NUMERIC,
+              pure_bytes TEXT,
+              amount NUMERIC,
+              coin_type TEXT,
+              source TEXT,
+              checkpoint_seq NUMERIC NOT NULL,
+              sui_timestamp TIMESTAMPTZ NOT NULL${pkClause}
+            );
+          `);
+        } else {
+          await driver.exec(`
+            CREATE TABLE IF NOT EXISTS transaction_inputs (
+              tx_digest TEXT NOT NULL,
+              input_index INTEGER NOT NULL,
+              kind TEXT NOT NULL,
+              object_id TEXT,
+              version TEXT,
+              digest TEXT,
+              mutability TEXT,
+              initial_shared_version TEXT,
+              pure_bytes TEXT,
+              amount TEXT,
+              coin_type TEXT,
+              source TEXT,
+              checkpoint_seq TEXT NOT NULL,
+              sui_timestamp TEXT NOT NULL${pkClause}
+            );
+          `);
+        }
+        if (snapshotMode) {
+          deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ti_pk ON transaction_inputs(tx_digest, input_index)`);
+        }
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_ti_object_id ON transaction_inputs(object_id)`);
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_ti_kind ON transaction_inputs(kind)`);
+        log.info("transaction_inputs table created");
+      }
+
+      // ─── commands ────────────────────────────────────────────────────────
+      if (config.commands) {
+        const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
+        const pkClause = snapshotMode ? "" : ", PRIMARY KEY (tx_digest, command_index)";
+        if (driver.dialect === "postgres") {
+          await driver.exec(`
+            CREATE ${unloggedKw} TABLE IF NOT EXISTS commands (
+              tx_digest TEXT NOT NULL,
+              command_index INTEGER NOT NULL,
+              kind TEXT NOT NULL,
+              package TEXT,
+              module TEXT,
+              function TEXT,
+              type_arguments TEXT,
+              args TEXT,
+              checkpoint_seq NUMERIC NOT NULL,
+              sui_timestamp TIMESTAMPTZ NOT NULL${pkClause}
+            );
+          `);
+        } else {
+          await driver.exec(`
+            CREATE TABLE IF NOT EXISTS commands (
+              tx_digest TEXT NOT NULL,
+              command_index INTEGER NOT NULL,
+              kind TEXT NOT NULL,
+              package TEXT,
+              module TEXT,
+              function TEXT,
+              type_arguments TEXT,
+              args TEXT,
+              checkpoint_seq TEXT NOT NULL,
+              sui_timestamp TEXT NOT NULL${pkClause}
+            );
+          `);
+        }
+        if (snapshotMode) {
+          deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cmd_pk ON commands(tx_digest, command_index)`);
+        }
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_cmd_kind ON commands(kind)`);
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_cmd_package ON commands(package)`);
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_cmd_module ON commands(package, module)`);
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_cmd_function ON commands(package, module, function)`);
+        log.info("commands table created");
+      }
+
+      // ─── system_transactions ─────────────────────────────────────────────
+      if (config.systemTransactions) {
+        const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
+        const pkClause = snapshotMode ? "" : "PRIMARY KEY";
+        if (driver.dialect === "postgres") {
+          await driver.exec(`
+            CREATE ${unloggedKw} TABLE IF NOT EXISTS system_transactions (
+              tx_digest TEXT NOT NULL ${pkClause},
+              kind TEXT NOT NULL,
+              data TEXT NOT NULL,
+              checkpoint_seq NUMERIC NOT NULL,
+              sui_timestamp TIMESTAMPTZ NOT NULL
+            );
+          `);
+        } else {
+          await driver.exec(`
+            CREATE TABLE IF NOT EXISTS system_transactions (
+              tx_digest TEXT NOT NULL ${pkClause},
+              kind TEXT NOT NULL,
+              data TEXT NOT NULL,
+              checkpoint_seq TEXT NOT NULL,
+              sui_timestamp TEXT NOT NULL
+            );
+          `);
+        }
+        if (snapshotMode) {
+          deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_st_pk ON system_transactions(tx_digest)`);
+        }
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_st_kind ON system_transactions(kind)`);
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_st_checkpoint ON system_transactions(checkpoint_seq)`);
+        log.info("system_transactions table created");
+      }
+
+      // ─── unchanged_consensus_objects ─────────────────────────────────────
+      if (config.unchangedConsensusObjects) {
+        const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
+        const pkClause = snapshotMode ? "" : ", PRIMARY KEY (tx_digest, object_id)";
+        if (driver.dialect === "postgres") {
+          await driver.exec(`
+            CREATE ${unloggedKw} TABLE IF NOT EXISTS unchanged_consensus_objects (
+              tx_digest TEXT NOT NULL,
+              object_id TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              version NUMERIC,
+              digest TEXT,
+              object_type TEXT,
+              checkpoint_seq NUMERIC NOT NULL,
+              sui_timestamp TIMESTAMPTZ NOT NULL${pkClause}
+            );
+          `);
+        } else {
+          await driver.exec(`
+            CREATE TABLE IF NOT EXISTS unchanged_consensus_objects (
+              tx_digest TEXT NOT NULL,
+              object_id TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              version TEXT,
+              digest TEXT,
+              object_type TEXT,
+              checkpoint_seq TEXT NOT NULL,
+              sui_timestamp TEXT NOT NULL${pkClause}
+            );
+          `);
+        }
+        if (snapshotMode) {
+          deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_uco_pk ON unchanged_consensus_objects(tx_digest, object_id)`);
+        }
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_uco_object_id ON unchanged_consensus_objects(object_id)`);
+        await indexOrDefer(`CREATE INDEX IF NOT EXISTS idx_uco_kind ON unchanged_consensus_objects(kind)`);
+        log.info("unchanged_consensus_objects table created");
+      }
+
       if (deferredIndexes.length > 0) {
         log.info({ count: deferredIndexes.length }, "indexes deferred to shutdown");
       }
@@ -943,21 +1350,33 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       const d = driver; // capture for closure
       const dialect = d.dialect;
 
-      // Collect events, balance changes, transactions, and move calls
+      // Collect every record type from the batch
       const groupedEvents = new Map<string, DecodedEvent[]>();
       const allBalanceChanges: BalanceChange[] = [];
       const allTransactions: TransactionRecord[] = [];
       const allMoveCalls: MoveCallRecord[] = [];
+      const allObjectChanges: ObjectChangeRecord[] = [];
+      const allDependencies: TransactionDependencyRecord[] = [];
+      const allInputs: TransactionInputRecord[] = [];
+      const allCommands: CommandRecord[] = [];
+      const allSystemTransactions: SystemTransactionRecord[] = [];
+      const allUnchangedConsensusObjects: UnchangedConsensusObjectRecord[] = [];
 
       for (const processed of batch) {
-        for (const event of processed.events) {
+        for (const event of processed.events ?? []) {
           const list = groupedEvents.get(event.handlerName);
           if (list) list.push(event);
           else groupedEvents.set(event.handlerName, [event]);
         }
-        allBalanceChanges.push(...processed.balanceChanges);
-        allTransactions.push(...processed.transactions);
-        allMoveCalls.push(...processed.moveCalls);
+        allBalanceChanges.push(...(processed.balanceChanges ?? []));
+        allTransactions.push(...(processed.transactions ?? []));
+        allMoveCalls.push(...(processed.moveCalls ?? []));
+        allObjectChanges.push(...(processed.objectChanges ?? []));
+        allDependencies.push(...(processed.dependencies ?? []));
+        allInputs.push(...(processed.inputs ?? []));
+        allCommands.push(...(processed.commands ?? []));
+        allSystemTransactions.push(...(processed.systemTransactions ?? []));
+        allUnchangedConsensusObjects.push(...(processed.unchangedConsensusObjects ?? []));
       }
 
       // Wrap all writes in a single transaction
@@ -1021,6 +1440,36 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       // Write move calls
       if (config.transactions && allMoveCalls.length > 0) {
         await writeMoveCalls(ctx, allMoveCalls);
+      }
+
+      // Write object changes
+      if (config.objectChanges && allObjectChanges.length > 0) {
+        await writeObjectChanges(ctx, allObjectChanges);
+      }
+
+      // Write transaction dependencies
+      if (config.dependencies && allDependencies.length > 0) {
+        await writeDependencies(ctx, allDependencies);
+      }
+
+      // Write transaction inputs
+      if (config.inputs && allInputs.length > 0) {
+        await writeTransactionInputs(ctx, allInputs);
+      }
+
+      // Write commands
+      if (config.commands && allCommands.length > 0) {
+        await writeCommands(ctx, allCommands);
+      }
+
+      // Write system transactions
+      if (config.systemTransactions && allSystemTransactions.length > 0) {
+        await writeSystemTransactions(ctx, allSystemTransactions);
+      }
+
+      // Write unchanged consensus objects
+      if (config.unchangedConsensusObjects && allUnchangedConsensusObjects.length > 0) {
+        await writeUnchangedConsensusObjects(ctx, allUnchangedConsensusObjects);
       }
       }); // end transaction
     },
