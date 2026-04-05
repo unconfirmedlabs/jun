@@ -4,11 +4,19 @@
  * Subscribes to the Sui fullnode gRPC stream and yields checkpoints
  * as they're produced. Reconnects with exponential backoff on errors.
  */
-import { createGrpcClient, type GrpcClient } from "../../grpc.ts";
+import { checkpointFromGrpcResponse } from "../../checkpoint-response.ts";
+import {
+  createGrpcClient,
+  RAW_CHECKPOINT_READ_MASK_PATHS,
+  type GrpcClient,
+} from "../../grpc.ts";
+import {
+  decodeSubscribeCheckpointsResponseNative,
+  isNativeCheckpointDecoderAvailable,
+} from "../../checkpoint-native-decoder.ts";
 import type { Source, Checkpoint } from "../types.ts";
 import type { Logger } from "../../logger.ts";
 import { createLogger } from "../../logger.ts";
-import { parseTimestamp } from "../../timestamp.ts";
 
 export interface GrpcLiveSourceConfig {
   /** gRPC endpoint URL (host:port) */
@@ -35,35 +43,22 @@ export function createGrpcLiveSource(config: GrpcLiveSourceConfig): Source {
           currentClient = createGrpcClient({ url: config.url });
 
           log.info({ url: config.url }, "connecting");
-          const grpcStream = currentClient.subscribeCheckpoints();
           reconnectDelay = 1000;
 
-          for await (const response of grpcStream) {
-            if (stopped) break;
-
-            const summary = response.checkpoint.summary;
-            const timestampDate = parseTimestamp(summary?.timestamp);
-            const rollingGas = summary?.epochRollingGasCostSummary;
-
-            yield {
-              sequenceNumber: BigInt(response.cursor),
-              timestamp: timestampDate,
-              transactions: response.checkpoint.transactions,
-              source: "live",
-              epoch: summary?.epoch ? BigInt(summary.epoch) : 0n,
-              digest: summary?.digest ?? "",
-              previousDigest: summary?.previousDigest ?? null,
-              contentDigest: summary?.contentDigest ?? null,
-              totalNetworkTransactions: summary?.totalNetworkTransactions
-                ? BigInt(summary.totalNetworkTransactions)
-                : 0n,
-              epochRollingGasCostSummary: {
-                computationCost: rollingGas?.computationCost ?? "0",
-                storageCost: rollingGas?.storageCost ?? "0",
-                storageRebate: rollingGas?.storageRebate ?? "0",
-                nonRefundableStorageFee: rollingGas?.nonRefundableStorageFee ?? "0",
-              },
-            };
+          if (isNativeCheckpointDecoderAvailable()) {
+            const grpcStream = currentClient.subscribeCheckpointsRaw(RAW_CHECKPOINT_READ_MASK_PATHS);
+            for await (const responseBytes of grpcStream) {
+              if (stopped) break;
+              const response = decodeSubscribeCheckpointsResponseNative(responseBytes);
+              if (!response) throw new Error("Native checkpoint decoder unavailable");
+              yield checkpointFromGrpcResponse(response, "live");
+            }
+          } else {
+            const grpcStream = currentClient.subscribeCheckpoints();
+            for await (const response of grpcStream) {
+              if (stopped) break;
+              yield checkpointFromGrpcResponse(response, "live");
+            }
           }
         } catch (error) {
           if (stopped) break;

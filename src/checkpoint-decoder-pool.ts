@@ -1,60 +1,34 @@
 /**
- * jun/checkpoint-decoder-pool — Pool of Bun Workers for parallel
- * checkpoint decoding + processing.
+ * jun/checkpoint-decoder-pool — Pool of Bun Workers for parallel archive
+ * checkpoint decoding.
  *
- * Workers do ALL heavy work: zstd → protobuf → BCS → processors → JSON.
- * Main thread only JSON.parse + SQL writes.
+ * Workers decode compressed archive checkpoints into the shared checkpoint
+ * response shape and optionally precompute archive balance changes.
  *
  * IPC protocol: workers postMessage a single JSON string (zero-copy in
  * Bun 1.2.21+) prefixed with the job ID + newline. Errors are sent as
  * small objects { id, error }. This avoids structured clone overhead
  * for the large payload path.
  */
-import type { ProcessedCheckpoint, Checkpoint } from "./pipeline/types.ts";
-import type { BalanceChange } from "./balance-processor.ts";
+import type { GrpcCheckpointResponse } from "./grpc.ts";
+import type { SerializedBalanceChange } from "./checkpoint-response.ts";
 import path from "path";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/** Serialized checkpoint — all bigints as strings, Dates as ISO strings. */
-export interface SerializedProcessedCheckpoint {
-  checkpoint: {
-    sequenceNumber: string;
-    timestamp: string;
-    source: string;
-    epoch: string;
-    digest: string;
-    previousDigest: string | null;
-    contentDigest: string | null;
-    totalNetworkTransactions: string;
-    epochRollingGasCostSummary: {
-      computationCost: string;
-      storageCost: string;
-      storageRebate: string;
-      nonRefundableStorageFee: string;
-    };
-  };
-  events: Array<Record<string, unknown>>;
-  balanceChanges: Array<Record<string, unknown>>;
-  transactions: Array<Record<string, unknown>>;
-  moveCalls: Array<Record<string, unknown>>;
-  objectChanges: Array<Record<string, unknown>>;
-  dependencies: Array<Record<string, unknown>>;
-  inputs: Array<Record<string, unknown>>;
-  commands: Array<Record<string, unknown>>;
-  systemTransactions: Array<Record<string, unknown>>;
-  unchangedConsensusObjects: Array<Record<string, unknown>>;
+export interface SerializedDecodedCheckpoint {
+  decoded: GrpcCheckpointResponse;
+  precomputedBalanceChanges?: SerializedBalanceChange[];
 }
 
 export interface DecodeResult {
-  /** Serialized processed checkpoint (JSON-parsed from worker string). */
-  processed: SerializedProcessedCheckpoint;
+  payload: SerializedDecodedCheckpoint;
 }
 
 export interface CheckpointDecoderPool {
-  /** Decode + process a compressed checkpoint in a worker thread. */
+  /** Decode a compressed checkpoint in a worker thread. */
   decode(seq: bigint, compressed: Uint8Array): Promise<DecodeResult>;
   /** Terminate all workers. */
   shutdown(): void;
@@ -79,7 +53,6 @@ export function defaultWorkerCount(): number {
 export function createCheckpointDecoderPool(
   size: number,
   balanceCoinTypes?: string[] | "*",
-  processorNames?: string[],
 ): CheckpointDecoderPool {
   const workerBalanceCoinTypes: string[] | null = balanceCoinTypes === undefined
     ? null
@@ -108,8 +81,8 @@ export function createCheckpointDecoderPool(
         pending.delete(id);
 
         try {
-          const processed = JSON.parse(msg.slice(newlineIdx + 1)) as SerializedProcessedCheckpoint;
-          job.resolve({ processed });
+          const payload = JSON.parse(msg.slice(newlineIdx + 1)) as SerializedDecodedCheckpoint;
+          job.resolve({ payload });
         } catch (e) {
           job.reject(e instanceof Error ? e : new Error(String(e)));
         }
@@ -151,7 +124,6 @@ export function createCheckpointDecoderPool(
             seq: seq.toString(),
             compressed,
             balanceCoinTypes: workerBalanceCoinTypes,
-            processorNames,
           },
           [compressed.buffer], // transfer compressed bytes (zero-copy to worker)
         );

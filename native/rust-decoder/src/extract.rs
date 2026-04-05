@@ -6,7 +6,8 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use sui_types::base_types::{ObjectID, SequenceNumber, SuiAddress};
 use sui_types::effects::{
-    IDOperation, TransactionEffects, TransactionEffectsAPI, TransactionEvents, UnchangedConsensusKind,
+    IDOperation, TransactionEffects, TransactionEffectsAPI, TransactionEvents,
+    UnchangedConsensusKind,
 };
 use sui_types::event::Event;
 use sui_types::execution_status::{ExecutionErrorKind, ExecutionStatus};
@@ -323,7 +324,9 @@ pub fn extract_checkpoint(decompressed: &[u8]) -> Result<String, Box<dyn std::er
             checkpoint_timestamp: &checkpoint_timestamp,
         };
 
-        if let Some(record) = build_transaction_record(&tx_context, tx_data.as_ref(), effects.as_ref(), &sender) {
+        if let Some(record) =
+            build_transaction_record(&tx_context, tx_data.as_ref(), effects.as_ref(), &sender)
+        {
             transactions.push(record);
         }
 
@@ -340,7 +343,8 @@ pub fn extract_checkpoint(decompressed: &[u8]) -> Result<String, Box<dyn std::er
         if let Some(fx) = effects.as_ref() {
             object_changes.extend(extract_object_changes(&tx_context, fx));
             dependencies.extend(extract_dependencies(&tx_context, fx));
-            unchanged_consensus_objects.extend(extract_unchanged_consensus_objects(&tx_context, fx));
+            unchanged_consensus_objects
+                .extend(extract_unchanged_consensus_objects(&tx_context, fx));
         }
 
         if let Some(tx_events) = tx_events.as_ref() {
@@ -442,7 +446,10 @@ fn build_transaction_record(
     })
 }
 
-fn extract_dependencies(ctx: &TxContext<'_>, effects: &TransactionEffects) -> Vec<DependencyRecord> {
+fn extract_dependencies(
+    ctx: &TxContext<'_>,
+    effects: &TransactionEffects,
+) -> Vec<DependencyRecord> {
     effects
         .dependencies()
         .iter()
@@ -476,15 +483,31 @@ fn extract_object_changes(
         new_metadata.insert(id, owner);
     }
 
-    let created_ids: HashSet<ObjectID> = effects.created().into_iter().map(|(oref, _)| oref.0).collect();
-    let mutated_ids: HashSet<ObjectID> = effects.mutated().into_iter().map(|(oref, _)| oref.0).collect();
-    let unwrapped_ids: HashSet<ObjectID> =
-        effects.unwrapped().into_iter().map(|(oref, _)| oref.0).collect();
+    let created_ids: HashSet<ObjectID> = effects
+        .created()
+        .into_iter()
+        .map(|(oref, _)| oref.0)
+        .collect();
+    let mutated_ids: HashSet<ObjectID> = effects
+        .mutated()
+        .into_iter()
+        .map(|(oref, _)| oref.0)
+        .collect();
+    let unwrapped_ids: HashSet<ObjectID> = effects
+        .unwrapped()
+        .into_iter()
+        .map(|(oref, _)| oref.0)
+        .collect();
     let deleted_ids: HashSet<ObjectID> = effects
         .deleted()
         .into_iter()
         .map(|oref| oref.0)
-        .chain(effects.unwrapped_then_deleted().into_iter().map(|oref| oref.0))
+        .chain(
+            effects
+                .unwrapped_then_deleted()
+                .into_iter()
+                .map(|oref| oref.0),
+        )
         .collect();
     let wrapped_ids: HashSet<ObjectID> = effects.wrapped().into_iter().map(|oref| oref.0).collect();
     let published_ids: HashSet<ObjectID> = effects.published_packages().into_iter().collect();
@@ -536,7 +559,8 @@ fn extract_object_changes(
 
 fn extract_inputs(ctx: &TxContext<'_>, tx_data: &TransactionData) -> Vec<InputRecord> {
     let programmable = match tx_data.kind() {
-        TransactionKind::ProgrammableTransaction(pt) | TransactionKind::ProgrammableSystemTransaction(pt) => pt,
+        TransactionKind::ProgrammableTransaction(pt)
+        | TransactionKind::ProgrammableSystemTransaction(pt) => pt,
         _ => return Vec::new(),
     };
 
@@ -634,12 +658,10 @@ fn extract_inputs(ctx: &TxContext<'_>, tx_data: &TransactionData) -> Vec<InputRe
         .collect()
 }
 
-fn extract_commands_and_move_calls(
-    ctx: &TxContext<'_>,
-    kind: &TransactionKind,
-) -> CommandBundle {
+fn extract_commands_and_move_calls(ctx: &TxContext<'_>, kind: &TransactionKind) -> CommandBundle {
     let programmable = match kind {
-        TransactionKind::ProgrammableTransaction(pt) | TransactionKind::ProgrammableSystemTransaction(pt) => pt,
+        TransactionKind::ProgrammableTransaction(pt)
+        | TransactionKind::ProgrammableSystemTransaction(pt) => pt,
         _ => {
             return CommandBundle {
                 commands: Vec::new(),
@@ -679,7 +701,9 @@ fn extract_commands_and_move_calls(
                     package: Some(move_call.package.to_string()),
                     module: Some(move_call.module.to_string()),
                     function: Some(move_call.function.to_string()),
-                    type_arguments: Some(serde_json::to_string(&type_arguments).unwrap_or_else(|_| "[]".to_string())),
+                    type_arguments: Some(
+                        serde_json::to_string(&type_arguments).unwrap_or_else(|_| "[]".to_string()),
+                    ),
                     args: None,
                     checkpoint_seq: ctx.checkpoint_seq.to_string(),
                     timestamp: ctx.checkpoint_timestamp.to_string(),
@@ -691,7 +715,10 @@ fn extract_commands_and_move_calls(
                     command_index,
                     "TransferObjects",
                     command_args_value(vec![
-                        ("objects", Value::Array(objects.iter().map(argument_to_value).collect())),
+                        (
+                            "objects",
+                            Value::Array(objects.iter().map(argument_to_value).collect()),
+                        ),
                         ("address", argument_to_value(address)),
                     ]),
                 ));
@@ -703,7 +730,10 @@ fn extract_commands_and_move_calls(
                     "SplitCoins",
                     command_args_value(vec![
                         ("coin", argument_to_value(coin)),
-                        ("amounts", Value::Array(amounts.iter().map(argument_to_value).collect())),
+                        (
+                            "amounts",
+                            Value::Array(amounts.iter().map(argument_to_value).collect()),
+                        ),
                     ]),
                 ));
             }
@@ -714,7 +744,10 @@ fn extract_commands_and_move_calls(
                     "MergeCoins",
                     command_args_value(vec![
                         ("coin", argument_to_value(coin)),
-                        ("coins", Value::Array(coins.iter().map(argument_to_value).collect())),
+                        (
+                            "coins",
+                            Value::Array(coins.iter().map(argument_to_value).collect()),
+                        ),
                     ]),
                 ));
             }
@@ -726,7 +759,12 @@ fn extract_commands_and_move_calls(
                     command_args_value(vec![
                         (
                             "modules",
-                            Value::Array(modules.iter().map(|module| Value::String(hex_string(module))).collect()),
+                            Value::Array(
+                                modules
+                                    .iter()
+                                    .map(|module| Value::String(hex_string(module)))
+                                    .collect(),
+                            ),
                         ),
                         (
                             "dependencies",
@@ -748,7 +786,12 @@ fn extract_commands_and_move_calls(
                     command_args_value(vec![
                         (
                             "modules",
-                            Value::Array(modules.iter().map(|module| Value::String(hex_string(module))).collect()),
+                            Value::Array(
+                                modules
+                                    .iter()
+                                    .map(|module| Value::String(hex_string(module)))
+                                    .collect(),
+                            ),
                         ),
                         (
                             "dependencies",
@@ -787,7 +830,10 @@ fn extract_commands_and_move_calls(
         }
     }
 
-    CommandBundle { commands, move_calls }
+    CommandBundle {
+        commands,
+        move_calls,
+    }
 }
 
 fn extract_system_transaction(
@@ -797,35 +843,28 @@ fn extract_system_transaction(
     let (kind_name, data) = match kind {
         TransactionKind::Genesis(data) => ("GENESIS", to_json_string(data)),
         TransactionKind::ChangeEpoch(data) => ("CHANGE_EPOCH", to_json_string(data)),
-        TransactionKind::ConsensusCommitPrologue(data) => (
-            "CONSENSUS_COMMIT_PROLOGUE_V1",
-            to_json_string(data),
-        ),
-        TransactionKind::ConsensusCommitPrologueV2(data) => (
-            "CONSENSUS_COMMIT_PROLOGUE_V2",
-            to_json_string(data),
-        ),
-        TransactionKind::ConsensusCommitPrologueV3(data) => (
-            "CONSENSUS_COMMIT_PROLOGUE_V3",
-            to_json_string(data),
-        ),
-        TransactionKind::ConsensusCommitPrologueV4(data) => (
-            "CONSENSUS_COMMIT_PROLOGUE_V4",
-            to_json_string(data),
-        ),
-        TransactionKind::AuthenticatorStateUpdate(data) => (
-            "AUTHENTICATOR_STATE_UPDATE",
-            to_json_string(data),
-        ),
+        TransactionKind::ConsensusCommitPrologue(data) => {
+            ("CONSENSUS_COMMIT_PROLOGUE_V1", to_json_string(data))
+        }
+        TransactionKind::ConsensusCommitPrologueV2(data) => {
+            ("CONSENSUS_COMMIT_PROLOGUE_V2", to_json_string(data))
+        }
+        TransactionKind::ConsensusCommitPrologueV3(data) => {
+            ("CONSENSUS_COMMIT_PROLOGUE_V3", to_json_string(data))
+        }
+        TransactionKind::ConsensusCommitPrologueV4(data) => {
+            ("CONSENSUS_COMMIT_PROLOGUE_V4", to_json_string(data))
+        }
+        TransactionKind::AuthenticatorStateUpdate(data) => {
+            ("AUTHENTICATOR_STATE_UPDATE", to_json_string(data))
+        }
         TransactionKind::EndOfEpochTransaction(data) => ("END_OF_EPOCH", to_json_string(data)),
-        TransactionKind::RandomnessStateUpdate(data) => (
-            "RANDOMNESS_STATE_UPDATE",
-            to_json_string(data),
-        ),
-        TransactionKind::ProgrammableSystemTransaction(data) => (
-            "PROGRAMMABLE_SYSTEM_TRANSACTION",
-            to_json_string(data),
-        ),
+        TransactionKind::RandomnessStateUpdate(data) => {
+            ("RANDOMNESS_STATE_UPDATE", to_json_string(data))
+        }
+        TransactionKind::ProgrammableSystemTransaction(data) => {
+            ("PROGRAMMABLE_SYSTEM_TRANSACTION", to_json_string(data))
+        }
         TransactionKind::ProgrammableTransaction(_) => return None,
     };
 
@@ -867,7 +906,9 @@ fn extract_unchanged_consensus_objects(
                     Some(sequence_number_to_string(version)),
                     None,
                 ),
-                UnchangedConsensusKind::PerEpochConfig => ("PER_EPOCH_CONFIG".to_string(), None, None),
+                UnchangedConsensusKind::PerEpochConfig => {
+                    ("PER_EPOCH_CONFIG".to_string(), None, None)
+                }
             };
 
             UnchangedConsensusObjectRecord {
@@ -896,10 +937,19 @@ fn extract_events(ctx: &TxContext<'_>, tx_events: &TransactionEvents) -> Vec<Eve
 fn event_record(ctx: &TxContext<'_>, event_seq: usize, event: &Event) -> EventRecord {
     let event_type = format_type_tag(&TypeTag::Struct(Box::new(event.type_.clone())));
     let mut data = Map::new();
-    data.insert("packageId".to_string(), Value::String(event.package_id.to_string()));
-    data.insert("module".to_string(), Value::String(event.transaction_module.to_string()));
+    data.insert(
+        "packageId".to_string(),
+        Value::String(event.package_id.to_string()),
+    );
+    data.insert(
+        "module".to_string(),
+        Value::String(event.transaction_module.to_string()),
+    );
     data.insert("eventType".to_string(), Value::String(event_type.clone()));
-    data.insert("contents".to_string(), Value::String(hex_string(&event.contents)));
+    data.insert(
+        "contents".to_string(),
+        Value::String(hex_string(&event.contents)),
+    );
 
     EventRecord {
         handler_name: event_type,
@@ -933,7 +983,10 @@ fn decode_summary(summary_bcs: &[u8]) -> Option<DecodedSummary> {
                 .epoch_rolling_gas_cost_summary
                 .computation_cost
                 .to_string(),
-            storage_cost: summary.epoch_rolling_gas_cost_summary.storage_cost.to_string(),
+            storage_cost: summary
+                .epoch_rolling_gas_cost_summary
+                .storage_cost
+                .to_string(),
             storage_rebate: summary
                 .epoch_rolling_gas_cost_summary
                 .storage_rebate
@@ -987,7 +1040,8 @@ fn decode_transaction_data(tx_bcs: &[u8]) -> Option<TransactionData> {
 
 fn transaction_quality(tx: &TransactionData) -> usize {
     let base = match tx.kind() {
-        TransactionKind::ProgrammableTransaction(pt) | TransactionKind::ProgrammableSystemTransaction(pt) => {
+        TransactionKind::ProgrammableTransaction(pt)
+        | TransactionKind::ProgrammableSystemTransaction(pt) => {
             if pt.commands.is_empty() && pt.inputs.is_empty() {
                 0
             } else {
@@ -1025,7 +1079,9 @@ fn derive_change_type(
         (false, true, IDOperation::Created) => "CREATED".to_string(),
         (false, true, _) if unwrapped_ids.contains(&change.id) => "UNWRAPPED".to_string(),
         (true, true, _) if mutated_ids.contains(&change.id) => "MUTATED".to_string(),
-        (true, false, IDOperation::Deleted) if deleted_ids.contains(&change.id) => "DELETED".to_string(),
+        (true, false, IDOperation::Deleted) if deleted_ids.contains(&change.id) => {
+            "DELETED".to_string()
+        }
         (true, false, _) if wrapped_ids.contains(&change.id) => "WRAPPED".to_string(),
         (false, true, _) if created_ids.contains(&change.id) => "CREATED".to_string(),
         (false, true, _) => "UNWRAPPED".to_string(),
@@ -1038,13 +1094,18 @@ fn derive_change_type(
 
 fn flatten_owner(owner: Option<&Owner>) -> (Option<String>, Option<String>) {
     match owner {
-        Some(Owner::AddressOwner(address)) => (Some(address.to_string()), Some("ADDRESS".to_string())),
-        Some(Owner::ObjectOwner(address)) => (Some(address.to_string()), Some("OBJECT".to_string())),
+        Some(Owner::AddressOwner(address)) => {
+            (Some(address.to_string()), Some("ADDRESS".to_string()))
+        }
+        Some(Owner::ObjectOwner(address)) => {
+            (Some(address.to_string()), Some("OBJECT".to_string()))
+        }
         Some(Owner::Shared { .. }) => (None, Some("SHARED".to_string())),
         Some(Owner::Immutable) => (None, Some("IMMUTABLE".to_string())),
-        Some(Owner::ConsensusAddressOwner { owner, .. }) => {
-            (Some(owner.to_string()), Some("CONSENSUS_ADDRESS".to_string()))
-        }
+        Some(Owner::ConsensusAddressOwner { owner, .. }) => (
+            Some(owner.to_string()),
+            Some("CONSENSUS_ADDRESS".to_string()),
+        ),
         None => (None, None),
     }
 }
@@ -1065,12 +1126,12 @@ fn funds_withdrawal_amount(withdrawal: &FundsWithdrawalArg) -> Option<String> {
 
 fn count_move_calls(kind: &TransactionKind) -> usize {
     match kind {
-        TransactionKind::ProgrammableTransaction(pt) | TransactionKind::ProgrammableSystemTransaction(pt) => {
-            pt.commands
-                .iter()
-                .filter(|command| matches!(command, Command::MoveCall(_)))
-                .count()
-        }
+        TransactionKind::ProgrammableTransaction(pt)
+        | TransactionKind::ProgrammableSystemTransaction(pt) => pt
+            .commands
+            .iter()
+            .filter(|command| matches!(command, Command::MoveCall(_)))
+            .count(),
         _ => 0,
     }
 }
@@ -1174,11 +1235,17 @@ fn format_type_tag(tag: &TypeTag) -> String {
 }
 
 fn hex_string(bytes: &[u8]) -> String {
-    format!("0x{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+    format!(
+        "0x{}",
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    )
 }
 
 fn format_address_bytes(bytes: &[u8]) -> String {
-    format!("0x{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+    format!(
+        "0x{}",
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    )
 }
 
 fn sequence_number_to_string(value: SequenceNumber) -> String {
@@ -1197,9 +1264,7 @@ fn unix_millis_to_iso(ms: u64) -> String {
     let minute = (seconds_of_day % 3_600) / 60;
     let second = seconds_of_day % 60;
 
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z"
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
 fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
@@ -1236,7 +1301,10 @@ mod tests {
 
     #[test]
     fn test_unix_millis_to_iso() {
-        assert_eq!(unix_millis_to_iso(1_755_463_195_493), "2025-08-17T20:39:55.493Z");
+        assert_eq!(
+            unix_millis_to_iso(1_755_463_195_493),
+            "2025-08-17T20:39:55.493Z"
+        );
     }
 
     #[test]

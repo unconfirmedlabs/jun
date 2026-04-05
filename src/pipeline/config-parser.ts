@@ -383,16 +383,6 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
       }
     }
 
-    // Collect which processors should run inside workers
-    const workerProcessorNames: string[] = [];
-    if (config.processors?.transactionBlocks) workerProcessorNames.push("transaction-tracker");
-    if (config.processors?.objectChanges) workerProcessorNames.push("object-change-tracker");
-    if (config.processors?.dependencies) workerProcessorNames.push("dependency-tracker");
-    if (config.processors?.commands) workerProcessorNames.push("command-tracker");
-    if (config.processors?.inputs) workerProcessorNames.push("input-tracker");
-    if (config.processors?.systemTransactions) workerProcessorNames.push("system-tx-tracker");
-    if (config.processors?.unchangedConsensusObjects) workerProcessorNames.push("unchanged-consensus-tracker");
-
     sources.push(createArchiveSource({
       archiveUrl,
       from: start,
@@ -403,8 +393,6 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
       balanceCoinTypes: config.processors?.balances?.coinTypes === "*"
         ? "*"
         : config.processors?.balances?.coinTypes?.map((coinType: string) => normalizeCoinType(coinType)),
-      needsTransactions: !!config.processors?.transactionBlocks,
-      processorNames: workerProcessorNames,
     }));
   }
 

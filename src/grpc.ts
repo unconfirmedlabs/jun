@@ -16,7 +16,7 @@ const PROTO_DIR = path.join(import.meta.dir, "..", "proto");
 // Proto loading
 // ---------------------------------------------------------------------------
 
-const READ_MASK_PATHS = [
+export const DEFAULT_READ_MASK_PATHS = [
   "transactions.events",
   "transactions.digest",
   "transactions.transaction",
@@ -29,6 +29,17 @@ const READ_MASK_PATHS = [
   "summary.content_digest",
   "summary.total_network_transactions",
   "summary.epoch_rolling_gas_cost_summary",
+];
+
+export const RAW_CHECKPOINT_READ_MASK_PATHS = [
+  "sequence_number",
+  "digest",
+  "summary.bcs",
+  "transactions.digest",
+  "transactions.transaction.bcs",
+  "transactions.effects.bcs",
+  "transactions.events.bcs",
+  "transactions.balance_changes",
 ];
 
 const PROTO_LOAD_OPTIONS: protoLoader.Options = {
@@ -66,6 +77,8 @@ function loadProto() {
     SubscriptionService: subscriptionProto.sui.rpc.v2.SubscriptionService,
     LedgerService: ledgerProto.sui.rpc.v2.LedgerService,
     MovePackageService: moveProto.sui.rpc.v2.MovePackageService,
+    subscriptionServiceDefinition: subDef["sui.rpc.v2.SubscriptionService"] as any,
+    ledgerServiceDefinition: ledgerDef["sui.rpc.v2.LedgerService"] as any,
   };
 }
 
@@ -375,9 +388,19 @@ export interface GrpcClient {
   subscribeCheckpoints(): AsyncIterable<GrpcCheckpointResponse>;
 
   /**
+   * Subscribe to live checkpoints as raw protobuf response bytes.
+   */
+  subscribeCheckpointsRaw(readMask?: string[]): AsyncIterable<Uint8Array>;
+
+  /**
    * Fetch a single checkpoint by sequence number. Used for backfill.
    */
   getCheckpoint(seq: bigint): Promise<GrpcCheckpointResponse>;
+
+  /**
+   * Fetch a single checkpoint as raw GetCheckpointResponse protobuf bytes.
+   */
+  getCheckpointRaw(seq: bigint, readMask?: string[]): Promise<Uint8Array>;
 
   /**
    * Fetch a datatype descriptor by package ID, module name, and type name.
@@ -400,98 +423,131 @@ export interface GrpcClient {
 }
 
 export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
-  const { SubscriptionService, LedgerService, MovePackageService } = loadProto();
+  const {
+    SubscriptionService,
+    LedgerService,
+    MovePackageService,
+    subscriptionServiceDefinition,
+    ledgerServiceDefinition,
+  } = loadProto();
   const creds = grpc.credentials.createSsl();
-  const readMask = options.readMask ?? READ_MASK_PATHS;
+  const readMask = options.readMask ?? DEFAULT_READ_MASK_PATHS;
 
   // Normalize URL for @grpc/grpc-js: strip https://, ensure :443
   let addr = options.url.replace(/^https?:\/\//, "");
   if (!addr.includes(":")) addr += ":443";
 
+  const RawSubscriptionService = grpc.makeGenericClientConstructor({
+    SubscribeCheckpoints: {
+      ...subscriptionServiceDefinition.SubscribeCheckpoints,
+      responseDeserialize: (buf: Buffer) =>
+        new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
+    },
+  }, "RawSubscriptionService") as any;
+
+  const RawLedgerService = grpc.makeGenericClientConstructor({
+    GetCheckpoint: {
+      ...ledgerServiceDefinition.GetCheckpoint,
+      responseDeserialize: (buf: Buffer) =>
+        new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
+    },
+  }, "RawLedgerService") as any;
+
   const subClient = new SubscriptionService(addr, creds);
   const ledgerClient = new LedgerService(addr, creds);
   const moveClient = new MovePackageService(addr, creds);
+  const rawSubClient = new RawSubscriptionService(addr, creds);
+  const rawLedgerClient = new RawLedgerService(addr, creds);
 
-  return {
-    subscribeCheckpoints(): AsyncIterable<GrpcCheckpointResponse> {
-      return {
-        [Symbol.asyncIterator]() {
-          const call = subClient.SubscribeCheckpoints({
-            readMask: { paths: readMask },
-          });
+  function streamToAsyncIterable<T>(call: any): AsyncIterable<T> {
+    return {
+      [Symbol.asyncIterator]() {
+        const MAX_BUFFER = 1024;
+        const buffer: T[] = [];
+        let waiting: {
+          resolve: (value: IteratorResult<T>) => void;
+          reject: (err: Error) => void;
+        } | null = null;
+        let done = false;
 
-          // Buffer incoming data events for the async iterator
-          const MAX_BUFFER = 1024;
-          const buffer: GrpcCheckpointResponse[] = [];
-          let waiting: {
-            resolve: (value: IteratorResult<GrpcCheckpointResponse>) => void;
-            reject: (err: Error) => void;
-          } | null = null;
-          let done = false;
-
-          call.on("data", (response: GrpcCheckpointResponse) => {
-            if (waiting) {
-              const waiter = waiting;
-              waiting = null;
-              waiter.resolve({ value: response, done: false });
-            } else {
-              buffer.push(response);
-              if (buffer.length >= MAX_BUFFER) {
-                call.pause();
-              }
+        call.on("data", (response: T) => {
+          if (waiting) {
+            const waiter = waiting;
+            waiting = null;
+            waiter.resolve({ value: response, done: false });
+          } else {
+            buffer.push(response);
+            if (buffer.length >= MAX_BUFFER) {
+              call.pause();
             }
-          });
+          }
+        });
 
-          call.on("error", (err: any) => {
-            done = true;
-            if (err.code === grpc.status.CANCELLED) {
-              if (waiting) {
-                const waiter = waiting;
-                waiting = null;
-                waiter.resolve({ value: undefined!, done: true as const });
-              }
-              return;
-            }
-            if (waiting) {
-              const waiter = waiting;
-              waiting = null;
-              waiter.reject(err);
-            }
-          });
-
-          call.on("end", () => {
-            done = true;
+        call.on("error", (err: any) => {
+          done = true;
+          if (err.code === grpc.status.CANCELLED) {
             if (waiting) {
               const waiter = waiting;
               waiting = null;
               waiter.resolve({ value: undefined!, done: true as const });
             }
-          });
+            return;
+          }
+          if (waiting) {
+            const waiter = waiting;
+            waiting = null;
+            waiter.reject(err);
+          }
+        });
 
-          return {
-            next(): Promise<IteratorResult<GrpcCheckpointResponse>> {
-              if (buffer.length > 0) {
-                const value = buffer.shift()!;
-                if (buffer.length < MAX_BUFFER / 2) {
-                  call.resume();
-                }
-                return Promise.resolve({ value, done: false });
+        call.on("end", () => {
+          done = true;
+          if (waiting) {
+            const waiter = waiting;
+            waiting = null;
+            waiter.resolve({ value: undefined!, done: true as const });
+          }
+        });
+
+        return {
+          next(): Promise<IteratorResult<T>> {
+            if (buffer.length > 0) {
+              const value = buffer.shift()!;
+              if (buffer.length < MAX_BUFFER / 2) {
+                call.resume();
               }
-              if (done) {
-                return Promise.resolve({ value: undefined!, done: true as const });
-              }
-              return new Promise((resolve, reject) => {
-                waiting = { resolve, reject };
-              });
-            },
-            return(): Promise<IteratorResult<GrpcCheckpointResponse>> {
-              call.cancel();
-              done = true;
+              return Promise.resolve({ value, done: false });
+            }
+            if (done) {
               return Promise.resolve({ value: undefined!, done: true as const });
-            },
-          };
-        },
-      };
+            }
+            return new Promise((resolve, reject) => {
+              waiting = { resolve, reject };
+            });
+          },
+          return(): Promise<IteratorResult<T>> {
+            call.cancel();
+            done = true;
+            return Promise.resolve({ value: undefined!, done: true as const });
+          },
+        };
+      },
+    };
+  }
+
+  return {
+    subscribeCheckpoints(): AsyncIterable<GrpcCheckpointResponse> {
+      const call = subClient.SubscribeCheckpoints({
+        readMask: { paths: readMask },
+      });
+      return streamToAsyncIterable<GrpcCheckpointResponse>(call);
+    },
+
+    subscribeCheckpointsRaw(rawReadMask = RAW_CHECKPOINT_READ_MASK_PATHS): AsyncIterable<Uint8Array> {
+      const call = rawSubClient.SubscribeCheckpoints({
+        readMask: { paths: rawReadMask },
+      });
+      return streamToAsyncIterable<Uint8Array>(call);
     },
 
     getCheckpoint(seq: bigint): Promise<GrpcCheckpointResponse> {
@@ -511,6 +567,24 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
               cursor: response.checkpoint?.sequenceNumber ?? seq.toString(),
               checkpoint: response.checkpoint,
             });
+          },
+        );
+      });
+    },
+
+    getCheckpointRaw(seq: bigint, rawReadMask = RAW_CHECKPOINT_READ_MASK_PATHS): Promise<Uint8Array> {
+      return new Promise((resolve, reject) => {
+        rawLedgerClient.GetCheckpoint(
+          {
+            sequenceNumber: seq.toString(),
+            readMask: { paths: rawReadMask },
+          },
+          (err: any, response: Uint8Array) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            resolve(response);
           },
         );
       });
@@ -573,6 +647,8 @@ export function createGrpcClient(options: GrpcClientOptions): GrpcClient {
       subClient.close();
       ledgerClient.close();
       moveClient.close();
+      rawSubClient.close();
+      rawLedgerClient.close();
     },
   };
 }

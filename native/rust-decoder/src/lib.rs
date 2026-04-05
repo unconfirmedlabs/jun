@@ -7,6 +7,7 @@
 
 use std::io::Read;
 
+mod canonical;
 mod extract;
 mod proto;
 
@@ -30,17 +31,62 @@ pub extern "C" fn decode_checkpoint(
     let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
     let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, output_capacity as usize) };
 
-    match decode_checkpoint_inner(input) {
-        Ok(json) => {
-            let json_bytes = json.as_bytes();
-            if json_bytes.len() > output.len() {
-                return 0; // output buffer too small
-            }
-            output[..json_bytes.len()].copy_from_slice(json_bytes);
-            json_bytes.len() as u32
-        }
-        Err(_) => 0,
-    }
+    write_json_result(output, decode_checkpoint_inner(input))
+}
+
+#[no_mangle]
+pub extern "C" fn decode_archive_checkpoint(
+    input_ptr: *const u8,
+    input_len: u32,
+    output_ptr: *mut u8,
+    output_capacity: u32,
+) -> u32 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, output_capacity as usize) };
+
+    write_json_result(output, canonical::decode_archive_checkpoint(input))
+}
+
+#[no_mangle]
+pub extern "C" fn decode_checkpoint_proto(
+    input_ptr: *const u8,
+    input_len: u32,
+    output_ptr: *mut u8,
+    output_capacity: u32,
+) -> u32 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, output_capacity as usize) };
+
+    write_json_result(output, canonical::decode_checkpoint_proto(input))
+}
+
+#[no_mangle]
+pub extern "C" fn decode_subscribe_checkpoints_response(
+    input_ptr: *const u8,
+    input_len: u32,
+    output_ptr: *mut u8,
+    output_capacity: u32,
+) -> u32 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, output_capacity as usize) };
+
+    write_json_result(
+        output,
+        canonical::decode_subscribe_checkpoints_response(input),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn decode_get_checkpoint_response(
+    input_ptr: *const u8,
+    input_len: u32,
+    output_ptr: *mut u8,
+    output_capacity: u32,
+) -> u32 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, output_capacity as usize) };
+
+    write_json_result(output, canonical::decode_get_checkpoint_response(input))
 }
 
 fn decode_checkpoint_inner(compressed: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
@@ -55,4 +101,18 @@ fn decode_checkpoint_inner(compressed: &[u8]) -> Result<String, Box<dyn std::err
     // 5. Serialize to JSON
     let result = extract::extract_checkpoint(&decompressed)?;
     Ok(result)
+}
+
+fn write_json_result(output: &mut [u8], result: Result<String, Box<dyn std::error::Error>>) -> u32 {
+    match result {
+        Ok(json) => {
+            let json_bytes = json.as_bytes();
+            if json_bytes.len() > output.len() {
+                return 0;
+            }
+            output[..json_bytes.len()].copy_from_slice(json_bytes);
+            json_bytes.len() as u32
+        }
+        Err(_) => 0,
+    }
 }

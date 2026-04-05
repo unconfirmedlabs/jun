@@ -14,6 +14,10 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import protobuf from "protobufjs";
 import path from "path";
+import {
+  decodeArchiveCheckpointCompressedNative,
+  isNativeCheckpointDecoderAvailable,
+} from "./checkpoint-native-decoder.ts";
 import type {
   GrpcCheckpointResponse,
   CheckpointEvent,
@@ -590,6 +594,11 @@ export async function decodeCompressedCheckpoint(
   compressed: Uint8Array,
   verifyOpts?: { grpcUrl: string },
 ): Promise<GrpcCheckpointResponse> {
+  if (!verifyOpts && isNativeCheckpointDecoderAvailable()) {
+    const decoded = decodeArchiveCheckpointCompressedNative(compressed);
+    if (decoded) return decoded;
+  }
+
   const decompressed = zstdDecompressSync(Buffer.from(compressed));
   const Checkpoint = await getCheckpointType();
   const decoded = Checkpoint.decode(decompressed);

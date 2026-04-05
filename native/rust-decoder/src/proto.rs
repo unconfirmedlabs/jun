@@ -1,8 +1,13 @@
 //! Minimal protobuf wire format parser.
 //!
-//! Walks the Checkpoint proto to extract BCS byte ranges for:
-//! - CheckpointSummary (summary.bcs.value)
-//! - Per-transaction: effects.bcs.value, transaction.bcs.value, events.bcs.value, digest
+//! Walks checkpoint and gRPC envelope protos to extract the raw byte ranges we
+//! need for native decoding without generated protobuf code.
+
+pub struct ProtoBalanceChange<'a> {
+    pub address: &'a str,
+    pub coin_type: &'a str,
+    pub amount: &'a str,
+}
 
 /// A single transaction's BCS byte ranges extracted from the proto.
 pub struct ProtoTransaction<'a> {
@@ -10,17 +15,27 @@ pub struct ProtoTransaction<'a> {
     pub effects_bcs: Option<&'a [u8]>,
     pub transaction_bcs: Option<&'a [u8]>,
     pub events_bcs: Option<&'a [u8]>,
+    pub balance_changes: Vec<ProtoBalanceChange<'a>>,
 }
 
 /// Parsed checkpoint proto — just the BCS byte slices we need.
 pub struct ProtoCheckpoint<'a> {
+    pub sequence_number: Option<String>,
+    pub digest: Option<&'a str>,
     pub summary_bcs: Option<&'a [u8]>,
     pub transactions: Vec<ProtoTransaction<'a>>,
+}
+
+pub struct ProtoSubscribeCheckpointsResponse<'a> {
+    pub cursor: String,
+    pub checkpoint_bytes: &'a [u8],
 }
 
 /// Parse a decompressed checkpoint protobuf, extracting BCS byte ranges.
 pub fn parse_checkpoint(buf: &[u8]) -> Result<ProtoCheckpoint<'_>, &'static str> {
     let mut result = ProtoCheckpoint {
+        sequence_number: None,
+        digest: None,
         summary_bcs: None,
         transactions: Vec::new(),
     };
@@ -31,6 +46,18 @@ pub fn parse_checkpoint(buf: &[u8]) -> Result<ProtoCheckpoint<'_>, &'static str>
         pos = new_pos;
 
         match (field_number, wire_type) {
+            // field 1: sequence_number
+            (1, 0) => {
+                let (value, new_pos) = read_varint(buf, pos)?;
+                pos = new_pos;
+                result.sequence_number = Some(value.to_string());
+            }
+            // field 2: digest
+            (2, 2) => {
+                let (data, new_pos) = read_length_delimited(buf, pos)?;
+                pos = new_pos;
+                result.digest = std::str::from_utf8(data).ok();
+            }
             // field 3: summary (length-delimited message)
             (3, 2) => {
                 let (data, new_pos) = read_length_delimited(buf, pos)?;
@@ -62,6 +89,7 @@ fn parse_executed_transaction(buf: &[u8]) -> Option<ProtoTransaction<'_>> {
     let mut effects_bcs = None;
     let mut transaction_bcs = None;
     let mut events_bcs = None;
+    let mut balance_changes = Vec::new();
 
     let mut pos = 0;
     while pos < buf.len() {
@@ -95,7 +123,15 @@ fn parse_executed_transaction(buf: &[u8]) -> Option<ProtoTransaction<'_>> {
                 pos = new_pos;
                 events_bcs = extract_bcs_value(data);
             }
-            // Skip other fields (signatures, balance_changes, etc.)
+            // field 8: balance_changes
+            (8, 2) => {
+                let (data, new_pos) = read_length_delimited(buf, pos).ok()?;
+                pos = new_pos;
+                if let Some(change) = parse_balance_change(data) {
+                    balance_changes.push(change);
+                }
+            }
+            // Skip other fields (signatures, timestamp, objects, etc.)
             _ => {
                 pos = skip_field(buf, pos, wire_type).ok()?;
             }
@@ -107,7 +143,108 @@ fn parse_executed_transaction(buf: &[u8]) -> Option<ProtoTransaction<'_>> {
         effects_bcs,
         transaction_bcs,
         events_bcs,
+        balance_changes,
     })
+}
+
+fn parse_balance_change(buf: &[u8]) -> Option<ProtoBalanceChange<'_>> {
+    let mut address = "";
+    let mut coin_type = "";
+    let mut amount = "";
+
+    let mut pos = 0;
+    while pos < buf.len() {
+        let (field_number, wire_type, new_pos) = read_tag(buf, pos).ok()?;
+        pos = new_pos;
+
+        match (field_number, wire_type) {
+            (1, 2) => {
+                let (data, new_pos) = read_length_delimited(buf, pos).ok()?;
+                pos = new_pos;
+                address = std::str::from_utf8(data).unwrap_or("");
+            }
+            (2, 2) => {
+                let (data, new_pos) = read_length_delimited(buf, pos).ok()?;
+                pos = new_pos;
+                coin_type = std::str::from_utf8(data).unwrap_or("");
+            }
+            (3, 2) => {
+                let (data, new_pos) = read_length_delimited(buf, pos).ok()?;
+                pos = new_pos;
+                amount = std::str::from_utf8(data).unwrap_or("");
+            }
+            _ => {
+                pos = skip_field(buf, pos, wire_type).ok()?;
+            }
+        }
+    }
+
+    if address.is_empty() || coin_type.is_empty() {
+        return None;
+    }
+
+    Some(ProtoBalanceChange {
+        address,
+        coin_type,
+        amount,
+    })
+}
+
+pub fn parse_subscribe_checkpoints_response(
+    buf: &[u8],
+) -> Result<ProtoSubscribeCheckpointsResponse<'_>, &'static str> {
+    let mut cursor = None;
+    let mut checkpoint_bytes = None;
+
+    let mut pos = 0;
+    while pos < buf.len() {
+        let (field_number, wire_type, new_pos) = read_tag(buf, pos)?;
+        pos = new_pos;
+
+        match (field_number, wire_type) {
+            (1, 0) => {
+                let (value, new_pos) = read_varint(buf, pos)?;
+                pos = new_pos;
+                cursor = Some(value.to_string());
+            }
+            (2, 2) => {
+                let (data, new_pos) = read_length_delimited(buf, pos)?;
+                pos = new_pos;
+                checkpoint_bytes = Some(data);
+            }
+            _ => {
+                pos = skip_field(buf, pos, wire_type)?;
+            }
+        }
+    }
+
+    match checkpoint_bytes {
+        Some(checkpoint_bytes) => Ok(ProtoSubscribeCheckpointsResponse {
+            cursor: cursor.unwrap_or_default(),
+            checkpoint_bytes,
+        }),
+        None => Err("subscribe response: missing checkpoint"),
+    }
+}
+
+pub fn parse_get_checkpoint_response(buf: &[u8]) -> Result<&[u8], &'static str> {
+    let mut pos = 0;
+    while pos < buf.len() {
+        let (field_number, wire_type, new_pos) = read_tag(buf, pos)?;
+        pos = new_pos;
+
+        match (field_number, wire_type) {
+            (1, 2) => {
+                let (data, _) = read_length_delimited(buf, pos)?;
+                return Ok(data);
+            }
+            _ => {
+                pos = skip_field(buf, pos, wire_type)?;
+            }
+        }
+    }
+
+    Err("get checkpoint response: missing checkpoint")
 }
 
 /// Extract bcs.value from a message that has a nested Bcs message.

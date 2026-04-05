@@ -34,7 +34,9 @@ export function createSystemTransactionTracker(): Processor {
         records.push({
           txDigest: tx.digest,
           kind,
-          data: safeStringify(tx.transaction?.systemData ?? {}),
+          data: typeof tx.transaction?.systemData === "string"
+            ? tx.transaction.systemData
+            : safeStringify(tx.transaction?.systemData ?? {}),
           checkpointSeq: checkpoint.sequenceNumber,
           timestamp: checkpoint.timestamp,
         });

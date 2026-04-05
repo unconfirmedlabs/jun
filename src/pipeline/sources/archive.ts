@@ -8,7 +8,7 @@
  * queue, workers decode in parallel, and the ordered drain yields checkpoints
  * as soon as the next sequential one is ready — no window boundaries.
  */
-import { fetchCompressed } from "../../archive.ts";
+import { checkpointFromGrpcResponse } from "../../checkpoint-response.ts";
 
 /** Direct fetch from archive — no cache read or write. */
 async function fetchDirect(seq: bigint, archiveUrl: string, signal?: AbortSignal): Promise<Uint8Array> {
@@ -17,9 +17,8 @@ async function fetchDirect(seq: bigint, archiveUrl: string, signal?: AbortSignal
   if (!resp.ok) throw new Error(`Archive fetch failed: ${resp.status} for checkpoint ${seq}`);
   return new Uint8Array(await resp.arrayBuffer());
 }
-import { createCheckpointDecoderPool, type CheckpointDecoderPool, type SerializedProcessedCheckpoint } from "../../checkpoint-decoder-pool.ts";
-import type { Source, Checkpoint, ProcessedCheckpoint } from "../types.ts";
-import { emptyProcessed } from "../types.ts";
+import { createCheckpointDecoderPool, type CheckpointDecoderPool } from "../../checkpoint-decoder-pool.ts";
+import type { Source, Checkpoint } from "../types.ts";
 import { createLogger } from "../../logger.ts";
 import type { Logger } from "../../logger.ts";
 
@@ -38,10 +37,6 @@ export interface ArchiveSourceConfig {
   balanceCoinTypes?: string[] | "*";
   /** gRPC URL for fetching latest checkpoint */
   grpcUrl?: string;
-  /** Whether transaction-level data is needed (disables Zig fast path) */
-  needsTransactions?: boolean;
-  /** Processor names to run inside workers (e.g., ["transaction-tracker", "object-change-tracker"]) */
-  processorNames?: string[];
 }
 
 export function createArchiveSource(config: ArchiveSourceConfig): Source {
@@ -57,7 +52,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
       const workerCount = config.workers ?? Math.max(1, Math.min(4, (navigator.hardwareConcurrency ?? 4) - 1));
       const balanceCoinTypes = config.balanceCoinTypes;
 
-      decoderPool = createCheckpointDecoderPool(workerCount, balanceCoinTypes, config.processorNames);
+      decoderPool = createCheckpointDecoderPool(workerCount, balanceCoinTypes);
       log.info({ workers: workerCount, fetchConcurrency, from: config.from.toString() }, "archive source starting");
 
       // Determine upper bound
@@ -124,15 +119,6 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
         return new Promise(resolve => { backpressureResolve = resolve; });
       }
 
-      /** Deserialize a string-keyed record back to bigint checkpointSeq + Date timestamp. */
-      function deserializeRecord<T>(r: Record<string, unknown>): T {
-        return {
-          ...r,
-          checkpointSeq: BigInt(r.checkpointSeq as string),
-          timestamp: new Date(r.timestamp as string),
-        } as T;
-      }
-
       // Launch a single fetch+decode+process job
       async function processCheckpoint(seq: bigint): Promise<void> {
         try {
@@ -142,40 +128,11 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           const result = await pool.decode(seq, compressed);
           if (stopped) return;
 
-          // Deserialize the worker's output back to typed records
-          const sp = result.processed;
-          const checkpoint: Checkpoint = {
-            sequenceNumber: BigInt(sp.checkpoint.sequenceNumber),
-            timestamp: new Date(sp.checkpoint.timestamp),
-            transactions: [], // not needed — processors already ran in worker
-            source: "backfill",
-            epoch: BigInt(sp.checkpoint.epoch),
-            digest: sp.checkpoint.digest,
-            previousDigest: sp.checkpoint.previousDigest,
-            contentDigest: sp.checkpoint.contentDigest,
-            totalNetworkTransactions: BigInt(sp.checkpoint.totalNetworkTransactions),
-            epochRollingGasCostSummary: sp.checkpoint.epochRollingGasCostSummary,
-          };
-
-          // Attach pre-processed records so pipeline skips processor loop
-          const preProcessed = emptyProcessed(checkpoint);
-          preProcessed.events = sp.events.map(deserializeRecord);
-          preProcessed.balanceChanges = sp.balanceChanges.map(deserializeRecord);
-          preProcessed.transactions = sp.transactions.map(r => ({
-            ...deserializeRecord(r),
-            epoch: BigInt(r.epoch as string),
-          }));
-          preProcessed.moveCalls = sp.moveCalls.map(deserializeRecord);
-          preProcessed.objectChanges = sp.objectChanges.map(deserializeRecord);
-          preProcessed.dependencies = sp.dependencies.map(deserializeRecord);
-          preProcessed.inputs = sp.inputs.map(deserializeRecord);
-          preProcessed.commands = sp.commands.map(deserializeRecord);
-          preProcessed.systemTransactions = sp.systemTransactions.map(deserializeRecord);
-          preProcessed.unchangedConsensusObjects = sp.unchangedConsensusObjects.map(deserializeRecord);
-
-          // Stash preProcessed on the checkpoint so pipeline can skip processors
-          (checkpoint as any)._preProcessed = preProcessed;
-
+          const checkpoint = checkpointFromGrpcResponse(
+            result.payload.decoded,
+            "backfill",
+            result.payload.precomputedBalanceChanges,
+          );
           pending.set(seq, checkpoint);
         } catch (error) {
           log.error({ checkpoint: seq.toString(), error }, "failed to fetch/decode checkpoint");
