@@ -41,12 +41,6 @@ impl<'a> BinaryWriter<'a> {
     }
 
     #[inline]
-    pub fn write_u64(&mut self, v: u64) {
-        self.buf[self.pos..self.pos + 8].copy_from_slice(&v.to_le_bytes());
-        self.pos += 8;
-    }
-
-    #[inline]
     pub fn write_str(&mut self, s: &str) {
         let len = s.len().min(u16::MAX as usize - 1);
         self.write_u16(len as u16);
@@ -78,7 +72,7 @@ impl<'a> BinaryWriter<'a> {
 pub fn write_binary(checkpoint: &ExtractedCheckpoint, output: &mut [u8]) -> usize {
     let mut w = BinaryWriter::new(output);
 
-    // Header: record counts (7 × u32 = 28 bytes)
+    // Header: record counts (10 × u32 = 40 bytes)
     w.write_u32(checkpoint.transactions.len() as u32);
     w.write_u32(checkpoint.object_changes.len() as u32);
     w.write_u32(checkpoint.dependencies.len() as u32);
@@ -88,6 +82,7 @@ pub fn write_binary(checkpoint: &ExtractedCheckpoint, output: &mut [u8]) -> usiz
     w.write_u32(checkpoint.inputs.len() as u32);
     w.write_u32(checkpoint.unchanged_consensus_objects.len() as u32);
     w.write_u32(checkpoint.events.len() as u32);
+    w.write_u32(checkpoint.balance_changes.len() as u32);
 
     // Checkpoint summary
     let cp = &checkpoint.checkpoint;
@@ -229,6 +224,16 @@ pub fn write_binary(checkpoint: &ExtractedCheckpoint, output: &mut [u8]) -> usiz
         // event data as JSON string (events have user-defined schemas)
         let data_json = serde_json::to_string(&ev.data).unwrap_or_default();
         w.write_str(&data_json);
+    }
+
+    // Balance changes
+    for balance_change in &checkpoint.balance_changes {
+        w.write_str(&balance_change.tx_digest);
+        w.write_str(&balance_change.checkpoint_seq);
+        w.write_str(&balance_change.address);
+        w.write_str(&balance_change.coin_type);
+        w.write_str(&balance_change.amount);
+        w.write_str(&balance_change.timestamp);
     }
 
     w.position()

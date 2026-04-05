@@ -4,15 +4,17 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::{Map, Value};
+use sui_types::balance::Balance;
 use sui_types::base_types::{ObjectID, SequenceNumber, SuiAddress};
 use sui_types::effects::{
-    IDOperation, TransactionEffects, TransactionEffectsAPI, TransactionEvents,
+    AccumulatorOperation, AccumulatorValue, IDOperation, TransactionEffects,
+    TransactionEffectsAPI, TransactionEvents,
     UnchangedConsensusKind,
 };
 use sui_types::event::Event;
 use sui_types::execution_status::{ExecutionErrorKind, ExecutionStatus};
 use sui_types::messages_checkpoint::CheckpointSummary;
-use sui_types::object::Owner;
+use sui_types::object::{Object, Owner};
 use sui_types::transaction::{
     Argument, CallArg, Command, FundsWithdrawalArg, ObjectArg, Reservation, SenderSignedData,
     SharedObjectMutability, TransactionData, TransactionDataAPI, TransactionKind, WithdrawFrom,
@@ -30,7 +32,7 @@ pub struct ExtractedCheckpoint {
     pub checkpoint: CheckpointRecord,
     pub events: Vec<EventRecord>,
     #[serde(rename = "balanceChanges")]
-    pub balance_changes: Vec<Value>,
+    pub balance_changes: Vec<BalanceChangeRecord>,
     pub transactions: Vec<TransactionRecord>,
     #[serde(rename = "moveCalls")]
     pub move_calls: Vec<MoveCallRecord>,
@@ -88,6 +90,19 @@ pub struct EventRecord {
     pub sender: String,
     pub timestamp: String,
     pub data: Value,
+}
+
+#[derive(Serialize)]
+pub struct BalanceChangeRecord {
+    #[serde(rename = "txDigest")]
+    pub tx_digest: String,
+    #[serde(rename = "checkpointSeq")]
+    pub checkpoint_seq: String,
+    pub address: String,
+    #[serde(rename = "coinType")]
+    pub coin_type: String,
+    pub amount: String,
+    pub timestamp: String,
 }
 
 #[derive(Serialize)]
@@ -267,6 +282,76 @@ struct DecodedSummary {
     gas_summary: GasCostSummaryRecord,
 }
 
+#[derive(Clone)]
+struct AccumulatorDelta {
+    address: String,
+    coin_type: String,
+    amount: i128,
+}
+
+#[derive(Clone)]
+struct CoinSnapshot {
+    version: u64,
+    owner: String,
+    coin_type: String,
+    balance: u64,
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct BalanceKey {
+    address: String,
+    coin_type: String,
+}
+
+#[derive(Default)]
+struct OrderedBalanceMap {
+    values: HashMap<BalanceKey, i128>,
+    order: Vec<BalanceKey>,
+}
+
+impl OrderedBalanceMap {
+    fn add_delta(&mut self, address: String, coin_type: String, delta: i128) {
+        if address.is_empty() || coin_type.is_empty() || delta == 0 {
+            return;
+        }
+
+        let key = BalanceKey { address, coin_type };
+        if !self.values.contains_key(&key) {
+            self.order.push(key.clone());
+        }
+        *self.values.entry(key).or_default() += delta;
+    }
+
+    fn into_records(
+        self,
+        checkpoint_seq: &str,
+        checkpoint_timestamp: &str,
+    ) -> Vec<BalanceChangeRecord> {
+        let mut values = self.values;
+        let mut records = Vec::new();
+
+        for key in self.order {
+            let Some(amount) = values.remove(&key) else {
+                continue;
+            };
+            if amount == 0 {
+                continue;
+            }
+
+            records.push(BalanceChangeRecord {
+                tx_digest: String::new(),
+                checkpoint_seq: checkpoint_seq.to_string(),
+                address: key.address,
+                coin_type: key.coin_type,
+                amount: amount.to_string(),
+                timestamp: checkpoint_timestamp.to_string(),
+            });
+        }
+
+        records
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Extraction
 // ---------------------------------------------------------------------------
@@ -291,6 +376,9 @@ pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<ExtractedCheckpoin
     let mut commands = Vec::new();
     let mut system_transactions = Vec::new();
     let mut unchanged_consensus_objects = Vec::new();
+    let mut created_objects = HashSet::new();
+    let mut deleted_objects = HashSet::new();
+    let mut accumulator_deltas = Vec::new();
 
     for ptx in &parsed.transactions {
         let effects = ptx
@@ -346,12 +434,27 @@ pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<ExtractedCheckpoin
             dependencies.extend(extract_dependencies(&tx_context, fx));
             unchanged_consensus_objects
                 .extend(extract_unchanged_consensus_objects(&tx_context, fx));
+            collect_balance_change_hints(
+                fx,
+                &mut created_objects,
+                &mut deleted_objects,
+                &mut accumulator_deltas,
+            );
         }
 
         if let Some(tx_events) = tx_events.as_ref() {
             events.extend(extract_events(&tx_context, tx_events));
         }
     }
+
+    let balance_changes = compute_balance_changes(
+        &parsed.objects,
+        &created_objects,
+        &deleted_objects,
+        &accumulator_deltas,
+        &checkpoint_seq,
+        &checkpoint_timestamp,
+    );
 
     let result = ExtractedCheckpoint {
         checkpoint: CheckpointRecord {
@@ -366,7 +469,7 @@ pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<ExtractedCheckpoin
             epoch_rolling_gas_cost_summary: summary.gas_summary,
         },
         events,
-        balance_changes: Vec::new(),
+        balance_changes,
         transactions,
         move_calls,
         object_changes,
@@ -948,6 +1051,166 @@ fn extract_events(ctx: &TxContext<'_>, tx_events: &TransactionEvents) -> Vec<Eve
         .collect()
 }
 
+fn collect_balance_change_hints(
+    effects: &TransactionEffects,
+    created_objects: &mut HashSet<ObjectID>,
+    deleted_objects: &mut HashSet<ObjectID>,
+    accumulator_deltas: &mut Vec<AccumulatorDelta>,
+) {
+    for change in effects.object_changes() {
+        if change.input_version.is_none() && change.output_version.is_some() {
+            created_objects.insert(change.id);
+        }
+        if change.output_version.is_none() {
+            deleted_objects.insert(change.id);
+        }
+    }
+
+    for (_, write) in effects.accumulator_updates() {
+        let Some(coin_type) = Balance::maybe_get_balance_type_param(&write.address.ty) else {
+            continue;
+        };
+
+        let amount = match write.value {
+            AccumulatorValue::Integer(value) => value as i128,
+            AccumulatorValue::IntegerTuple(_, _) | AccumulatorValue::EventDigest(_) => continue,
+        };
+
+        let signed_amount = match write.operation {
+            AccumulatorOperation::Merge => amount,
+            AccumulatorOperation::Split => -amount,
+        };
+
+        if signed_amount == 0 {
+            continue;
+        }
+
+        accumulator_deltas.push(AccumulatorDelta {
+            address: format_address_bytes(write.address.address.as_ref()),
+            coin_type: format_type_tag(&coin_type),
+            amount: signed_amount,
+        });
+    }
+}
+
+fn compute_balance_changes(
+    objects: &[proto::ProtoObject<'_>],
+    created_objects: &HashSet<ObjectID>,
+    deleted_objects: &HashSet<ObjectID>,
+    accumulator_deltas: &[AccumulatorDelta],
+    checkpoint_seq: &str,
+    checkpoint_timestamp: &str,
+) -> Vec<BalanceChangeRecord> {
+    if objects.is_empty() && accumulator_deltas.is_empty() {
+        return Vec::new();
+    }
+
+    let mut aggregated = OrderedBalanceMap::default();
+    for delta in accumulator_deltas {
+        aggregated.add_delta(delta.address.clone(), delta.coin_type.clone(), delta.amount);
+    }
+
+    let mut coin_versions: HashMap<ObjectID, Vec<CoinSnapshot>> = HashMap::new();
+    let mut object_order = Vec::new();
+
+    for object in objects {
+        if !looks_like_coin_object(object.bcs) {
+            continue;
+        }
+
+        let Some((object_id, snapshot)) = parse_coin_object(object) else {
+            continue;
+        };
+
+        if !coin_versions.contains_key(&object_id) {
+            object_order.push(object_id);
+        }
+        coin_versions.entry(object_id).or_default().push(snapshot);
+    }
+
+    for object_id in object_order {
+        let Some(mut versions) = coin_versions.remove(&object_id) else {
+            continue;
+        };
+
+        versions.sort_by_key(|snapshot| snapshot.version);
+        match versions.as_slice() {
+            [snapshot] => {
+                if created_objects.contains(&object_id) {
+                    aggregated.add_delta(
+                        snapshot.owner.clone(),
+                        snapshot.coin_type.clone(),
+                        snapshot.balance as i128,
+                    );
+                } else if deleted_objects.contains(&object_id) {
+                    aggregated.add_delta(
+                        snapshot.owner.clone(),
+                        snapshot.coin_type.clone(),
+                        -(snapshot.balance as i128),
+                    );
+                }
+            }
+            [input, .., output] => {
+                if input.owner == output.owner {
+                    aggregated.add_delta(
+                        input.owner.clone(),
+                        input.coin_type.clone(),
+                        output.balance as i128 - input.balance as i128,
+                    );
+                } else {
+                    aggregated.add_delta(
+                        input.owner.clone(),
+                        input.coin_type.clone(),
+                        -(input.balance as i128),
+                    );
+                    aggregated.add_delta(
+                        output.owner.clone(),
+                        output.coin_type.clone(),
+                        output.balance as i128,
+                    );
+                }
+            }
+            [] => {}
+        }
+    }
+
+    aggregated.into_records(checkpoint_seq, checkpoint_timestamp)
+}
+
+fn looks_like_coin_object(raw: &[u8]) -> bool {
+    raw.len() >= 2 && raw[0] == 0 && matches!(raw[1], 1 | 3)
+}
+
+fn parse_coin_object(object: &proto::ProtoObject<'_>) -> Option<(ObjectID, CoinSnapshot)> {
+    let decoded = bcs::from_bytes::<Object>(object.bcs).ok()?;
+    let owner = match decoded.owner() {
+        Owner::AddressOwner(address) => format_address_bytes(address.as_ref()),
+        _ => return None,
+    };
+    let coin_type = format_type_tag(&decoded.coin_type_maybe()?);
+    let version = if object.version == 0 {
+        decoded.version().value()
+    } else {
+        object.version
+    };
+
+    let object_id = if object.object_id.is_empty() {
+        decoded.id()
+    } else {
+        object.object_id.parse().ok().unwrap_or_else(|| decoded.id())
+    };
+
+    Some((
+        object_id,
+        CoinSnapshot {
+            version,
+            owner,
+            coin_type,
+            balance: decoded.get_coin_value_unsafe(),
+        },
+    ))
+}
+
 fn event_record(ctx: &TxContext<'_>, event_seq: usize, event: &Event) -> EventRecord {
     let event_type = format_type_tag(&TypeTag::Struct(Box::new(event.type_.clone())));
     let mut data = Map::new();
@@ -1330,17 +1593,76 @@ mod tests {
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
 
-        let result = extract_checkpoint(&decompressed).unwrap();
+        let extracted = extract_checkpoint_data(&decompressed).unwrap();
+        let result = serde_json::to_string(&extracted).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
         assert_eq!(parsed["transactions"].as_array().unwrap().len(), 6);
         assert_eq!(parsed["objectChanges"].as_array().unwrap().len(), 16);
         assert_eq!(parsed["dependencies"].as_array().unwrap().len(), 18);
+        assert_eq!(parsed["balanceChanges"].as_array().unwrap().len(), 6);
         assert!(parsed["commands"].as_array().unwrap().len() > 0);
         assert!(parsed["systemTransactions"].as_array().unwrap().len() > 0);
         assert_eq!(parsed["checkpoint"]["epoch"], "858");
         assert!(parsed["transactions"][0]["sender"]
             .as_str()
             .is_some_and(|sender| sender.starts_with("0x")));
+
+        let actual_balance_changes = extracted
+            .balance_changes
+            .iter()
+            .map(|change| {
+                (
+                    change.address.as_str(),
+                    change.coin_type.as_str(),
+                    change.amount.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected_balance_changes = vec![
+            (
+                "0x91b0f1e07c627edba3426ff311fd7b19a618cb3b7395a34dc687dac61ce63bc5",
+                "0xaafb102dd0902f5055cadecd687fb5b71ca82ef0e0285d90afde828ec58ca96b::btc::BTC",
+                "1903",
+            ),
+            (
+                "0x91b0f1e07c627edba3426ff311fd7b19a618cb3b7395a34dc687dac61ce63bc5",
+                "0xe1b45a0e641b9955a20aa0ad1c1f4ad86aad8afb07296d4085e349a50e90bdca::blue::BLUE",
+                "226",
+            ),
+            (
+                "0xe98aaadcdf0dfdbaf182b91269566adc413401c423229bfc4b690e884e25e3ee",
+                "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
+                "-509880",
+            ),
+            (
+                "0x91b0f1e07c627edba3426ff311fd7b19a618cb3b7395a34dc687dac61ce63bc5",
+                "0x876a4b7bce8aeaef60464c11f4026903e9afacab79b9b142686158aa86560b50::xbtc::XBTC",
+                "1880",
+            ),
+            (
+                "0x91b0f1e07c627edba3426ff311fd7b19a618cb3b7395a34dc687dac61ce63bc5",
+                "0xd1b72982e40348d069bb1ff701e634c117bb5f741f44dff91e472d3b01461e55::stsui::STSUI",
+                "4",
+            ),
+            (
+                "0x91b0f1e07c627edba3426ff311fd7b19a618cb3b7395a34dc687dac61ce63bc5",
+                "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
+                "-1221768",
+            ),
+        ];
+        assert_eq!(actual_balance_changes, expected_balance_changes);
+        assert!(extracted
+            .balance_changes
+            .iter()
+            .all(|change| change.tx_digest.is_empty()));
+        assert!(extracted
+            .balance_changes
+            .iter()
+            .all(|change| change.checkpoint_seq == "180000005"));
+        assert!(extracted
+            .balance_changes
+            .iter()
+            .all(|change| change.timestamp == "2025-08-17T20:39:55.493Z"));
     }
 }

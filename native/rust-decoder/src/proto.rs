@@ -9,6 +9,12 @@ pub struct ProtoBalanceChange<'a> {
     pub amount: &'a str,
 }
 
+pub struct ProtoObject<'a> {
+    pub object_id: &'a str,
+    pub version: u64,
+    pub bcs: &'a [u8],
+}
+
 /// A single transaction's BCS byte ranges extracted from the proto.
 pub struct ProtoTransaction<'a> {
     pub digest: &'a str,
@@ -24,6 +30,7 @@ pub struct ProtoCheckpoint<'a> {
     pub digest: Option<&'a str>,
     pub summary_bcs: Option<&'a [u8]>,
     pub transactions: Vec<ProtoTransaction<'a>>,
+    pub objects: Vec<ProtoObject<'a>>,
 }
 
 pub struct ProtoSubscribeCheckpointsResponse<'a> {
@@ -38,6 +45,7 @@ pub fn parse_checkpoint(buf: &[u8]) -> Result<ProtoCheckpoint<'_>, &'static str>
         digest: None,
         summary_bcs: None,
         transactions: Vec::new(),
+        objects: Vec::new(),
     };
 
     let mut pos = 0;
@@ -73,6 +81,12 @@ pub fn parse_checkpoint(buf: &[u8]) -> Result<ProtoCheckpoint<'_>, &'static str>
                     result.transactions.push(tx);
                 }
             }
+            // field 7: objects (ObjectSet message)
+            (7, 2) => {
+                let (data, new_pos) = read_length_delimited(buf, pos)?;
+                pos = new_pos;
+                result.objects.extend(parse_object_set(data)?);
+            }
             // Skip all other fields
             _ => {
                 pos = skip_field(buf, pos, wire_type)?;
@@ -81,6 +95,74 @@ pub fn parse_checkpoint(buf: &[u8]) -> Result<ProtoCheckpoint<'_>, &'static str>
     }
 
     Ok(result)
+}
+
+fn parse_object_set(buf: &[u8]) -> Result<Vec<ProtoObject<'_>>, &'static str> {
+    let mut objects = Vec::new();
+    let mut pos = 0;
+
+    while pos < buf.len() {
+        let (field_number, wire_type, new_pos) = read_tag(buf, pos)?;
+        pos = new_pos;
+
+        match (field_number, wire_type) {
+            // field 1: objects (repeated Object message)
+            (1, 2) => {
+                let (data, new_pos) = read_length_delimited(buf, pos)?;
+                pos = new_pos;
+                if let Some(object) = parse_object(data) {
+                    objects.push(object);
+                }
+            }
+            _ => {
+                pos = skip_field(buf, pos, wire_type)?;
+            }
+        }
+    }
+
+    Ok(objects)
+}
+
+fn parse_object(buf: &[u8]) -> Option<ProtoObject<'_>> {
+    let mut object_id = "";
+    let mut version = 0;
+    let mut bcs = None;
+
+    let mut pos = 0;
+    while pos < buf.len() {
+        let (field_number, wire_type, new_pos) = read_tag(buf, pos).ok()?;
+        pos = new_pos;
+
+        match (field_number, wire_type) {
+            // field 1: bcs (Bcs message)
+            (1, 2) => {
+                let (data, new_pos) = read_length_delimited(buf, pos).ok()?;
+                pos = new_pos;
+                bcs = extract_bcs_value_field(data);
+            }
+            // field 2: object_id
+            (2, 2) => {
+                let (data, new_pos) = read_length_delimited(buf, pos).ok()?;
+                pos = new_pos;
+                object_id = std::str::from_utf8(data).unwrap_or("");
+            }
+            // field 3: version
+            (3, 0) => {
+                let (value, new_pos) = read_varint(buf, pos).ok()?;
+                pos = new_pos;
+                version = value;
+            }
+            _ => {
+                pos = skip_field(buf, pos, wire_type).ok()?;
+            }
+        }
+    }
+
+    Some(ProtoObject {
+        object_id,
+        version,
+        bcs: bcs?,
+    })
 }
 
 /// Parse an ExecutedTransaction message.
