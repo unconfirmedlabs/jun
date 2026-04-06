@@ -99,7 +99,25 @@ pub fn parse_checkpoint(buf: &[u8]) -> Result<ProtoCheckpoint<'_>, &'static str>
         }
     }
 
+    // Compute checkpoint digest from summary BCS if available and digest not already set
+    if result.digest.is_none() {
+        if let Some(summary_bcs) = result.summary_bcs {
+            result.digest = Some(compute_checkpoint_digest(summary_bcs));
+        }
+    }
+
     Ok(result)
+}
+
+/// Compute checkpoint digest: BLAKE2b-256("CheckpointSummary::" + BCS), base58 encoded.
+fn compute_checkpoint_digest(summary_bcs: &[u8]) -> String {
+    use blake2::{digest::consts::U32, Blake2b, Digest};
+    type Blake2b256 = Blake2b<U32>;
+    let mut hasher = Blake2b256::new();
+    hasher.update(b"CheckpointSummary::");
+    hasher.update(summary_bcs);
+    let hash = hasher.finalize();
+    bs58::encode(&hash).into_string()
 }
 
 fn parse_object_set(buf: &[u8]) -> Result<Vec<ProtoObject<'_>>, &'static str> {
