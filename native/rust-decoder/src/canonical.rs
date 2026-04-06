@@ -747,7 +747,7 @@ fn canonical_input(input: &CallArg) -> CanonicalInput {
             mutability: None,
             initial_shared_version: None,
             amount: funds_withdrawal_amount(withdrawal),
-            coin_type: Some(format_type_tag(&withdrawal.type_arg.to_type_tag())),
+            coin_type: Some(withdrawal.type_arg.to_type_tag().to_canonical_string(true)),
             source: Some(match withdrawal.withdraw_from {
                 WithdrawFrom::Sender => "SENDER".to_string(),
                 WithdrawFrom::Sponsor => "SPONSOR".to_string(),
@@ -807,9 +807,9 @@ fn canonical_event(event: &Event) -> CanonicalEvent {
         .type_
         .type_params
         .iter()
-        .map(format_type_tag)
+        .map(|t| t.to_canonical_string(true))
         .collect::<Vec<_>>();
-    let event_type = format_type_tag(&TypeTag::Struct(Box::new(event.type_.clone())));
+    let event_type = TypeTag::Struct(Box::new(event.type_.clone())).to_canonical_string(true);
 
     CanonicalEvent {
         package_id: event.package_id.to_string(),
@@ -935,7 +935,7 @@ fn canonical_effects(effects: &TransactionEffects) -> CanonicalEffects {
             object_type: None,
             accumulator_write: Some(CanonicalAccumulatorWrite {
                 address: write.address.address.to_string(),
-                type_: format_type_tag(&write.address.ty),
+                type_: write.address.ty.to_canonical_string(true),
                 operation: match write.operation {
                     AccumulatorOperation::Merge => "MERGE".to_string(),
                     AccumulatorOperation::Split => "SPLIT".to_string(),
@@ -1229,40 +1229,6 @@ fn timestamp_from_millis(ms: u64) -> CanonicalTimestamp {
     }
 }
 
-fn format_type_tag(tag: &TypeTag) -> String {
-    match tag {
-        TypeTag::Bool => "bool".to_string(),
-        TypeTag::U8 => "u8".to_string(),
-        TypeTag::U16 => "u16".to_string(),
-        TypeTag::U32 => "u32".to_string(),
-        TypeTag::U64 => "u64".to_string(),
-        TypeTag::U128 => "u128".to_string(),
-        TypeTag::U256 => "u256".to_string(),
-        TypeTag::Address => "address".to_string(),
-        TypeTag::Signer => "signer".to_string(),
-        TypeTag::Vector(inner) => format!("vector<{}>", format_type_tag(inner)),
-        TypeTag::Struct(struct_tag) => {
-            let params = struct_tag
-                .type_params
-                .iter()
-                .map(format_type_tag)
-                .collect::<Vec<_>>();
-            let suffix = if params.is_empty() {
-                String::new()
-            } else {
-                format!("<{}>", params.join(", "))
-            };
-
-            format!(
-                "{}::{}::{}{}",
-                format_address_bytes(&struct_tag.address.into_bytes()),
-                struct_tag.module,
-                struct_tag.name,
-                suffix
-            )
-        }
-    }
-}
 
 fn hex_string(bytes: &[u8]) -> String {
     format!(

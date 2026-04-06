@@ -283,10 +283,10 @@ struct DecodedSummary {
 }
 
 #[derive(Clone)]
-struct AccumulatorDelta {
-    address: String,
-    coin_type: String,
-    amount: i128,
+pub(crate) struct AccumulatorDelta {
+    pub address: String,
+    pub coin_type: String,
+    pub amount: i128,
 }
 
 #[derive(Clone)]
@@ -797,7 +797,7 @@ fn extract_inputs(ctx: &TxContext<'_>, tx_data: &TransactionData) -> Vec<InputRe
                 initial_shared_version: None,
                 pure_bytes: None,
                 amount: funds_withdrawal_amount(withdrawal),
-                coin_type: Some(format_type_tag(&withdrawal.type_arg.to_type_tag())),
+                coin_type: Some(format_type_tag_canonical(&withdrawal.type_arg.to_type_tag())),
                 source: Some(match withdrawal.withdraw_from {
                     WithdrawFrom::Sender => "SENDER".to_string(),
                     WithdrawFrom::Sponsor => "SPONSOR".to_string(),
@@ -1085,7 +1085,7 @@ fn extract_events(ctx: &TxContext<'_>, tx_events: &TransactionEvents) -> Vec<Eve
         .collect()
 }
 
-fn collect_balance_change_hints(
+pub(crate) fn collect_balance_change_hints(
     effects: &TransactionEffects,
     created_objects: &mut HashSet<ObjectID>,
     deleted_objects: &mut HashSet<ObjectID>,
@@ -1121,13 +1121,13 @@ fn collect_balance_change_hints(
 
         accumulator_deltas.push(AccumulatorDelta {
             address: format_address_bytes(write.address.address.as_ref()),
-            coin_type: format_type_tag(&coin_type),
+            coin_type: format_type_tag_canonical(&coin_type),
             amount: signed_amount,
         });
     }
 }
 
-fn compute_balance_changes(
+pub(crate) fn compute_balance_changes(
     objects: &[proto::ProtoObject<'_>],
     created_objects: &HashSet<ObjectID>,
     deleted_objects: &HashSet<ObjectID>,
@@ -1221,7 +1221,7 @@ fn parse_coin_object(object: &proto::ProtoObject<'_>) -> Option<(ObjectID, CoinS
         Owner::AddressOwner(address) => format_address_bytes(address.as_ref()),
         _ => return None,
     };
-    let coin_type = format_type_tag(&decoded.coin_type_maybe()?);
+    let coin_type = format_type_tag_canonical(&decoded.coin_type_maybe()?);
     let version = if object.version == 0 {
         decoded.version().value()
     } else {
@@ -1246,7 +1246,7 @@ fn parse_coin_object(object: &proto::ProtoObject<'_>) -> Option<(ObjectID, CoinS
 }
 
 fn event_record(ctx: &TxContext<'_>, event_seq: usize, event: &Event) -> EventRecord {
-    let event_type = format_type_tag(&TypeTag::Struct(Box::new(event.type_.clone())));
+    let event_type = format_type_tag_canonical(&TypeTag::Struct(Box::new(event.type_.clone())));
     let mut data = Map::new();
     data.insert(
         "packageId".to_string(),
@@ -1515,44 +1515,8 @@ fn execution_error_kind_name(error: &ExecutionErrorKind) -> String {
         .to_string()
 }
 
-fn format_type_tag(tag: &TypeTag) -> String {
-    let mut buf = String::with_capacity(64);
-    write_type_tag(tag, &mut buf);
-    buf
-}
-
-fn write_type_tag(tag: &TypeTag, buf: &mut String) {
-    use std::fmt::Write;
-    match tag {
-        TypeTag::Bool => buf.push_str("bool"),
-        TypeTag::U8 => buf.push_str("u8"),
-        TypeTag::U16 => buf.push_str("u16"),
-        TypeTag::U32 => buf.push_str("u32"),
-        TypeTag::U64 => buf.push_str("u64"),
-        TypeTag::U128 => buf.push_str("u128"),
-        TypeTag::U256 => buf.push_str("u256"),
-        TypeTag::Address => buf.push_str("address"),
-        TypeTag::Signer => buf.push_str("signer"),
-        TypeTag::Vector(inner) => {
-            buf.push_str("vector<");
-            write_type_tag(inner, buf);
-            buf.push('>');
-        }
-        TypeTag::Struct(struct_tag) => {
-            let addr = hex_string(&struct_tag.address.into_bytes());
-            let _ = write!(buf, "{}::{}::{}", addr, struct_tag.module, struct_tag.name);
-            if !struct_tag.type_params.is_empty() {
-                buf.push('<');
-                for (i, param) in struct_tag.type_params.iter().enumerate() {
-                    if i > 0 {
-                        buf.push_str(", ");
-                    }
-                    write_type_tag(param, buf);
-                }
-                buf.push('>');
-            }
-        }
-    }
+fn format_type_tag_canonical(tag: &TypeTag) -> String {
+    tag.to_canonical_string(true)
 }
 
 const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";

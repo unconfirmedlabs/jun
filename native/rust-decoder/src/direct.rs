@@ -5,16 +5,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use sui_types::balance::Balance;
 use sui_types::base_types::ObjectID;
 use sui_types::effects::{
-    AccumulatorOperation, AccumulatorValue, IDOperation, TransactionEffects,
+    IDOperation, TransactionEffects,
     TransactionEffectsAPI, TransactionEvents, UnchangedConsensusKind,
 };
 use sui_types::event::Event;
 use sui_types::execution_status::{ExecutionErrorKind, ExecutionStatus};
 use sui_types::messages_checkpoint::CheckpointSummary;
-use sui_types::object::{Object, Owner};
+use sui_types::object::Owner;
 use sui_types::transaction::{
     Argument, CallArg, Command, ObjectArg, Reservation,
     SharedObjectMutability, TransactionData, TransactionDataAPI, TransactionKind, WithdrawFrom,
@@ -376,111 +375,55 @@ pub fn extract_and_write_binary(
         }
     }
 
-    // ── Balance changes (uses existing aggregation logic) ──
+    // ── Balance changes — reuse proven logic from extract.rs ──
     profile.extract_records_ns = t_extract.elapsed().as_nanos() as u64;
 
     let t_balance = Instant::now();
     let mut created_objects = HashSet::new();
     let mut deleted_objects = HashSet::new();
-    let mut acc_deltas: Vec<(String, String, i128)> = Vec::new(); // (address, coin_type, amount)
+    let mut accumulator_deltas = Vec::new();
 
     for tx in &txs {
         let Some(effects) = &tx.effects else { continue };
-        for change in effects.object_changes() {
-            if change.input_version.is_none() && change.output_version.is_some() {
-                created_objects.insert(change.id);
-            }
-            if change.output_version.is_none() {
-                deleted_objects.insert(change.id);
-            }
-        }
-        for (_, write) in effects.accumulator_updates() {
-            let Some(coin_type) = Balance::maybe_get_balance_type_param(&write.address.ty) else { continue };
-            let amount = match write.value {
-                AccumulatorValue::Integer(value) => value as i128,
-                AccumulatorValue::IntegerTuple(_, _) | AccumulatorValue::EventDigest(_) => continue,
-            };
-            let signed = match write.operation {
-                AccumulatorOperation::Merge => amount,
-                AccumulatorOperation::Split => -amount,
-            };
-            if signed != 0 {
-                acc_deltas.push((
-                    format_address_hex(write.address.address.as_ref()),
-                    format_type_tag_str(&coin_type),
-                    signed,
-                ));
-            }
-        }
+        crate::extract::collect_balance_change_hints(
+            effects,
+            &mut created_objects,
+            &mut deleted_objects,
+            &mut accumulator_deltas,
+        );
     }
 
-    // Aggregate balance changes
-    let mut bal_map: HashMap<(String, String), i128> = HashMap::new();
-    let mut bal_order: Vec<(String, String)> = Vec::new();
+    let checkpoint_seq_str = summary.as_ref().map(|s| s.sequence_number.to_string()).unwrap_or_else(|| "0".to_string());
+    let checkpoint_ts_str = summary.as_ref().map(|s| {
+        let mut buf = [0u8; 28];
+        let ms = s.timestamp_ms;
+        let secs = (ms as i64).div_euclid(1_000);
+        let millis = (ms as i64).rem_euclid(1_000);
+        let days = secs.div_euclid(86400);
+        let time_secs = secs.rem_euclid(86400);
+        let (y, m, d) = days_to_ymd(days as i32 + 719468);
+        let n = write_iso_to_buf(&mut buf, y, m as u32, d as u32, (time_secs / 3600) as u32, ((time_secs % 3600) / 60) as u32, (time_secs % 60) as u32, millis as u32);
+        unsafe { std::str::from_utf8_unchecked(&buf[..n]) }.to_string()
+    }).unwrap_or_default();
 
-    for (addr, ct, amount) in acc_deltas {
-        let key = (addr, ct);
-        if !bal_map.contains_key(&key) {
-            bal_order.push(key.clone());
-        }
-        *bal_map.entry(key).or_default() += amount;
-    }
-
-    // Process coin objects
-    let mut coin_versions: HashMap<ObjectID, Vec<(u64, String, String, u64)>> = HashMap::new();
-    let mut object_order = Vec::new();
-    for object in &parsed.objects {
-        if !looks_like_coin_object(object.bcs) { continue; }
-        let Some((oid, ver, owner, ct, bal)) = parse_coin_object_minimal(object) else { continue };
-        if !coin_versions.contains_key(&oid) { object_order.push(oid); }
-        coin_versions.entry(oid).or_default().push((ver, owner, ct, bal));
-    }
-    for oid in object_order {
-        let Some(mut versions) = coin_versions.remove(&oid) else { continue };
-        versions.sort_by_key(|v| v.0);
-        match versions.as_slice() {
-            [(_, owner, ct, bal)] => {
-                let delta = if created_objects.contains(&oid) {
-                    *bal as i128
-                } else if deleted_objects.contains(&oid) {
-                    -(*bal as i128)
-                } else {
-                    continue;
-                };
-                let key = (owner.clone(), ct.clone());
-                if !bal_map.contains_key(&key) { bal_order.push(key.clone()); }
-                *bal_map.entry(key).or_default() += delta;
-            }
-            [input, .., output] => {
-                if input.1 == output.1 {
-                    let delta = output.3 as i128 - input.3 as i128;
-                    let key = (input.1.clone(), input.2.clone());
-                    if !bal_map.contains_key(&key) { bal_order.push(key.clone()); }
-                    *bal_map.entry(key).or_default() += delta;
-                } else {
-                    let k1 = (input.1.clone(), input.2.clone());
-                    if !bal_map.contains_key(&k1) { bal_order.push(k1.clone()); }
-                    *bal_map.entry(k1).or_default() -= input.3 as i128;
-                    let k2 = (output.1.clone(), output.2.clone());
-                    if !bal_map.contains_key(&k2) { bal_order.push(k2.clone()); }
-                    *bal_map.entry(k2).or_default() += output.3 as i128;
-                }
-            }
-            [] => {}
-        }
-    }
+    let balance_changes = crate::extract::compute_balance_changes(
+        &parsed.objects,
+        &created_objects,
+        &deleted_objects,
+        &accumulator_deltas,
+        &checkpoint_seq_str,
+        &checkpoint_ts_str,
+    );
 
     let mut bal_count = 0u32;
-    for (addr, ct) in &bal_order {
-        let amount = bal_map.get(&(addr.clone(), ct.clone())).copied().unwrap_or(0);
-        if amount == 0 { continue; }
+    for bc in &balance_changes {
         // Binary format: tx_digest, checkpoint_seq, address, coin_type, amount, timestamp
-        w.write_empty_str(); // tx_digest
-        write_checkpoint_seq(&mut w, &summary);
-        w.write_str(addr);
-        w.write_str(ct);
-        w.write_i128_dec(amount);
-        write_timestamp(&mut w, &summary);
+        w.write_str(&bc.tx_digest);
+        w.write_str(&bc.checkpoint_seq);
+        w.write_str(&bc.address);
+        w.write_str(&bc.coin_type);
+        w.write_str(&bc.amount);
+        w.write_str(&bc.timestamp);
         bal_count += 1;
     }
 
@@ -726,7 +669,7 @@ fn write_input_fields(w: &mut BinaryWriter, input: &CallArg) {
             match withdrawal.reservation {
                 Reservation::MaxAmountU64(v) => w.write_u64_dec(v),
             }
-            let ct = format_type_tag_str(&withdrawal.type_arg.to_type_tag());
+            let ct = format_type_tag_canonical(&withdrawal.type_arg.to_type_tag());
             w.write_str(&ct);
             match withdrawal.withdraw_from {
                 WithdrawFrom::Sender => w.write_str("SENDER"),
@@ -743,7 +686,7 @@ fn write_event(
     event: &Event,
     summary: &Option<CheckpointSummary>,
 ) {
-    let event_type = format_type_tag_str(&TypeTag::Struct(Box::new(event.type_.clone())));
+    let event_type = format_type_tag_canonical(&TypeTag::Struct(Box::new(event.type_.clone())));
     // Binary format order: handler_name, checkpoint_seq, tx_digest, event_seq, sender, timestamp, data
     w.write_str(&event_type); // handler_name
     write_checkpoint_seq(w, summary); // checkpoint_seq only
@@ -923,60 +866,7 @@ fn format_address_hex(bytes: &[u8]) -> String {
     s
 }
 
-fn format_type_tag_str(tag: &TypeTag) -> String {
-    let mut buf = String::with_capacity(64);
-    write_type_tag_to_string(tag, &mut buf);
-    buf
+fn format_type_tag_canonical(tag: &TypeTag) -> String {
+    tag.to_canonical_string(true)
 }
 
-fn write_type_tag_to_string(tag: &TypeTag, buf: &mut String) {
-    use std::fmt::Write;
-    match tag {
-        TypeTag::Bool => buf.push_str("bool"),
-        TypeTag::U8 => buf.push_str("u8"),
-        TypeTag::U16 => buf.push_str("u16"),
-        TypeTag::U32 => buf.push_str("u32"),
-        TypeTag::U64 => buf.push_str("u64"),
-        TypeTag::U128 => buf.push_str("u128"),
-        TypeTag::U256 => buf.push_str("u256"),
-        TypeTag::Address => buf.push_str("address"),
-        TypeTag::Signer => buf.push_str("signer"),
-        TypeTag::Vector(inner) => {
-            buf.push_str("vector<");
-            write_type_tag_to_string(inner, buf);
-            buf.push('>');
-        }
-        TypeTag::Struct(st) => {
-            let addr = format_address_hex(&st.address.into_bytes());
-            let _ = write!(buf, "{}::{}::{}", addr, st.module, st.name);
-            if !st.type_params.is_empty() {
-                buf.push('<');
-                for (i, p) in st.type_params.iter().enumerate() {
-                    if i > 0 { buf.push_str(", "); }
-                    write_type_tag_to_string(p, buf);
-                }
-                buf.push('>');
-            }
-        }
-    }
-}
-
-fn looks_like_coin_object(raw: &[u8]) -> bool {
-    raw.len() >= 2 && raw[0] == 0 && matches!(raw[1], 1 | 3)
-}
-
-fn parse_coin_object_minimal(object: &proto::ProtoObject<'_>) -> Option<(ObjectID, u64, String, String, u64)> {
-    let decoded = bcs::from_bytes::<Object>(object.bcs).ok()?;
-    let owner = match decoded.owner() {
-        Owner::AddressOwner(address) => format_address_hex(address.as_ref()),
-        _ => return None,
-    };
-    let coin_type = format_type_tag_str(&decoded.coin_type_maybe()?);
-    let version = if object.version == 0 { decoded.version().value() } else { object.version };
-    let oid = if object.object_id.is_empty() {
-        decoded.id()
-    } else {
-        object.object_id.parse().ok().unwrap_or_else(|| decoded.id())
-    };
-    Some((oid, version, owner, coin_type, decoded.get_coin_value_unsafe()))
-}
