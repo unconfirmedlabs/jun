@@ -1,12 +1,11 @@
 /**
- * Archive checkpoint source — historical backfill with native or worker fetch/decode.
+ * Archive checkpoint source — historical backfill via worker pool.
  *
- * Streaming pipeline architecture:
- *   Native Rust range downloader or JS worker pool → Ordered drain → yield
+ * Workers own fetch + decode (Rust binary FFI when available, JS fallback).
+ * Main thread receives decoded results, optionally parses binary, yields checkpoints.
  */
 import { checkpointFromGrpcResponse } from "../../checkpoint-response.ts";
 import { parseBinaryCheckpoint } from "../../binary-parser.ts";
-import { downloadAndDecodeRange, hasDownloadAndDecodeRange } from "../../checkpoint-native-decoder.ts";
 import { createCheckpointDecoderPool, type CheckpointDecoderPool } from "../../checkpoint-decoder-pool.ts";
 import { createLogger } from "../../logger.ts";
 import type { Logger } from "../../logger.ts";
@@ -145,20 +144,12 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
       const fetchConcurrency = config.concurrency ?? 50;
       const workerCount = config.workers ?? Math.max(1, Math.min(4, (navigator.hardwareConcurrency ?? 4) - 1));
       const balanceCoinTypes = config.balanceCoinTypes;
-      const useNativeRange = hasDownloadAndDecodeRange();
 
-      if (!useNativeRange) {
-        decoderPool = createCheckpointDecoderPool(workerCount, {
-          balanceCoinTypes,
-        });
-      }
+      decoderPool = createCheckpointDecoderPool(workerCount, {
+        balanceCoinTypes,
+      });
       log.info(
-        {
-          workers: workerCount,
-          fetchConcurrency,
-          from: config.from.toString(),
-          mode: useNativeRange ? "native-range" : "worker-pool",
-        },
+        { workers: workerCount, fetchConcurrency, from: config.from.toString() },
         "archive source starting",
       );
 
@@ -207,120 +198,44 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
       };
 
       try {
-        if (useNativeRange) {
-          log.info({ concurrency: fetchConcurrency }, "archive source using native range downloader");
+        const pool = decoderPool!;
+        const concurrencyPerWorker = Math.max(1, Math.ceil(fetchConcurrency / workerCount));
 
-          const queue: Array<{ seq: bigint; binary: Uint8Array }> = [];
-          let wakeDrain: (() => void) | null = null;
-          let rangeDone = false;
-          let rangeError: Error | null = null;
+        for await (const result of pool.stream(config.from, endSeq, config.archiveUrl, concurrencyPerWorker)) {
+          if (stopped) break;
+          const parseStart = performance.now();
 
-          const signalDrain = () => {
-            if (wakeDrain) {
-              const resolve = wakeDrain;
-              wakeDrain = null;
-              resolve();
-            }
-          };
-
-          const waitForDrain = () => new Promise<void>(resolve => {
-            wakeDrain = resolve;
-          });
-
-          const rangePromise = downloadAndDecodeRange(
-            config.archiveUrl,
-            config.from,
-            endSeq,
-            fetchConcurrency,
-            (seq, binary) => {
-              if (stopped) return;
-              queue.push({ seq, binary });
-              signalDrain();
-            },
-          ).then(() => {
-            rangeDone = true;
-            signalDrain();
-          }).catch(error => {
-            rangeError = error instanceof Error ? error : new Error(String(error));
-            rangeDone = true;
-            signalDrain();
-          });
-
-          while ((!rangeDone || queue.length > 0) && !stopped) {
-            if (rangeError) throw rangeError;
-            if (queue.length === 0) {
-              if (rangeDone) break; // No more results coming
-              await waitForDrain();
-              continue;
-            }
-
-            const result = queue.shift()!;
-            if (totalProcessed < 5) console.error(`[archive-drain] processing seq=${result.seq} queue=${queue.length} rangeDone=${rangeDone}`);
-            const parseStart = performance.now();
-            const checkpoint = checkpointFromBinaryResult(
+          let checkpoint: Checkpoint;
+          if (result.binary) {
+            checkpoint = checkpointFromBinaryResult(
               result.binary,
               config.enabledProcessors,
               balanceCoinTypes,
             );
-            parseTime += performance.now() - parseStart;
-            totalProcessed += 1;
-
-            if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
-              const elapsed = (performance.now() - profilingStart) / 1000;
-              const rate = Math.round(totalProcessed / Math.max(elapsed, 0.001));
-              const avgParse = (parseTime / totalProcessed).toFixed(2);
-              console.error(
-                `[archive-main] ${totalProcessed} checkpoints ${rate} checkpoint/s avg_parse=${avgParse}ms pending=${pending.size}`,
-              );
-            }
-
-            for await (const ready of emitCheckpoint(result.seq, checkpoint)) {
-              yield ready;
-            }
+          } else if (result.payload) {
+            checkpoint = checkpointFromGrpcResponse(
+              result.payload.decoded,
+              "backfill",
+              result.payload.precomputedBalanceChanges,
+            );
+          } else {
+            throw new Error(`Checkpoint ${result.seq} decode returned no payload`);
           }
 
-          await rangePromise;
-          if (rangeError) throw rangeError;
-        } else {
-          const pool = decoderPool;
-          const concurrencyPerWorker = Math.max(1, Math.ceil(fetchConcurrency / workerCount));
+          parseTime += performance.now() - parseStart;
+          totalProcessed += 1;
 
-          for await (const result of pool.stream(config.from, endSeq, config.archiveUrl, concurrencyPerWorker)) {
-            if (stopped) break;
-            const parseStart = performance.now();
+          if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
+            const elapsed = (performance.now() - profilingStart) / 1000;
+            const rate = Math.round(totalProcessed / Math.max(elapsed, 0.001));
+            const avgParse = (parseTime / totalProcessed).toFixed(2);
+            console.error(
+              `[archive-main] ${totalProcessed} checkpoints ${rate} checkpoint/s avg_parse=${avgParse}ms pending=${pending.size}`,
+            );
+          }
 
-            let checkpoint: Checkpoint;
-            if (result.binary) {
-              checkpoint = checkpointFromBinaryResult(
-                result.binary,
-                config.enabledProcessors,
-                balanceCoinTypes,
-              );
-            } else if (result.payload) {
-              checkpoint = checkpointFromGrpcResponse(
-                result.payload.decoded,
-                "backfill",
-                result.payload.precomputedBalanceChanges,
-              );
-            } else {
-              throw new Error(`Checkpoint ${result.seq} decode returned no payload`);
-            }
-
-            parseTime += performance.now() - parseStart;
-            totalProcessed += 1;
-
-            if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
-              const elapsed = (performance.now() - profilingStart) / 1000;
-              const rate = Math.round(totalProcessed / Math.max(elapsed, 0.001));
-              const avgParse = (parseTime / totalProcessed).toFixed(2);
-              console.error(
-                `[archive-main] ${totalProcessed} checkpoints ${rate} checkpoint/s avg_parse=${avgParse}ms pending=${pending.size}`,
-              );
-            }
-
-            for await (const ready of emitCheckpoint(result.seq, checkpoint)) {
-              yield ready;
-            }
+          for await (const ready of emitCheckpoint(result.seq, checkpoint)) {
+            yield ready;
           }
         }
       } finally {
