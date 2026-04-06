@@ -2487,8 +2487,8 @@ pipelineCmd
       const { createGrpcClient } = await import("./grpc.ts");
       const client = createGrpcClient({ url: grpcUrl });
       const epochInfo = await client.getEpoch(BigInt(opts.epoch));
-      from = epochInfo.firstCheckpoint;
-      to = epochInfo.lastCheckpoint;
+      from = BigInt(epochInfo.firstCheckpoint!);
+      to = BigInt(epochInfo.lastCheckpoint!);
       client.close();
       if (!from || !to) {
         console.error(`[jun] error: could not resolve epoch ${opts.epoch}`);
