@@ -43,6 +43,8 @@ export interface CheckpointDecoderPoolOptions {
 export interface CheckpointDecoderPool {
   /** Decode a compressed checkpoint in a worker thread. */
   decode(seq: bigint, compressed: Uint8Array): Promise<DecodeResult>;
+  /** Decode a checkpoint from a cached file path (worker reads from disk). */
+  decodeCached(seq: bigint, cachePath: string): Promise<DecodeResult>;
   /** Assign checkpoint ranges to workers and stream decoded archive results. */
   stream(
     from: bigint,
@@ -262,6 +264,23 @@ export function createCheckpointDecoderPool(
           },
           [compressed.buffer], // transfer compressed bytes (zero-copy to worker)
         );
+      });
+    },
+
+    decodeCached(seq: bigint, cachePath: string): Promise<DecodeResult> {
+      return new Promise((resolve, reject) => {
+        const id = nextId;
+        nextId = nextId >= MAX_ID ? 0 : nextId + 1;
+        pending.set(id, { resolve, reject });
+
+        const worker = workers[id % size]!;
+        // Simple object fast path — all primitives, no ArrayBuffer transfer needed
+        worker.postMessage({
+          type: "decode-cached",
+          id,
+          seq: seq.toString(),
+          cachePath,
+        });
       });
     },
 

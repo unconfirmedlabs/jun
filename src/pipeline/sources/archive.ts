@@ -204,7 +204,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
         // ─── Phase 1: Fetch all compressed checkpoints to disk cache ────
         // Single connection pool on main thread = maximum CDN throughput.
         // Cache dir: ~/.jun/cache/checkpoints/ (or XDG_CACHE_HOME)
-        const { mkdirSync, readFileSync, existsSync } = await import("fs");
+        const { mkdirSync, existsSync } = await import("fs");
         const { join } = await import("path");
         const { homedir } = await import("os");
         const cacheBase = process.env.XDG_CACHE_HOME ?? join(homedir(), ".jun", "cache");
@@ -268,22 +268,11 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
         let allDecodesDone = false;
         const decodePromises: Promise<void>[] = [];
 
-        // Read all compressed files into memory first (fast sequential I/O),
-        // then fire all decodes through the pool
-        const cachedBytes = new Map<bigint, Uint8Array>();
-        const readStart = performance.now();
+        // Workers read cached files directly from disk — no main thread I/O,
+        // no postMessage transfer of compressed bytes. Just send the file path.
         for (let seq = config.from; seq <= endSeq && !stopped; seq++) {
-          try {
-            cachedBytes.set(seq, new Uint8Array(readFileSync(join(cacheDir, `${seq}.binpb.zst`))));
-          } catch {}
-        }
-        const readElapsed = (performance.now() - readStart) / 1000;
-        log.info({ files: cachedBytes.size, elapsed: `${readElapsed.toFixed(1)}s` }, "disk read complete");
-
-        for (const [seq, bytes] of cachedBytes) {
-          if (stopped) break;
-          const p = pool.decode(seq, bytes).then(result => {
-            cachedBytes.delete(seq); // Free compressed bytes after decode
+          const cachePath = join(cacheDir, `${seq}.binpb.zst`);
+          const p = pool.decodeCached(seq, cachePath).then(result => {
 
             let checkpoint: Checkpoint;
             if (result.binary) {

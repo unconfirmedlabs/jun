@@ -33,6 +33,13 @@ interface DecodeRequestMessage {
   useBinary: boolean;
 }
 
+interface DecodeFromCacheMessage {
+  type: "decode-cached";
+  id: number;
+  seq: string;
+  cachePath: string;
+}
+
 interface AssignRangeMessage {
   type: "assign";
   workerIndex: number;
@@ -209,12 +216,41 @@ async function handleRangeAssignment(message: AssignRangeMessage): Promise<void>
   postMessage({ type: "done" });
 }
 
-self.onmessage = async (event: MessageEvent) => {
-  const msg = event.data as DecodeRequestMessage | AssignRangeMessage;
+async function handleDecodeCached(msg: DecodeFromCacheMessage): Promise<void> {
+  const { id, seq, cachePath } = msg;
+  try {
+    const { readFileSync } = await import("fs");
+    const compressed = new Uint8Array(readFileSync(cachePath));
 
-  if (msg && typeof msg === "object" && "type" in msg && msg.type === "assign") {
-    await handleRangeAssignment(msg);
-    return;
+    if (isNativeCheckpointDecoderAvailable()) {
+      const binary = decodeArchiveCheckpointBinary(compressed);
+      if (binary) {
+        postBinaryById(id, binary);
+        return;
+      }
+    }
+
+    // JS fallback
+    const sequenceNumber = BigInt(seq);
+    const payload = await decodeCheckpointJson(compressed, sequenceNumber, null);
+    postMessage(`${id}\n${JSON.stringify(payload)}`);
+  } catch (err) {
+    postMessage({ id, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+self.onmessage = async (event: MessageEvent) => {
+  const msg = event.data;
+
+  if (msg && typeof msg === "object" && "type" in msg) {
+    if (msg.type === "assign") {
+      await handleRangeAssignment(msg as AssignRangeMessage);
+      return;
+    }
+    if (msg.type === "decode-cached") {
+      await handleDecodeCached(msg as DecodeFromCacheMessage);
+      return;
+    }
   }
 
   await handleDecodeRequest(msg as DecodeRequestMessage);
