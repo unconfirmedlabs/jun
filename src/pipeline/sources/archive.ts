@@ -268,16 +268,22 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
         let allDecodesDone = false;
         const decodePromises: Promise<void>[] = [];
 
+        // Read all compressed files into memory first (fast sequential I/O),
+        // then fire all decodes through the pool
+        const cachedBytes = new Map<bigint, Uint8Array>();
+        const readStart = performance.now();
         for (let seq = config.from; seq <= endSeq && !stopped; seq++) {
-          const cachePath = join(cacheDir, `${seq}.binpb.zst`);
-          let bytes: Uint8Array;
           try {
-            bytes = new Uint8Array(readFileSync(cachePath));
-          } catch {
-            continue;
-          }
+            cachedBytes.set(seq, new Uint8Array(readFileSync(join(cacheDir, `${seq}.binpb.zst`))));
+          } catch {}
+        }
+        const readElapsed = (performance.now() - readStart) / 1000;
+        log.info({ files: cachedBytes.size, elapsed: `${readElapsed.toFixed(1)}s` }, "disk read complete");
 
+        for (const [seq, bytes] of cachedBytes) {
+          if (stopped) break;
           const p = pool.decode(seq, bytes).then(result => {
+            cachedBytes.delete(seq); // Free compressed bytes after decode
 
             let checkpoint: Checkpoint;
             if (result.binary) {
