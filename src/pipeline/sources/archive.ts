@@ -161,6 +161,15 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
             (checkpoint as any)._enabledProcessors = config.enabledProcessors;
             (checkpoint as any)._balanceCoinTypes = balanceCoinTypes;
           } else if (result.binary) {
+            const parsed = parseBinaryCheckpoint(result.binary);
+            const processed = filterPreProcessedCheckpoint(
+              parsed.processed,
+              config.enabledProcessors,
+              balanceCoinTypes,
+            );
+            checkpoint = parsed.checkpoint;
+            (checkpoint as Checkpoint & { _preProcessed?: ProcessedCheckpoint })._preProcessed = processed;
+          } else if (result.payload) {
             checkpoint = checkpointFromGrpcResponse(
               result.payload.decoded,
               "backfill",
