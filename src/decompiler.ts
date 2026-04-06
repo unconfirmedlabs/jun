@@ -1,8 +1,5 @@
 /**
- * Move bytecode decompiler — unified API with dual target.
- *
- * Automatically selects the native (CLI/WASM-from-disk) backend on server
- * and the browser WASM backend in browser environments.
+ * Move bytecode decompiler — server-only, uses native CLI or WASM-from-disk.
  *
  * Usage:
  *   import { decompile, decompileModule } from "jun/decompiler";
@@ -11,37 +8,16 @@
  */
 import type { Network } from "./package-reader.ts";
 
-// ---------------------------------------------------------------------------
-// Backend selection
-// ---------------------------------------------------------------------------
-
-const isBrowser = typeof (globalThis as Record<string, unknown>).document !== "undefined";
-
-async function getBackend(): Promise<{ decompile: (bytecode: Uint8Array) => Promise<string> }> {
-  if (isBrowser) {
-    return await import("./decompiler-wasm.ts");
-  }
-  return await import("./decompiler-native.ts");
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /**
  * Decompile raw Move bytecode into reconstructed Move source.
  */
 export async function decompile(bytecode: Uint8Array): Promise<string> {
-  const backend = await getBackend();
+  const backend = await import("./decompiler-native.ts");
   return backend.decompile(bytecode);
 }
 
 /**
  * Fetch a module from on-chain and decompile it.
- *
- * @param packageId - The Sui package object ID (0x...)
- * @param moduleName - The module name within the package
- * @param network - Network to fetch from (default: "mainnet")
  */
 export async function decompileModule(
   packageId: string,

@@ -10,9 +10,6 @@
     "./pipeline/types": "./src/pipeline/types.ts",
     "./pipeline/config": "./src/pipeline/config-parser.ts",
     "./pipeline/sources/grpc": "./src/pipeline/sources/grpc.ts",
-    "./pipeline/sources/grpc-web": "./src/pipeline/sources/grpc-web.ts",
-    "./pipeline/sources/archive-web": "./src/pipeline/sources/archive-web.ts",
-    "./pipeline/destinations/sql-web": "./src/pipeline/destinations/sql-web.ts",
     "./pipeline/sources/archive": "./src/pipeline/sources/archive.ts",
     "./pipeline/processors/events": "./src/pipeline/processors/events.ts",
     "./pipeline/processors/balanceChanges": "./src/pipeline/processors/balanceChanges.ts",
@@ -35,8 +32,6 @@
     "./logger": "./src/logger.ts",
     "./normalize": "./src/normalize.ts",
     "./decompiler": "./src/decompiler.ts",
-    "./decompiler/wasm": "./src/decompiler-wasm.ts",
-    "./decompiler/native": "./src/decompiler-native.ts",
     "./package-reader": "./src/package-reader.ts"
   },
   "bin": {
@@ -65,7 +60,6 @@
     "@unconfirmed/kei": "0.0.9",
     "@unconfirmed/sui-bcs": "file:../sui-bcs",
     "commander": "^14.0.3",
-    "fzstd": "^0.1.1",
     "js-yaml": "^4.1.1",
     "nats": "^2.29.3",
     "p-map": "^7.0.4",
