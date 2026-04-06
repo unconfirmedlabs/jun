@@ -1,11 +1,12 @@
 /**
- * Archive checkpoint source — historical backfill with worker-owned fetch/decode.
+ * Archive checkpoint source — historical backfill with native or worker fetch/decode.
  *
  * Streaming pipeline architecture:
- *   Worker fetch+decode (N workers) → Ordered drain → yield
+ *   Native Rust range downloader or JS worker pool → Ordered drain → yield
  */
 import { checkpointFromGrpcResponse } from "../../checkpoint-response.ts";
 import { parseBinaryCheckpoint } from "../../binary-parser.ts";
+import { downloadAndDecodeRange, hasDownloadAndDecodeRange } from "../../checkpoint-native-decoder.ts";
 import { createCheckpointDecoderPool, type CheckpointDecoderPool } from "../../checkpoint-decoder-pool.ts";
 import { createLogger } from "../../logger.ts";
 import type { Logger } from "../../logger.ts";
@@ -79,6 +80,59 @@ function filterPreProcessedCheckpoint(
   };
 }
 
+function checkpointFromBinaryResult(
+  binary: Uint8Array,
+  enabledProcessors: ArchiveSourceConfig["enabledProcessors"],
+  balanceCoinTypes: string[] | "*" | undefined,
+): Checkpoint {
+  const deferParsing = process.env.DEFER_BINARY_PARSING !== "0";
+  if (deferParsing) {
+    const view = new DataView(binary.buffer, binary.byteOffset, binary.byteLength);
+    let pos = 40;
+
+    const seqLen = view.getUint16(pos, true);
+    pos += 2;
+    const seqStr = textDecoder.decode(binary.subarray(pos, pos + seqLen));
+    pos += seqLen;
+
+    const epochLen = view.getUint16(pos, true);
+    pos += 2;
+    const epochStr = textDecoder.decode(binary.subarray(pos, pos + epochLen));
+
+    const checkpoint: Checkpoint = {
+      sequenceNumber: BigInt(seqStr),
+      timestamp: new Date(),
+      transactions: [],
+      source: "backfill",
+      epoch: BigInt(epochStr),
+      digest: "",
+      previousDigest: null,
+      contentDigest: null,
+      totalNetworkTransactions: 0n,
+      epochRollingGasCostSummary: {
+        computationCost: "0",
+        storageCost: "0",
+        storageRebate: "0",
+        nonRefundableStorageFee: "0",
+      },
+    };
+    (checkpoint as any)._rawBinary = binary;
+    (checkpoint as any)._enabledProcessors = enabledProcessors;
+    (checkpoint as any)._balanceCoinTypes = balanceCoinTypes;
+    return checkpoint;
+  }
+
+  const parsed = parseBinaryCheckpoint(binary);
+  const processed = filterPreProcessedCheckpoint(
+    parsed.processed,
+    enabledProcessors,
+    balanceCoinTypes,
+  );
+  const checkpoint = parsed.checkpoint;
+  (checkpoint as Checkpoint & { _preProcessed?: ProcessedCheckpoint })._preProcessed = processed;
+  return checkpoint;
+}
+
 export function createArchiveSource(config: ArchiveSourceConfig): Source {
   const log: Logger = createLogger().child({ component: "source:archive" });
   let stopped = false;
@@ -91,11 +145,22 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
       const fetchConcurrency = config.concurrency ?? 50;
       const workerCount = config.workers ?? Math.max(1, Math.min(4, (navigator.hardwareConcurrency ?? 4) - 1));
       const balanceCoinTypes = config.balanceCoinTypes;
+      const useNativeRange = hasDownloadAndDecodeRange();
 
-      decoderPool = createCheckpointDecoderPool(workerCount, {
-        balanceCoinTypes,
-      });
-      log.info({ workers: workerCount, fetchConcurrency, from: config.from.toString() }, "archive source starting");
+      if (!useNativeRange) {
+        decoderPool = createCheckpointDecoderPool(workerCount, {
+          balanceCoinTypes,
+        });
+      }
+      log.info(
+        {
+          workers: workerCount,
+          fetchConcurrency,
+          from: config.from.toString(),
+          mode: useNativeRange ? "native-range" : "worker-pool",
+        },
+        "archive source starting",
+      );
 
       // Determine upper bound
       let to = config.to;
@@ -115,9 +180,6 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
       }
 
       log.info({ from: config.from.toString(), to: to.toString(), total: (to - config.from + 1n).toString() }, "backfill range");
-
-      const pool = decoderPool;
-      const concurrencyPerWorker = Math.max(1, Math.ceil(fetchConcurrency / workerCount));
       const pending = new Map<bigint, Checkpoint>();
       let watermark = config.from - 1n;
       const endSeq = to;
@@ -126,81 +188,135 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
       let totalProcessed = 0;
       const profilingStart = performance.now();
 
+      const emitCheckpoint = async function* (
+        seq: bigint,
+        checkpoint: Checkpoint,
+      ): AsyncGenerator<Checkpoint> {
+        if (config.unorderedDrain) {
+          yield checkpoint;
+          return;
+        }
+
+        pending.set(seq, checkpoint);
+        while (pending.has(watermark + 1n)) {
+          watermark += 1n;
+          const ready = pending.get(watermark)!;
+          pending.delete(watermark);
+          yield ready;
+        }
+      };
+
       try {
-        for await (const result of pool.stream(config.from, endSeq, config.archiveUrl, concurrencyPerWorker)) {
-          if (stopped) break;
-          const parseStart = performance.now();
+        if (useNativeRange) {
+          log.info({ concurrency: fetchConcurrency }, "archive source using native range downloader");
 
-          let checkpoint: Checkpoint;
-          const deferParsing = process.env.DEFER_BINARY_PARSING !== "0";
-          if (result.binary && deferParsing) {
-            // Deferred parsing: read only checkpoint summary from binary header,
-            // stash raw binary for SQL writer to parse at flush time.
-            const view = new DataView(result.binary.buffer, result.binary.byteOffset, result.binary.byteLength);
-            // Skip 10 u32 header (40 bytes), then read sequenceNumber string
-            let pos = 40;
-            const seqLen = view.getUint16(pos, true); pos += 2;
-            const seqStr = textDecoder.decode(result.binary.subarray(pos, pos + seqLen)); pos += seqLen;
-            const epochLen = view.getUint16(pos, true); pos += 2;
-            const epochStr = textDecoder.decode(result.binary.subarray(pos, pos + epochLen));
+          const queue: Array<{ seq: bigint; binary: Uint8Array }> = [];
+          let wakeDrain: (() => void) | null = null;
+          let rangeDone = false;
+          let rangeError: Error | null = null;
 
-            checkpoint = {
-              sequenceNumber: BigInt(seqStr),
-              timestamp: new Date(),
-              transactions: [],
-              source: "backfill",
-              epoch: BigInt(epochStr),
-              digest: "",
-              previousDigest: null,
-              contentDigest: null,
-              totalNetworkTransactions: 0n,
-              epochRollingGasCostSummary: { computationCost: "0", storageCost: "0", storageRebate: "0", nonRefundableStorageFee: "0" },
-            };
-            // Stash raw binary — pipeline and SQL writer will parse at write time
-            (checkpoint as any)._rawBinary = result.binary;
-            (checkpoint as any)._enabledProcessors = config.enabledProcessors;
-            (checkpoint as any)._balanceCoinTypes = balanceCoinTypes;
-          } else if (result.binary) {
-            const parsed = parseBinaryCheckpoint(result.binary);
-            const processed = filterPreProcessedCheckpoint(
-              parsed.processed,
+          const signalDrain = () => {
+            if (wakeDrain) {
+              const resolve = wakeDrain;
+              wakeDrain = null;
+              resolve();
+            }
+          };
+
+          const waitForDrain = () => new Promise<void>(resolve => {
+            wakeDrain = resolve;
+          });
+
+          const rangePromise = downloadAndDecodeRange(
+            config.archiveUrl,
+            config.from,
+            endSeq,
+            fetchConcurrency,
+            (seq, binary) => {
+              if (stopped) return;
+              queue.push({ seq, binary });
+              signalDrain();
+            },
+          ).then(() => {
+            rangeDone = true;
+            signalDrain();
+          }).catch(error => {
+            rangeError = error instanceof Error ? error : new Error(String(error));
+            rangeDone = true;
+            signalDrain();
+          });
+
+          while ((!rangeDone || queue.length > 0) && !stopped) {
+            if (rangeError) throw rangeError;
+            if (queue.length === 0) {
+              await waitForDrain();
+              continue;
+            }
+
+            const result = queue.shift()!;
+            const parseStart = performance.now();
+            const checkpoint = checkpointFromBinaryResult(
+              result.binary,
               config.enabledProcessors,
               balanceCoinTypes,
             );
-            checkpoint = parsed.checkpoint;
-            (checkpoint as Checkpoint & { _preProcessed?: ProcessedCheckpoint })._preProcessed = processed;
-          } else if (result.payload) {
-            checkpoint = checkpointFromGrpcResponse(
-              result.payload.decoded,
-              "backfill",
-              result.payload.precomputedBalanceChanges,
-            );
-          } else {
-            throw new Error(`Checkpoint ${result.seq} decode returned no payload`);
+            parseTime += performance.now() - parseStart;
+            totalProcessed += 1;
+
+            if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
+              const elapsed = (performance.now() - profilingStart) / 1000;
+              const rate = Math.round(totalProcessed / Math.max(elapsed, 0.001));
+              const avgParse = (parseTime / totalProcessed).toFixed(2);
+              console.error(
+                `[archive-main] ${totalProcessed} checkpoints ${rate} checkpoint/s avg_parse=${avgParse}ms pending=${pending.size}`,
+              );
+            }
+
+            for await (const ready of emitCheckpoint(result.seq, checkpoint)) {
+              yield ready;
+            }
           }
 
-          parseTime += performance.now() - parseStart;
-          totalProcessed += 1;
+          await rangePromise;
+          if (rangeError) throw rangeError;
+        } else {
+          const pool = decoderPool;
+          const concurrencyPerWorker = Math.max(1, Math.ceil(fetchConcurrency / workerCount));
 
-          if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
-            const elapsed = (performance.now() - profilingStart) / 1000;
-            const rate = Math.round(totalProcessed / Math.max(elapsed, 0.001));
-            const avgParse = (parseTime / totalProcessed).toFixed(2);
-            console.error(
-              `[archive-main] ${totalProcessed} checkpoints ${rate} checkpoint/s avg_parse=${avgParse}ms pending=${pending.size}`,
-            );
-          }
+          for await (const result of pool.stream(config.from, endSeq, config.archiveUrl, concurrencyPerWorker)) {
+            if (stopped) break;
+            const parseStart = performance.now();
 
-          if (config.unorderedDrain) {
-            // Snapshot mode: yield immediately, no ordering needed
-            yield checkpoint;
-          } else {
-            // Ordered drain: buffer and yield in sequence
-            pending.set(result.seq, checkpoint);
-            while (pending.has(watermark + 1n)) {
-              watermark += 1n;
-              const ready = pending.get(watermark)!;
-              pending.delete(watermark);
+            let checkpoint: Checkpoint;
+            if (result.binary) {
+              checkpoint = checkpointFromBinaryResult(
+                result.binary,
+                config.enabledProcessors,
+                balanceCoinTypes,
+              );
+            } else if (result.payload) {
+              checkpoint = checkpointFromGrpcResponse(
+                result.payload.decoded,
+                "backfill",
+                result.payload.precomputedBalanceChanges,
+              );
+            } else {
+              throw new Error(`Checkpoint ${result.seq} decode returned no payload`);
+            }
+
+            parseTime += performance.now() - parseStart;
+            totalProcessed += 1;
+
+            if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
+              const elapsed = (performance.now() - profilingStart) / 1000;
+              const rate = Math.round(totalProcessed / Math.max(elapsed, 0.001));
+              const avgParse = (parseTime / totalProcessed).toFixed(2);
+              console.error(
+                `[archive-main] ${totalProcessed} checkpoints ${rate} checkpoint/s avg_parse=${avgParse}ms pending=${pending.size}`,
+              );
+            }
+
+            for await (const ready of emitCheckpoint(result.seq, checkpoint)) {
               yield ready;
             }
           }

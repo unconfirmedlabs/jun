@@ -10,6 +10,7 @@ use std::io::Read;
 mod binary;
 mod canonical;
 mod extract;
+mod fetch;
 mod proto;
 
 /// FFI entry point: decode a compressed checkpoint and return JSON.
@@ -108,7 +109,49 @@ pub extern "C" fn decode_checkpoint_binary(
     }
 }
 
-fn decode_checkpoint_binary_inner(compressed: &[u8], output: &mut [u8]) -> Result<usize, Box<dyn std::error::Error>> {
+#[no_mangle]
+pub extern "C" fn download_and_decode_archive_checkpoint_range(
+    archive_url_ptr: *const u8,
+    archive_url_len: u32,
+    from_checkpoint: u64,
+    to_checkpoint: u64,
+    concurrency: u32,
+    output_ptr: *mut u8,
+    output_capacity: u32,
+    output_callback: fetch::OutputCallback,
+) -> i32 {
+    if archive_url_ptr.is_null() || output_ptr.is_null() || output_capacity == 0 {
+        return -1;
+    }
+    if from_checkpoint > to_checkpoint {
+        return -2;
+    }
+
+    let archive_url_bytes =
+        unsafe { std::slice::from_raw_parts(archive_url_ptr, archive_url_len as usize) };
+    let archive_url = match std::str::from_utf8(archive_url_bytes) {
+        Ok(url) => url.to_string(),
+        Err(_) => return -3,
+    };
+
+    match fetch::spawn_download_and_decode_range(
+        archive_url,
+        from_checkpoint,
+        to_checkpoint,
+        concurrency,
+        output_ptr,
+        output_capacity,
+        output_callback,
+    ) {
+        Ok(()) => 0,
+        Err(_) => -4,
+    }
+}
+
+pub(crate) fn decode_checkpoint_binary_inner(
+    compressed: &[u8],
+    output: &mut [u8],
+) -> Result<usize, Box<dyn std::error::Error>> {
     let mut decoder = zstd::Decoder::new(compressed)?;
     let mut decompressed = Vec::new();
     decoder.read_to_end(&mut decompressed)?;
