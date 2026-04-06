@@ -4,10 +4,11 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::{Map, Value};
-use sui_types::balance::Balance;
+use sui_types::balance_change::derive_balance_changes_2;
 use sui_types::base_types::{ObjectID, SequenceNumber, SuiAddress};
+use sui_types::full_checkpoint_content::ObjectSet;
 use sui_types::effects::{
-    AccumulatorOperation, AccumulatorValue, IDOperation, TransactionEffects,
+    IDOperation, TransactionEffects,
     TransactionEffectsAPI, TransactionEvents,
     UnchangedConsensusKind,
 };
@@ -282,76 +283,6 @@ struct DecodedSummary {
     gas_summary: GasCostSummaryRecord,
 }
 
-#[derive(Clone)]
-pub(crate) struct AccumulatorDelta {
-    pub address: String,
-    pub coin_type: String,
-    pub amount: i128,
-}
-
-#[derive(Clone)]
-struct CoinSnapshot {
-    version: u64,
-    owner: String,
-    coin_type: String,
-    balance: u64,
-}
-
-#[derive(Clone, Eq, Hash, PartialEq)]
-struct BalanceKey {
-    address: String,
-    coin_type: String,
-}
-
-#[derive(Default)]
-struct OrderedBalanceMap {
-    values: HashMap<BalanceKey, i128>,
-    order: Vec<BalanceKey>,
-}
-
-impl OrderedBalanceMap {
-    fn add_delta(&mut self, address: String, coin_type: String, delta: i128) {
-        if address.is_empty() || coin_type.is_empty() || delta == 0 {
-            return;
-        }
-
-        let key = BalanceKey { address, coin_type };
-        if !self.values.contains_key(&key) {
-            self.order.push(key.clone());
-        }
-        *self.values.entry(key).or_default() += delta;
-    }
-
-    fn into_records(
-        self,
-        checkpoint_seq: &str,
-        checkpoint_timestamp: &str,
-    ) -> Vec<BalanceChangeRecord> {
-        let mut values = self.values;
-        let mut records = Vec::new();
-
-        for key in self.order {
-            let Some(amount) = values.remove(&key) else {
-                continue;
-            };
-            if amount == 0 {
-                continue;
-            }
-
-            records.push(BalanceChangeRecord {
-                tx_digest: String::new(),
-                checkpoint_seq: checkpoint_seq.to_string(),
-                address: key.address,
-                coin_type: key.coin_type,
-                amount: amount.to_string(),
-                timestamp: checkpoint_timestamp.to_string(),
-            });
-        }
-
-        records
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Extraction
 // ---------------------------------------------------------------------------
@@ -393,9 +324,15 @@ pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<(ExtractedCheckpoi
     let mut commands = Vec::new();
     let mut system_transactions = Vec::new();
     let mut unchanged_consensus_objects = Vec::new();
-    let mut created_objects = HashSet::new();
-    let mut deleted_objects = HashSet::new();
-    let mut accumulator_deltas = Vec::new();
+    let mut balance_changes = Vec::new();
+
+    // Build ObjectSet from proto objects for derive_balance_changes_2
+    let mut object_set = ObjectSet::default();
+    for obj in &parsed.objects {
+        if let Ok(decoded) = bcs::from_bytes::<Object>(obj.bcs) {
+            object_set.insert(decoded);
+        }
+    }
 
     profile.tx_count = parsed.transactions.len();
 
@@ -463,12 +400,18 @@ pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<(ExtractedCheckpoi
             dependencies.extend(extract_dependencies(&tx_context, fx));
             unchanged_consensus_objects
                 .extend(extract_unchanged_consensus_objects(&tx_context, fx));
-            collect_balance_change_hints(
-                fx,
-                &mut created_objects,
-                &mut deleted_objects,
-                &mut accumulator_deltas,
-            );
+
+            // Derive balance changes using Mysten's official implementation
+            for bc in derive_balance_changes_2(fx, &object_set) {
+                balance_changes.push(BalanceChangeRecord {
+                    tx_digest: tx_context.digest.to_string(),
+                    checkpoint_seq: tx_context.checkpoint_seq.to_string(),
+                    address: bc.address.to_string(),
+                    coin_type: bc.coin_type.to_canonical_string(true),
+                    amount: bc.amount.to_string(),
+                    timestamp: tx_context.checkpoint_timestamp.to_string(),
+                });
+            }
         }
 
         if let Some(tx_events) = tx_events.as_ref() {
@@ -478,16 +421,7 @@ pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<(ExtractedCheckpoi
         profile.extract_records_ns += t4.elapsed().as_nanos() as u64;
     }
 
-    let t5 = Instant::now();
-    let balance_changes = compute_balance_changes(
-        &parsed.objects,
-        &created_objects,
-        &deleted_objects,
-        &accumulator_deltas,
-        &checkpoint_seq,
-        &checkpoint_timestamp,
-    );
-    profile.balance_changes_ns = t5.elapsed().as_nanos() as u64;
+    profile.balance_changes_ns = 0; // Balance changes now computed inline per-transaction
 
     let result = ExtractedCheckpoint {
         checkpoint: CheckpointRecord {
@@ -1085,166 +1019,6 @@ fn extract_events(ctx: &TxContext<'_>, tx_events: &TransactionEvents) -> Vec<Eve
         .collect()
 }
 
-pub(crate) fn collect_balance_change_hints(
-    effects: &TransactionEffects,
-    created_objects: &mut HashSet<ObjectID>,
-    deleted_objects: &mut HashSet<ObjectID>,
-    accumulator_deltas: &mut Vec<AccumulatorDelta>,
-) {
-    for change in effects.object_changes() {
-        if change.input_version.is_none() && change.output_version.is_some() {
-            created_objects.insert(change.id);
-        }
-        if change.output_version.is_none() {
-            deleted_objects.insert(change.id);
-        }
-    }
-
-    for (_, write) in effects.accumulator_updates() {
-        let Some(coin_type) = Balance::maybe_get_balance_type_param(&write.address.ty) else {
-            continue;
-        };
-
-        let amount = match write.value {
-            AccumulatorValue::Integer(value) => value as i128,
-            AccumulatorValue::IntegerTuple(_, _) | AccumulatorValue::EventDigest(_) => continue,
-        };
-
-        let signed_amount = match write.operation {
-            AccumulatorOperation::Merge => amount,
-            AccumulatorOperation::Split => -amount,
-        };
-
-        if signed_amount == 0 {
-            continue;
-        }
-
-        accumulator_deltas.push(AccumulatorDelta {
-            address: format_address_bytes(write.address.address.as_ref()),
-            coin_type: format_type_tag_canonical(&coin_type),
-            amount: signed_amount,
-        });
-    }
-}
-
-pub(crate) fn compute_balance_changes(
-    objects: &[proto::ProtoObject<'_>],
-    created_objects: &HashSet<ObjectID>,
-    deleted_objects: &HashSet<ObjectID>,
-    accumulator_deltas: &[AccumulatorDelta],
-    checkpoint_seq: &str,
-    checkpoint_timestamp: &str,
-) -> Vec<BalanceChangeRecord> {
-    if objects.is_empty() && accumulator_deltas.is_empty() {
-        return Vec::new();
-    }
-
-    let mut aggregated = OrderedBalanceMap::default();
-    for delta in accumulator_deltas {
-        aggregated.add_delta(delta.address.clone(), delta.coin_type.clone(), delta.amount);
-    }
-
-    let mut coin_versions: HashMap<ObjectID, Vec<CoinSnapshot>> = HashMap::new();
-    let mut object_order = Vec::new();
-
-    for object in objects {
-        if !looks_like_coin_object(object.bcs) {
-            continue;
-        }
-
-        let Some((object_id, snapshot)) = parse_coin_object(object) else {
-            continue;
-        };
-
-        if !coin_versions.contains_key(&object_id) {
-            object_order.push(object_id);
-        }
-        coin_versions.entry(object_id).or_default().push(snapshot);
-    }
-
-    for object_id in object_order {
-        let Some(mut versions) = coin_versions.remove(&object_id) else {
-            continue;
-        };
-
-        versions.sort_by_key(|snapshot| snapshot.version);
-        match versions.as_slice() {
-            [snapshot] => {
-                if created_objects.contains(&object_id) {
-                    aggregated.add_delta(
-                        snapshot.owner.clone(),
-                        snapshot.coin_type.clone(),
-                        snapshot.balance as i128,
-                    );
-                } else if deleted_objects.contains(&object_id) {
-                    aggregated.add_delta(
-                        snapshot.owner.clone(),
-                        snapshot.coin_type.clone(),
-                        -(snapshot.balance as i128),
-                    );
-                }
-            }
-            [input, .., output] => {
-                if input.owner == output.owner {
-                    aggregated.add_delta(
-                        input.owner.clone(),
-                        input.coin_type.clone(),
-                        output.balance as i128 - input.balance as i128,
-                    );
-                } else {
-                    aggregated.add_delta(
-                        input.owner.clone(),
-                        input.coin_type.clone(),
-                        -(input.balance as i128),
-                    );
-                    aggregated.add_delta(
-                        output.owner.clone(),
-                        output.coin_type.clone(),
-                        output.balance as i128,
-                    );
-                }
-            }
-            [] => {}
-        }
-    }
-
-    aggregated.into_records(checkpoint_seq, checkpoint_timestamp)
-}
-
-fn looks_like_coin_object(raw: &[u8]) -> bool {
-    raw.len() >= 2 && raw[0] == 0 && matches!(raw[1], 1 | 3)
-}
-
-fn parse_coin_object(object: &proto::ProtoObject<'_>) -> Option<(ObjectID, CoinSnapshot)> {
-    let decoded = bcs::from_bytes::<Object>(object.bcs).ok()?;
-    let owner = match decoded.owner() {
-        Owner::AddressOwner(address) => format_address_bytes(address.as_ref()),
-        _ => return None,
-    };
-    let coin_type = format_type_tag_canonical(&decoded.coin_type_maybe()?);
-    let version = if object.version == 0 {
-        decoded.version().value()
-    } else {
-        object.version
-    };
-
-    let object_id = if object.object_id.is_empty() {
-        decoded.id()
-    } else {
-        object.object_id.parse().ok().unwrap_or_else(|| decoded.id())
-    };
-
-    Some((
-        object_id,
-        CoinSnapshot {
-            version,
-            owner,
-            coin_type,
-            balance: decoded.get_coin_value_unsafe(),
-        },
-    ))
-}
-
 fn event_record(ctx: &TxContext<'_>, event_seq: usize, event: &Event) -> EventRecord {
     let event_type = format_type_tag_canonical(&TypeTag::Struct(Box::new(event.type_.clone())));
     let mut data = Map::new();
@@ -1531,10 +1305,6 @@ fn hex_string(bytes: &[u8]) -> String {
     s
 }
 
-#[inline(always)]
-fn format_address_bytes(bytes: &[u8]) -> String {
-    hex_string(bytes)
-}
 
 fn sequence_number_to_string(value: SequenceNumber) -> String {
     value.value().to_string()

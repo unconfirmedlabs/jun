@@ -13,7 +13,7 @@ use sui_types::effects::{
 use sui_types::event::Event;
 use sui_types::execution_status::{ExecutionErrorKind, ExecutionStatus};
 use sui_types::messages_checkpoint::CheckpointSummary;
-use sui_types::object::Owner;
+use sui_types::object::{Object, Owner};
 use sui_types::transaction::{
     Argument, CallArg, Command, ObjectArg, Reservation,
     SharedObjectMutability, TransactionData, TransactionDataAPI, TransactionKind, WithdrawFrom,
@@ -375,56 +375,31 @@ pub fn extract_and_write_binary(
         }
     }
 
-    // ── Balance changes — reuse proven logic from extract.rs ──
+    // ── Balance changes — derive_balance_changes_2 per transaction ──
     profile.extract_records_ns = t_extract.elapsed().as_nanos() as u64;
 
     let t_balance = Instant::now();
-    let mut created_objects = HashSet::new();
-    let mut deleted_objects = HashSet::new();
-    let mut accumulator_deltas = Vec::new();
 
-    for tx in &txs {
-        let Some(effects) = &tx.effects else { continue };
-        crate::extract::collect_balance_change_hints(
-            effects,
-            &mut created_objects,
-            &mut deleted_objects,
-            &mut accumulator_deltas,
-        );
+    // Build ObjectSet from proto objects
+    let mut object_set = sui_types::full_checkpoint_content::ObjectSet::default();
+    for obj in &parsed.objects {
+        if let Ok(decoded) = bcs::from_bytes::<Object>(obj.bcs) {
+            object_set.insert(decoded);
+        }
     }
 
-    let checkpoint_seq_str = summary.as_ref().map(|s| s.sequence_number.to_string()).unwrap_or_else(|| "0".to_string());
-    let checkpoint_ts_str = summary.as_ref().map(|s| {
-        let mut buf = [0u8; 28];
-        let ms = s.timestamp_ms;
-        let secs = (ms as i64).div_euclid(1_000);
-        let millis = (ms as i64).rem_euclid(1_000);
-        let days = secs.div_euclid(86400);
-        let time_secs = secs.rem_euclid(86400);
-        let (y, m, d) = days_to_ymd(days as i32 + 719468);
-        let n = write_iso_to_buf(&mut buf, y, m as u32, d as u32, (time_secs / 3600) as u32, ((time_secs % 3600) / 60) as u32, (time_secs % 60) as u32, millis as u32);
-        unsafe { std::str::from_utf8_unchecked(&buf[..n]) }.to_string()
-    }).unwrap_or_default();
-
-    let balance_changes = crate::extract::compute_balance_changes(
-        &parsed.objects,
-        &created_objects,
-        &deleted_objects,
-        &accumulator_deltas,
-        &checkpoint_seq_str,
-        &checkpoint_ts_str,
-    );
-
     let mut bal_count = 0u32;
-    for bc in &balance_changes {
-        // Binary format: tx_digest, checkpoint_seq, address, coin_type, amount, timestamp
-        w.write_str(&bc.tx_digest);
-        w.write_str(&bc.checkpoint_seq);
-        w.write_str(&bc.address);
-        w.write_str(&bc.coin_type);
-        w.write_str(&bc.amount);
-        w.write_str(&bc.timestamp);
-        bal_count += 1;
+    for tx in &txs {
+        let Some(effects) = &tx.effects else { continue };
+        for bc in sui_types::balance_change::derive_balance_changes_2(effects, &object_set) {
+            w.write_str(&tx.digest); // tx_digest
+            write_checkpoint_seq(&mut w, &summary);
+            w.write_display(&bc.address);
+            w.write_str(&bc.coin_type.to_canonical_string(true));
+            w.write_i128_dec(bc.amount);
+            write_timestamp(&mut w, &summary);
+            bal_count += 1;
+        }
     }
 
     profile.balance_changes_ns = t_balance.elapsed().as_nanos() as u64;

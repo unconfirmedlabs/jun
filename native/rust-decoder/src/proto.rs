@@ -9,6 +9,7 @@ pub struct ProtoBalanceChange<'a> {
     pub amount: &'a str,
 }
 
+#[allow(dead_code)]
 pub struct ProtoObject<'a> {
     pub object_id: &'a str,
     pub version: u64,
