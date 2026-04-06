@@ -2436,9 +2436,11 @@ pipelineCmd
   .command("index-chain")
   .description("Extract all structural chain data to per-table SQLite files")
   .option("--output <dir>", "output directory for per-table SQLite files")
+  .option("--sqlite <path>", "single SQLite file (for live mode)")
   .option("--epoch <number>", "backfill a completed epoch")
   .option("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
+  .option("--live", "continuous mode via gRPC subscription")
   .option("--grpc-url <url>", "gRPC endpoint")
   .option("--archive-url <url>", "archive base URL")
   .option("--network <name>", "network name", "mainnet")
@@ -2455,8 +2457,10 @@ pipelineCmd
     const { createPerTableSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
     const { createPipeline } = await import("./pipeline/pipeline.ts");
 
-    if (!opts.epoch && !opts.from) {
-      console.error("[jun] error: provide --epoch or --from/--to");
+    const isLive = !!opts.live;
+
+    if (!opts.epoch && !opts.from && !isLive) {
+      console.error("[jun] error: provide --epoch, --from/--to, or --live");
       process.exit(1);
     }
 
@@ -2497,39 +2501,61 @@ pipelineCmd
       to = opts.to ? BigInt(opts.to) : undefined;
     }
 
-    // Output directory
-    const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./index-chain");
-
     // Create storage
-    const storage = createPerTableSqliteStorage(outputDir);
-
-    // Create archive source — all processors enabled
-    const source = createArchiveSource({
-      archiveUrl,
-      from,
-      to,
-      concurrency: parseInt(opts.concurrency ?? "200"),
-      workers: opts.workers ? parseInt(opts.workers) : undefined,
-      enabledProcessors: {
-        balances: true,
-        transactions: true,
-        objectChanges: true,
-        dependencies: true,
-        inputs: true,
-        commands: true,
-        systemTransactions: true,
-        unchangedConsensusObjects: true,
-        events: true,
-        checkpoints: true,
-      },
-      unorderedDrain: true,
-      grpcUrl: to ? undefined : grpcUrl,
-    });
+    let storage: any;
+    if (isLive && opts.sqlite) {
+      // Live mode with single SQLite file — use the existing sql storage
+      const { createSqlStorage } = await import("./pipeline/destinations/sql.ts");
+      storage = createSqlStorage({
+        url: `sqlite:${opts.sqlite}`,
+        balances: true, transactions: true, checkpoints: true,
+        objectChanges: true, dependencies: true, inputs: true,
+        commands: true, systemTransactions: true, unchangedConsensusObjects: true,
+        rawEvents: true, skipBalanceMaterialization: true,
+      });
+    } else {
+      // Per-table SQLite files (default for snapshot mode)
+      const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./index-chain");
+      const { createPerTableSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
+      storage = createPerTableSqliteStorage(outputDir);
+    }
 
     // Build pipeline
     const pipeline = createPipeline();
-    pipeline.source(source);
     pipeline.storage(storage);
+
+    // Archive source (backfill)
+    if (from !== undefined) {
+      const { createArchiveSource } = await import("./pipeline/sources/archive.ts");
+      pipeline.source(createArchiveSource({
+        archiveUrl,
+        from,
+        to,
+        concurrency: parseInt(opts.concurrency ?? "200"),
+        workers: opts.workers ? parseInt(opts.workers) : undefined,
+        enabledProcessors: {
+          balances: true,
+          transactions: true,
+          objectChanges: true,
+          dependencies: true,
+          inputs: true,
+          commands: true,
+          systemTransactions: true,
+          unchangedConsensusObjects: true,
+          events: true,
+          checkpoints: true,
+        },
+        unorderedDrain: !isLive,
+        grpcUrl: to ? undefined : grpcUrl,
+      }));
+    }
+
+    // Live gRPC source
+    if (isLive) {
+      const { createGrpcLiveSource } = await import("./pipeline/sources/grpc.ts");
+      pipeline.source(createGrpcLiveSource({ url: grpcUrl }));
+      // TODO: add raw events processor for live mode (gRPC events need extraction)
+    }
 
     // Broadcasts
     if (opts.stdout) {
@@ -2545,23 +2571,25 @@ pipelineCmd
       pipeline.broadcast(createNatsBroadcast({ url: opts.nats }));
     }
 
-    const totalCheckpoints = to !== undefined ? to - from + 1n : undefined;
+    const totalCheckpoints = from !== undefined && to !== undefined ? to - from + 1n : undefined;
     pipeline.configure({
       quiet: opts.quiet ?? false,
       log: opts.log ?? false,
       totalCheckpoints,
-      buffer: { maxBatchSize: 1000 },
+      buffer: { maxBatchSize: isLive ? 50 : 1000 },
     });
 
     // Print summary
     if (!opts.quiet) {
+      const outputLabel = isLive ? (opts.sqlite ?? "live") : (opts.output ?? `./epoch-${opts.epoch ?? "chain"}`);
       console.error("");
       console.error("  index-chain");
       console.error("  ───────────");
+      console.error(`  mode            ${isLive ? "live (gRPC streaming)" : "snapshot"}`);
       if (opts.epoch) console.error(`  epoch           ${opts.epoch}`);
-      if (to) console.error(`  checkpoints     ${from} → ${to} (${(to - from + 1n).toLocaleString()})`);
-      console.error(`  output          ${outputDir}`);
-      console.error(`  concurrency     ${opts.concurrency ?? 200}`);
+      if (from !== undefined && to !== undefined) console.error(`  checkpoints     ${from} → ${to} (${(to - from + 1n).toLocaleString()})`);
+      console.error(`  output          ${outputLabel}`);
+      if (!isLive) console.error(`  concurrency     ${opts.concurrency ?? 200}`);
       if (opts.workers) console.error(`  workers         ${opts.workers}`);
       console.error("");
     }
@@ -2576,7 +2604,7 @@ pipelineCmd
     }
 
     await pipeline.run();
-    process.exit(0);
+    if (!isLive) process.exit(0);
   });
 
 program.parse();
