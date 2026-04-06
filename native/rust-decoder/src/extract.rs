@@ -1477,52 +1477,61 @@ fn execution_error_kind_name(error: &ExecutionErrorKind) -> String {
 }
 
 fn format_type_tag(tag: &TypeTag) -> String {
-    match tag {
-        TypeTag::Bool => "bool".to_string(),
-        TypeTag::U8 => "u8".to_string(),
-        TypeTag::U16 => "u16".to_string(),
-        TypeTag::U32 => "u32".to_string(),
-        TypeTag::U64 => "u64".to_string(),
-        TypeTag::U128 => "u128".to_string(),
-        TypeTag::U256 => "u256".to_string(),
-        TypeTag::Address => "address".to_string(),
-        TypeTag::Signer => "signer".to_string(),
-        TypeTag::Vector(inner) => format!("vector<{}>", format_type_tag(inner)),
-        TypeTag::Struct(struct_tag) => {
-            let params = struct_tag
-                .type_params
-                .iter()
-                .map(format_type_tag)
-                .collect::<Vec<_>>();
-            let suffix = if params.is_empty() {
-                String::new()
-            } else {
-                format!("<{}>", params.join(", "))
-            };
+    use std::fmt::Write;
+    let mut buf = String::with_capacity(64);
+    write_type_tag(tag, &mut buf);
+    buf
+}
 
-            format!(
-                "{}::{}::{}{}",
-                format_address_bytes(&struct_tag.address.into_bytes()),
-                struct_tag.module,
-                struct_tag.name,
-                suffix
-            )
+fn write_type_tag(tag: &TypeTag, buf: &mut String) {
+    use std::fmt::Write;
+    match tag {
+        TypeTag::Bool => buf.push_str("bool"),
+        TypeTag::U8 => buf.push_str("u8"),
+        TypeTag::U16 => buf.push_str("u16"),
+        TypeTag::U32 => buf.push_str("u32"),
+        TypeTag::U64 => buf.push_str("u64"),
+        TypeTag::U128 => buf.push_str("u128"),
+        TypeTag::U256 => buf.push_str("u256"),
+        TypeTag::Address => buf.push_str("address"),
+        TypeTag::Signer => buf.push_str("signer"),
+        TypeTag::Vector(inner) => {
+            buf.push_str("vector<");
+            write_type_tag(inner, buf);
+            buf.push('>');
+        }
+        TypeTag::Struct(struct_tag) => {
+            let addr = hex_string(&struct_tag.address.into_bytes());
+            let _ = write!(buf, "{}::{}::{}", addr, struct_tag.module, struct_tag.name);
+            if !struct_tag.type_params.is_empty() {
+                buf.push('<');
+                for (i, param) in struct_tag.type_params.iter().enumerate() {
+                    if i > 0 {
+                        buf.push_str(", ");
+                    }
+                    write_type_tag(param, buf);
+                }
+                buf.push('>');
+            }
         }
     }
 }
 
+const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+
 fn hex_string(bytes: &[u8]) -> String {
-    format!(
-        "0x{}",
-        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    )
+    let mut s = String::with_capacity(2 + bytes.len() * 2);
+    s.push_str("0x");
+    for &b in bytes {
+        s.push(HEX_CHARS[(b >> 4) as usize] as char);
+        s.push(HEX_CHARS[(b & 0x0f) as usize] as char);
+    }
+    s
 }
 
+#[inline(always)]
 fn format_address_bytes(bytes: &[u8]) -> String {
-    format!(
-        "0x{}",
-        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    )
+    hex_string(bytes)
 }
 
 fn sequence_number_to_string(value: SequenceNumber) -> String {
