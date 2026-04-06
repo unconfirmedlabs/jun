@@ -99,7 +99,11 @@ impl<'a> BcsReader<'a> {
 
     pub fn read_vec_len(&mut self) -> Result<usize> {
         let len = self.read_uleb128()?;
-        usize::try_from(len).map_err(|_| "vec too large")
+        let len = usize::try_from(len).map_err(|_| "vec too large")?;
+        if len > self.remaining() {
+            return Err("vec length exceeds remaining bytes");
+        }
+        Ok(len)
     }
 
     pub fn read_option_tag(&mut self) -> Result<bool> {
@@ -314,57 +318,92 @@ pub fn extract_effects<'a>(bcs: &'a [u8], _w: &mut BinaryWriter) -> Result<Effec
 
 pub fn parse_effects<'a>(bcs: &'a [u8]) -> Result<EffectsExtract<'a>> {
     let mut reader = BcsReader::new(bcs);
-    match reader.read_uleb128()? {
+    match reader.read_uleb128().map_err(|_| "effects.version")? {
         1 => {}
         0 => return Err("effects v1"),
         _ => return Err("unsupported effects variant"),
     }
 
-    let status = parse_execution_status(&mut reader)?;
-    let epoch = reader.read_u64()?;
+    let status = parse_execution_status(&mut reader).map_err(|_| "effects.status")?;
+    let epoch = reader.read_u64().map_err(|_| "effects.epoch")?;
     let gas_used = GasCostSummary {
-        computation_cost: reader.read_u64()?,
-        storage_cost: reader.read_u64()?,
-        storage_rebate: reader.read_u64()?,
-        non_refundable_storage_fee: reader.read_u64()?,
+        computation_cost: reader.read_u64().map_err(|_| "effects.gas.computation")?,
+        storage_cost: reader.read_u64().map_err(|_| "effects.gas.storage")?,
+        storage_rebate: reader.read_u64().map_err(|_| "effects.gas.rebate")?,
+        non_refundable_storage_fee: reader
+            .read_u64()
+            .map_err(|_| "effects.gas.non_refundable")?,
     };
-    let digest = reader.read_fixed::<32>()?;
-    let gas_object_index = if reader.read_option_tag()? {
-        Some(reader.read_u32()?)
+    let digest = reader.read_fixed::<32>().map_err(|_| "effects.digest")?;
+    let gas_object_index = if reader
+        .read_option_tag()
+        .map_err(|_| "effects.gas_object_index.tag")?
+    {
+        Some(
+            reader
+                .read_u32()
+                .map_err(|_| "effects.gas_object_index.value")?,
+        )
     } else {
         None
     };
-    let events_digest = if reader.read_option_tag()? {
-        Some(reader.read_fixed::<32>()?)
+    let events_digest = if reader.read_option_tag().map_err(|_| "effects.events.tag")? {
+        Some(
+            reader
+                .read_fixed::<32>()
+                .map_err(|_| "effects.events.value")?,
+        )
     } else {
         None
     };
 
-    let dependency_count = reader.read_vec_len()?;
+    let dependency_count = reader
+        .read_vec_len()
+        .map_err(|_| "effects.dependencies.len")?;
     let mut dependencies = Vec::with_capacity(dependency_count);
     for _ in 0..dependency_count {
-        dependencies.push(reader.read_fixed::<32>()?);
+        dependencies.push(
+            reader
+                .read_fixed::<32>()
+                .map_err(|_| "effects.dependencies.entry")?,
+        );
     }
 
-    let lamport_version = reader.read_u64()?;
+    let lamport_version = reader.read_u64().map_err(|_| "effects.lamport_version")?;
 
-    let changed_len = reader.read_vec_len()?;
+    let changed_len = reader
+        .read_vec_len()
+        .map_err(|_| "effects.changed_objects.len")?;
     let mut changed_objects = Vec::with_capacity(changed_len);
     for _ in 0..changed_len {
-        changed_objects.push(reader.capture_slice(skip_changed_object_entry)?);
+        changed_objects.push(
+            reader
+                .capture_slice(skip_changed_object_entry)
+                .map_err(|_| "effects.changed_objects.entry")?,
+        );
     }
 
-    let unchanged_len = reader.read_vec_len()?;
+    let unchanged_len = reader
+        .read_vec_len()
+        .map_err(|_| "effects.unchanged_consensus.len")?;
     let mut unchanged_consensus_objects = Vec::with_capacity(unchanged_len);
     for _ in 0..unchanged_len {
-        unchanged_consensus_objects
-            .push(reader.capture_slice(skip_unchanged_consensus_object_entry)?);
+        unchanged_consensus_objects.push(
+            reader
+                .capture_slice(skip_unchanged_consensus_object_entry)
+                .map_err(|_| "effects.unchanged_consensus.entry")?,
+        );
     }
 
-    if reader.read_option_tag()? {
-        reader.skip_bytes(32)?;
+    if reader
+        .read_option_tag()
+        .map_err(|_| "effects.aux_data.tag")?
+    {
+        reader
+            .skip_bytes(32)
+            .map_err(|_| "effects.aux_data.value")?;
     }
-    reader.finish()?;
+    reader.finish().map_err(|_| "effects.trailing_bytes")?;
 
     Ok(EffectsExtract {
         digest,
@@ -388,38 +427,48 @@ pub fn extract_tx_data<'a>(bcs: &'a [u8], _w: &mut BinaryWriter) -> Result<TxDat
 
 pub fn parse_tx_data<'a>(bcs: &'a [u8]) -> Result<TxDataExtract<'a>> {
     let mut reader = BcsReader::new(bcs);
-    match reader.read_uleb128()? {
+    match reader.read_uleb128().map_err(|_| "tx.version")? {
         0 => {}
         _ => return Err("unsupported transaction data variant"),
     }
 
-    let kind = match reader.read_uleb128()? {
+    let kind = match reader.read_uleb128().map_err(|_| "tx.kind")? {
         0 => ProgrammableKind::User,
         10 => ProgrammableKind::System,
         _ => return Err("unsupported transaction kind"),
     };
 
-    let inputs_len = reader.read_vec_len()?;
+    let inputs_len = reader.read_vec_len().map_err(|_| "tx.inputs.len")?;
     let mut inputs = Vec::with_capacity(inputs_len);
     for _ in 0..inputs_len {
-        inputs.push(reader.capture_slice(skip_call_arg)?);
+        inputs.push(
+            reader
+                .capture_slice(skip_call_arg)
+                .map_err(|_| "tx.inputs.entry")?,
+        );
     }
 
-    let commands_len = reader.read_vec_len()?;
+    let commands_len = reader.read_vec_len().map_err(|_| "tx.commands.len")?;
     let mut commands = Vec::with_capacity(commands_len);
     let mut move_call_count = 0usize;
     for _ in 0..commands_len {
-        let command = reader.capture_slice(skip_command)?;
-        if BcsReader::new(command).read_uleb128()? == 0 {
+        let command = reader
+            .capture_slice(skip_command)
+            .map_err(|_| "tx.commands.entry")?;
+        if BcsReader::new(command)
+            .read_uleb128()
+            .map_err(|_| "tx.commands.variant")?
+            == 0
+        {
             move_call_count += 1;
         }
         commands.push(command);
     }
 
-    let sender = reader.read_fixed::<32>()?;
-    skip_gas_data(&mut reader)?;
-    skip_transaction_expiration(&mut reader)?;
-    reader.finish()?;
+    let sender = reader.read_fixed::<32>().map_err(|_| "tx.sender")?;
+    skip_gas_data(&mut reader).map_err(|_| "tx.gas_data")?;
+    skip_transaction_expiration(&mut reader).map_err(|_| "tx.expiration")?;
+    reader.finish().map_err(|_| "tx.trailing_bytes")?;
 
     Ok(TxDataExtract {
         sender,
