@@ -39,6 +39,9 @@ export interface ArchiveSourceConfig {
   };
   /** gRPC URL for fetching latest checkpoint */
   grpcUrl?: string;
+  /** Skip ordered drain — yield checkpoints as they arrive from workers.
+   *  Safe for snapshot mode where insert order doesn't matter. */
+  unorderedDrain?: boolean;
 }
 
 function filterBalanceChanges(
@@ -158,12 +161,18 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
             );
           }
 
-          pending.set(result.seq, checkpoint);
-          while (pending.has(watermark + 1n)) {
-            watermark += 1n;
-            const ready = pending.get(watermark)!;
-            pending.delete(watermark);
-            yield ready;
+          if (config.unorderedDrain) {
+            // Snapshot mode: yield immediately, no ordering needed
+            yield checkpoint;
+          } else {
+            // Ordered drain: buffer and yield in sequence
+            pending.set(result.seq, checkpoint);
+            while (pending.has(watermark + 1n)) {
+              watermark += 1n;
+              const ready = pending.get(watermark)!;
+              pending.delete(watermark);
+              yield ready;
+            }
           }
         }
       } finally {

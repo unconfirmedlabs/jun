@@ -2021,6 +2021,7 @@ function addPipelineOptions(cmd: any) {
     .option("--system-transactions", "index non-programmable (system) transactions")
     .option("--unchanged-consensus-objects", "index read-only consensus object refs")
     .option("--everything", "enable all indexers (transaction-blocks, object-changes, dependencies, inputs, commands, system-transactions, unchanged-consensus-objects, checkpoints, and coin-type '*')")
+    .option("--ordered-drain", "force ordered checkpoint processing (default: unordered for snapshots)")
     .option("--sqlite <path>", "write to SQLite database at path")
     .option("--postgres <url>", "write to Postgres database at URL")
     .option("--sqlite-export <s3url>", "after pipeline: VACUUM + upload to S3 (e.g. s3://bucket/key.db)")
@@ -2057,6 +2058,7 @@ interface PipelineOpts {
     everything?: boolean;
     bcsProvider?: string;
     bcsDecoder?: string;
+    orderedDrain?: boolean;
     sqlite?: string;
     postgres?: string;
     sqliteExport?: string;
@@ -2206,12 +2208,16 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
         baseConfig.storage = baseConfig.storage ?? {};
         baseConfig.storage.postgres = opts.postgres;
       }
-      // Snapshot optimizations: defer indexes + UNLOGGED tables for bulk loading
+      // Snapshot optimizations: defer indexes + UNLOGGED tables + unordered drain
       if (baseConfig.storage && backfillOnly) {
         baseConfig.storage.deferIndexes = true;
         if (baseConfig.storage.postgres) {
           baseConfig.storage.pgUnlogged = true;
         }
+      }
+      // Unordered drain: default on for snapshots unless --ordered-drain is set
+      if (backfillOnly && !opts.orderedDrain) {
+        baseConfig.unorderedDrain = true;
       }
 
       // S3 export validation — check creds before pipeline starts

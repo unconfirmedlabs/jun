@@ -394,6 +394,7 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
       balanceCoinTypes: processorConfig?.balances?.coinTypes === "*"
         ? "*"
         : processorConfig?.balances?.coinTypes?.map((coinType: string) => normalizeCoinType(coinType)),
+      unorderedDrain: config.unorderedDrain ?? false,
       enabledProcessors: {
         balances: !!processorConfig?.balances,
         transactions: !!processorConfig?.transactionBlocks,
