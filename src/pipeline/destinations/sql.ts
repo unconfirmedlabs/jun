@@ -20,6 +20,7 @@ import type {
   TransactionDependencyRecord, TransactionInputRecord, CommandRecord,
   SystemTransactionRecord, UnchangedConsensusObjectRecord,
 } from "../types.ts";
+import type { Database } from "bun:sqlite";
 import type { FieldDefs } from "../../schema.ts";
 import { generateDDL } from "../../schema.ts";
 import { validateIdentifier } from "../../output/storage.ts";
@@ -72,6 +73,8 @@ interface WriteContext {
   /** Bun.SQL transaction instance (Postgres only, used for unnest bulk path). */
   rawTx?: any;
   snapshotMode: boolean;
+  /** Direct driver access for SQLite prepared-statement bulk inserts. */
+  driver?: SqlDriver;
 }
 
 interface SqlDriver {
@@ -80,6 +83,8 @@ interface SqlDriver {
   /** Execute multiple statements inside a transaction. rawTx is the Bun.SQL transaction instance (Postgres only). */
   transaction(fn: (exec: ExecFn, rawTx?: any) => Promise<void>): Promise<void>;
   close(): Promise<void>;
+  /** Optimized bulk insert path for SQLite using cached prepared statements. */
+  insertBulk?(table: string, columns: string[], rows: unknown[][], conflictClause?: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +114,27 @@ function createPostgresDriver(url: string): SqlDriver {
 function createSqliteDriver(path: string): SqlDriver {
   const database = createSqliteConnection(path);
   database.exec("PRAGMA temp_store = MEMORY;");     // temp tables in memory
+  const stmtCache = new Map<string, ReturnType<Database["query"]>>();
+
+  function getInsertStmt(
+    table: string,
+    columns: string[],
+    conflictClause = "",
+  ): ReturnType<Database["query"]> {
+    const placeholders = columns.map(() => "?").join(", ");
+    const normalizedConflictClause = conflictClause.trim();
+    const sql = normalizedConflictClause
+      ? `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ${normalizedConflictClause}`
+      : `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
+
+    let stmt = stmtCache.get(sql);
+    if (!stmt) {
+      stmt = database.query(sql);
+      stmtCache.set(sql, stmt);
+    }
+    return stmt;
+  }
+
   return {
     dialect: "sqlite",
     async exec(query: string, params?: unknown[]) {
@@ -131,7 +157,15 @@ function createSqliteDriver(path: string): SqlDriver {
         throw e;
       }
     },
+    insertBulk(table: string, columns: string[], rows: unknown[][], conflictClause = "") {
+      if (rows.length === 0) return;
+      const stmt = getInsertStmt(table, columns, conflictClause);
+      for (const row of rows) {
+        stmt.run(...(row as any[]));
+      }
+    },
     async close() {
+      stmtCache.clear();
       database.close();
     },
   };
@@ -192,8 +226,8 @@ function numOrNull(v: string | null | undefined): string | null {
 // Consolidated writers — one function per table, dialect dispatch inside.
 //
 // Postgres uses unnest(...) for columnar bulk insert, chunked at PG_BULK_CHUNK.
-// SQLite uses multi-row VALUES (...) insert, chunked to stay under the
-// parameter limit (MAX_SQLITE_PARAMS / column_count rows per statement).
+// SQLite prefers cached prepared statements with stmt.run(...) per row and
+// falls back to multi-row VALUES (...) inserts if the fast path is unavailable.
 // ---------------------------------------------------------------------------
 
 /** Build placeholders for a multi-row VALUES insert — ($1,$2,$3), ($4,$5,$6), ... for Postgres or (?,?,?), (?,?,?), ... for SQLite. */
@@ -210,7 +244,7 @@ function buildRowPlaceholders(dialect: Dialect, columnCount: number, rowCount: n
   return rows.join(", ");
 }
 
-/** Insert a batch of rows via multi-row VALUES (SQLite path) or unnest (Postgres path). */
+/** Insert a batch of rows via cached SQLite statements, multi-row VALUES fallback, or Postgres unnest(). */
 async function insertRows(
   ctx: WriteContext,
   table: string,
@@ -220,6 +254,11 @@ async function insertRows(
   pgTypes?: string[],
 ): Promise<void> {
   if (rows.length === 0) return;
+
+  if (ctx.dialect === "sqlite" && ctx.driver?.insertBulk) {
+    ctx.driver.insertBulk(table, columns, rows, conflictClause);
+    return;
+  }
 
   const chunkSize = ctx.dialect === "postgres"
     ? PG_BULK_CHUNK
@@ -1391,6 +1430,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       const allSystemTransactions: SystemTransactionRecord[] = [];
       const allUnchangedConsensusObjects: UnchangedConsensusObjectRecord[] = [];
 
+      const _parseStart = performance.now();
       const parsedBatch: ProcessedCheckpoint[] = [];
       for (let processed of batch) {
         // Deferred binary parsing: parse the raw binary now at write time
@@ -1433,11 +1473,18 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         allUnchangedConsensusObjects.push(...(processed.unchangedConsensusObjects ?? []));
       }
 
+      const _parseMs = performance.now() - _parseStart;
+      if (_parseMs > 10) console.error(`[write-profile] binary_parse=${Math.round(_parseMs)}ms for ${batch.length}cp`);
+
       // Wrap all writes in a single transaction
       await d.transaction(async (exec, rawTx) => {
-      const ctx: WriteContext = { dialect, exec, rawTx, snapshotMode };
+      const ctx: WriteContext = { dialect, exec, rawTx, snapshotMode, driver: d };
+      const _wt: Record<string, number> = {};
+      const _t = (label: string) => { _wt[label] = performance.now(); };
+      const _te = (label: string) => { _wt[label] = performance.now() - _wt[label]; };
 
       // Write events (uses exec for both dialects — user-defined schemas)
+      _t("events");
       for (const [handlerName, events] of groupedEvents) {
         const table = tables.get(handlerName);
         if (!table) continue;
@@ -1465,8 +1512,10 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
           );
         }
       }
+      _te("events");
 
-      // Write checkpoints (one row per checkpoint; dedup by sequence number)
+      // Write checkpoints
+      _t("checkpoints");
       if (config.checkpoints) {
         const seen = new Set<string>();
         const uniqueCheckpoints: Checkpoint[] = [];
@@ -1481,49 +1530,80 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         }
       }
 
+      _te("checkpoints");
+
       // Write balance changes
+      _t("balances");
       if (config.balances && allBalanceChanges.length > 0) {
         await writeBalanceChanges(ctx, allBalanceChanges);
       }
 
+      _te("balances");
+
       // Write transactions
+      _t("transactions");
       if (config.transactions && allTransactions.length > 0) {
         await writeTransactions(ctx, allTransactions);
       }
 
-      // Write move calls
+      _te("transactions");
+
+      _t("move_calls");
       if (config.transactions && allMoveCalls.length > 0) {
         await writeMoveCalls(ctx, allMoveCalls);
       }
 
-      // Write object changes
+      _te("move_calls");
+
+      _t("object_changes");
       if (config.objectChanges && allObjectChanges.length > 0) {
         await writeObjectChanges(ctx, allObjectChanges);
       }
 
-      // Write transaction dependencies
+      _te("object_changes");
+
+      _t("dependencies");
       if (config.dependencies && allDependencies.length > 0) {
         await writeDependencies(ctx, allDependencies);
       }
 
-      // Write transaction inputs
+      _te("dependencies");
+
+      _t("inputs");
       if (config.inputs && allInputs.length > 0) {
         await writeTransactionInputs(ctx, allInputs);
       }
 
-      // Write commands
+      _te("inputs");
+
+      _t("commands");
       if (config.commands && allCommands.length > 0) {
         await writeCommands(ctx, allCommands);
       }
 
-      // Write system transactions
+      _te("commands");
+
+      _t("system_txs");
       if (config.systemTransactions && allSystemTransactions.length > 0) {
         await writeSystemTransactions(ctx, allSystemTransactions);
       }
 
-      // Write unchanged consensus objects
+      _te("system_txs");
+
+      _t("uco");
       if (config.unchangedConsensusObjects && allUnchangedConsensusObjects.length > 0) {
         await writeUnchangedConsensusObjects(ctx, allUnchangedConsensusObjects);
+      }
+      _te("uco");
+
+      // Profile output
+      const _total = Object.values(_wt).reduce((a, b) => a + b, 0);
+      if (_total > 100) {
+        const _pct = (v: number) => Math.round(v / _total * 100);
+        const _ms = (v: number) => Math.round(v);
+        console.error(`[write-profile] ${batch.length}cp | ` +
+          Object.entries(_wt).map(([k, v]) => `${k}=${_ms(v)}ms(${_pct(v)}%)`).join(" ") +
+          ` | total=${_ms(_total)}ms`);
       }
       }); // end transaction
     },
@@ -1616,4 +1696,3 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
   return storageObj;
 }
-

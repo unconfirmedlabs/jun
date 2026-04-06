@@ -146,4 +146,85 @@ describe("createSqlStorage snapshot mode", () => {
     expect(result.balanceRow!.balance).toBe("100");
     expect(result.balanceRow!.last_checkpoint).toBe("1");
   });
+
+  test("reuses cached SQLite prepared statements for non-snapshot transaction inserts", async () => {
+    const result = runBun<{ queryCalls: number; prepareCalls: number; rowCount: number }>(`
+      import { Database } from "bun:sqlite";
+
+      let queryCalls = 0;
+      let prepareCalls = 0;
+
+      const originalQuery = Database.prototype.query;
+      const originalPrepare = Database.prototype.prepare;
+
+      Database.prototype.query = function (...args) {
+        queryCalls++;
+        return originalQuery.apply(this, args);
+      };
+
+      Database.prototype.prepare = function (...args) {
+        prepareCalls++;
+        return originalPrepare.apply(this, args);
+      };
+
+      const { createSqlStorage } = await import("./src/pipeline/destinations/sql.ts");
+      const storage = createSqlStorage({
+        url: "sqlite:${TEST_DB}",
+        transactions: true,
+      });
+      await storage.initialize();
+
+      const timestamp = new Date("2026-04-01T12:00:00Z");
+      const checkpoint = (seq) => ({
+        sequenceNumber: BigInt(seq),
+        timestamp,
+        transactions: [],
+        source: "backfill",
+      });
+      const transaction = (seq) => ({
+        digest: "0xdup",
+        sender: "0x1",
+        success: true,
+        computationCost: "1",
+        storageCost: "2",
+        storageRebate: "0",
+        moveCallCount: 0,
+        checkpointSeq: BigInt(seq),
+        timestamp,
+      });
+
+      await storage.write([{
+        checkpoint: checkpoint(1),
+        events: [],
+        balanceChanges: [],
+        transactions: [transaction(1)],
+        moveCalls: [],
+      }]);
+      await storage.write([{
+        checkpoint: checkpoint(2),
+        events: [],
+        balanceChanges: [],
+        transactions: [transaction(2)],
+        moveCalls: [],
+      }]);
+      await storage.shutdown();
+
+      const insertQueryCalls = queryCalls;
+      const insertPrepareCalls = prepareCalls;
+
+      const db = new Database("${TEST_DB}", { readonly: true });
+      const rowCount = (db.query("SELECT COUNT(*) AS c FROM transactions WHERE digest = '0xdup'").get() as { c: number }).c;
+      db.close();
+
+      console.log(JSON.stringify({
+        queryCalls: insertQueryCalls,
+        prepareCalls: insertPrepareCalls,
+        rowCount,
+      }));
+    `);
+
+    expect(result.queryCalls).toBe(1);
+    expect(result.prepareCalls).toBe(1);
+    expect(result.rowCount).toBe(1);
+  });
 });
