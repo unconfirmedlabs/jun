@@ -2428,6 +2428,187 @@ async function runPipeline(configFile: string | undefined, opts: PipelineOpts, b
     }
 }
 
+// ---------------------------------------------------------------------------
+// index-chain — extract all structural chain data
+// ---------------------------------------------------------------------------
+
+pipelineCmd
+  .command("index-chain")
+  .description("Extract all structural chain data to per-table SQLite files")
+  .option("--output <dir>", "output directory for per-table SQLite files")
+  .option("--sqlite <path>", "single SQLite file (alternative to --output)")
+  .option("--postgres <url>", "Postgres connection URL")
+  .option("--epoch <number>", "backfill a completed epoch")
+  .option("--from <checkpoint>", "start checkpoint (inclusive)")
+  .option("--to <checkpoint>", "end checkpoint (inclusive)")
+  .option("--live", "continuous mode via gRPC subscription")
+  .option("--grpc-url <url>", "gRPC endpoint")
+  .option("--archive-url <url>", "archive base URL")
+  .option("--network <name>", "network name", "mainnet")
+  .option("--concurrency <n>", "archive fetch concurrency", "200")
+  .option("--workers <n>", "decoder worker threads")
+  .option("--quiet", "suppress human output")
+  .option("--yes", "skip confirmation prompt")
+  .option("--log [level]", "enable logging to stderr")
+  .action(async (opts: any) => {
+    const { mkdirSync } = await import("fs");
+    const path = await import("path");
+    const { createArchiveSource } = await import("./pipeline/sources/archive.ts");
+    const { createSqlStorage } = await import("./pipeline/destinations/sql.ts");
+    const { createPipeline } = await import("./pipeline/pipeline.ts");
+
+    const isLive = !!opts.live;
+    const isSnapshot = !isLive;
+
+    if (!opts.epoch && !opts.from && !isLive) {
+      console.error("[jun] error: provide --epoch, --from/--to, or --live");
+      process.exit(1);
+    }
+
+    // Log level
+    if (opts.log) {
+      process.env.LOG_LEVEL = typeof opts.log === "string" ? opts.log : "info";
+    } else {
+      process.env.LOG_LEVEL = "silent";
+    }
+
+    // Determine storage URL
+    let storageUrl: string;
+    if (opts.output) {
+      const dir = opts.output.endsWith("/") ? opts.output : opts.output + "/";
+      mkdirSync(dir, { recursive: true });
+      storageUrl = `sqlite:${dir}`;
+    } else if (opts.sqlite) {
+      storageUrl = `sqlite:${opts.sqlite}`;
+    } else if (opts.postgres) {
+      storageUrl = opts.postgres;
+    } else {
+      const defaultDir = opts.epoch ? `./epoch-${opts.epoch}/` : "./index-chain/";
+      mkdirSync(defaultDir, { recursive: true });
+      storageUrl = `sqlite:${defaultDir}`;
+    }
+
+    // Network defaults
+    const networkDefaults: Record<string, string> = {
+      mainnet: "https://checkpoints.mainnet.sui.io",
+      testnet: "https://checkpoints.testnet.sui.io",
+      devnet: "https://checkpoints.devnet.sui.io",
+    };
+    const net = opts.network ?? "mainnet";
+    const grpcUrl = opts.grpcUrl ?? "hayabusa.mainnet.unconfirmed.cloud:443";
+    const archiveUrl = opts.archiveUrl ?? networkDefaults[net];
+
+    // Resolve epoch range if needed
+    let from: bigint | undefined;
+    let to: bigint | undefined;
+
+    if (opts.epoch) {
+      const { createGrpcClient } = await import("./grpc.ts");
+      const client = createGrpcClient({ url: grpcUrl });
+      const epochInfo = await client.getEpoch(BigInt(opts.epoch));
+      from = epochInfo.firstCheckpoint;
+      to = epochInfo.lastCheckpoint;
+      client.close();
+      if (!from || !to) {
+        console.error(`[jun] error: could not resolve epoch ${opts.epoch}`);
+        process.exit(1);
+      }
+    } else if (opts.from) {
+      from = BigInt(opts.from);
+      to = opts.to ? BigInt(opts.to) : undefined;
+    }
+
+    // Create storage — all tables enabled, no event handlers, no balance materialization
+    const storage = createSqlStorage({
+      url: storageUrl,
+      balances: true,
+      transactions: true,
+      checkpoints: true,
+      objectChanges: true,
+      dependencies: true,
+      inputs: true,
+      commands: true,
+      systemTransactions: true,
+      unchangedConsensusObjects: true,
+      rawEvents: true,
+      deferIndexes: isSnapshot,
+      skipBalanceMaterialization: true,
+    });
+
+    // Create sources
+    const sources: any[] = [];
+    if (from !== undefined) {
+      sources.push(createArchiveSource({
+        archiveUrl: archiveUrl!,
+        from,
+        to,
+        concurrency: parseInt(opts.concurrency ?? "200"),
+        workers: opts.workers ? parseInt(opts.workers) : undefined,
+        enabledProcessors: {
+          balances: true,
+          transactions: true,
+          objectChanges: true,
+          dependencies: true,
+          inputs: true,
+          commands: true,
+          systemTransactions: true,
+          unchangedConsensusObjects: true,
+          events: true,
+          checkpoints: true,
+        },
+        unorderedDrain: isSnapshot,
+        grpcUrl: to ? undefined : grpcUrl,
+      }));
+    }
+    if (isLive) {
+      const { createGrpcLiveSource } = await import("./pipeline/sources/grpc.ts");
+      sources.push(createGrpcLiveSource({ url: grpcUrl }));
+    }
+
+    // Build pipeline — no processors for archive (workers handle extraction)
+    const pipeline = createPipeline();
+    for (const s of sources) pipeline.source(s);
+    pipeline.storage(storage);
+
+    const totalCheckpoints = from !== undefined && to !== undefined ? to - from + 1n : undefined;
+    pipeline.configure({
+      quiet: opts.quiet ?? false,
+      log: opts.log ?? false,
+      totalCheckpoints,
+      buffer: { maxBatchSize: 1000 },
+    });
+
+    // Print summary
+    if (!opts.quiet) {
+      console.error("");
+      console.error("  index-chain");
+      console.error("  ───────────");
+      if (opts.epoch) console.error(`  epoch           ${opts.epoch}`);
+      if (from && to) console.error(`  checkpoints     ${from} → ${to} (${(to - from + 1n).toLocaleString()})`);
+      console.error(`  output          ${storageUrl.replace("sqlite:", "")}`);
+      console.error(`  concurrency     ${opts.concurrency ?? 200}`);
+      if (opts.workers) console.error(`  workers         ${opts.workers}`);
+      console.error("");
+    }
+
+    // Confirm
+    if (!opts.yes && !opts.quiet) {
+      const readline = await import("readline");
+      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      const answer = await new Promise<string>(resolve => rl.question("  Proceed? [Y/n] ", resolve));
+      rl.close();
+      if (answer.toLowerCase() === "n") { process.exit(0); }
+    }
+
+    await pipeline.run();
+
+    if (isSnapshot) process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// Legacy pipeline commands (run/snapshot)
+// ---------------------------------------------------------------------------
+
 addPipelineOptions(pipelineCmd.command("run [config]").description("Run a continuous pipeline (backfill + live)"))
   .action(async (configFile: string | undefined, opts: PipelineOpts) => {
     await runPipeline(configFile, opts, false);

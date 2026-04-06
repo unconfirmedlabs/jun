@@ -212,17 +212,16 @@ function createPerTableSqliteDriver(dir: string): SqlDriver {
   const connections = new Map<string, Database>();
   const stmtCaches = new Map<string, Map<string, ReturnType<Database["query"]>>>();
 
-  function getDb(tableName: string): Database {
+  function getDb(tableName: string) {
     const fileKey = resolveDbFile(tableName);
     let db = connections.get(fileKey);
     if (!db) {
       const dbPath = path.join(dir, `${fileKey}.db`);
-      db = new Database(dbPath);
+      db = createSqliteConnection(dbPath);
       db.exec("PRAGMA synchronous = OFF");
       db.exec("PRAGMA journal_mode = OFF");
       db.exec("PRAGMA locking_mode = EXCLUSIVE");
       db.exec("PRAGMA temp_store = MEMORY");
-      db.exec("PRAGMA page_size = 32768");
       connections.set(fileKey, db);
     }
     return db;
@@ -962,7 +961,8 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
           : createSqliteDriver(sqlitePath);
 
       // Snapshot mode: drop existing tables to avoid stale constraints
-      if (snapshotMode || pgUnlogged) {
+      // Skip for per-table mode — each file is fresh
+      if ((snapshotMode || pgUnlogged) && !isPerTableMode) {
         await driver.exec("DROP TABLE IF EXISTS transactions");
         await driver.exec("DROP TABLE IF EXISTS move_calls");
         await driver.exec("DROP TABLE IF EXISTS balance_changes");
