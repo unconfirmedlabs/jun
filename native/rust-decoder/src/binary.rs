@@ -95,6 +95,7 @@ impl<'a> BinaryWriter<'a> {
 
     /// Write an optional byte slice as hex, or null.
     #[inline]
+    #[allow(dead_code)]
     pub fn write_opt_hex(&mut self, bytes: Option<&[u8]>) {
         match bytes {
             Some(b) => self.write_hex(b),
@@ -113,6 +114,7 @@ impl<'a> BinaryWriter<'a> {
 
     /// Write i128 as decimal string, length-prefixed.
     #[inline]
+    #[allow(dead_code)]
     pub fn write_i128_dec(&mut self, v: i128) {
         let mut tmp = [0u8; 40];
         let s = format_i128(v, &mut tmp);
@@ -181,6 +183,7 @@ fn format_u64(v: u64, buf: &mut [u8; 20]) -> &str {
     unsafe { std::str::from_utf8_unchecked(&buf[i..]) }
 }
 
+#[allow(dead_code)]
 fn format_i128(v: i128, buf: &mut [u8; 40]) -> &str {
     if v == 0 {
         return "0";
