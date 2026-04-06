@@ -16,6 +16,7 @@ type NativeCheckpointDecoder = {
   decode_subscribe_checkpoints_response: NativeDecodeFn;
   decode_get_checkpoint_response: NativeDecodeFn;
   decode_checkpoint_binary: NativeDecodeFn;
+  decode_subscribe_response_binary: NativeDecodeFn;
 };
 
 const LIB_NAME = `libjun_checkpoint_decoder.${suffix}`;
@@ -47,6 +48,10 @@ for (const libPath of LIB_PATHS) {
         returns: FFIType.u32,
       },
       decode_checkpoint_binary: {
+        args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32],
+        returns: FFIType.u32,
+      },
+      decode_subscribe_response_binary: {
         args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32],
         returns: FFIType.u32,
       },
@@ -155,6 +160,13 @@ export function decodeSubscribeCheckpointsResponseNative(
   input: Uint8Array,
 ): GrpcCheckpointResponse | null {
   return decodeResponse("decode_subscribe_checkpoints_response", input);
+}
+
+/** Decode a raw SubscribeCheckpointsResponse to binary format.
+ *  Returns: first 8 bytes = cursor (u64 LE), then binary checkpoint data.
+ *  Same binary format as decodeArchiveCheckpointBinary. */
+export function decodeSubscribeResponseBinary(input: Uint8Array): Uint8Array | null {
+  return decodeBinary("decode_subscribe_response_binary", input);
 }
 
 export function decodeGetCheckpointResponseNative(

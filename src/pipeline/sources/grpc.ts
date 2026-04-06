@@ -12,8 +12,10 @@ import {
 } from "../../grpc.ts";
 import {
   decodeSubscribeCheckpointsResponseNative,
+  decodeSubscribeResponseBinary,
   isNativeCheckpointDecoderAvailable,
 } from "../../checkpoint-native-decoder.ts";
+import { parseBinaryCheckpoint } from "../../binary-parser.ts";
 import type { Source, Checkpoint } from "../types.ts";
 import type { Logger } from "../../logger.ts";
 import { createLogger } from "../../logger.ts";
@@ -23,8 +25,6 @@ export interface GrpcLiveSourceConfig {
   url: string;
   /** Maximum reconnect delay in ms (default: 30000) */
   maxReconnectDelay?: number;
-  /** Force JSON path instead of native raw path (needed when ObjectSet is required) */
-  forceJsonPath?: boolean;
 }
 
 export function createGrpcLiveSource(config: GrpcLiveSourceConfig): Source {
@@ -47,15 +47,33 @@ export function createGrpcLiveSource(config: GrpcLiveSourceConfig): Source {
           log.info({ url: config.url }, "connecting");
           reconnectDelay = 1000;
 
-          if (isNativeCheckpointDecoderAvailable() && !config.forceJsonPath) {
+          if (isNativeCheckpointDecoderAvailable()) {
+            // Binary path: same Rust decoder as archive → guaranteed parity
             const grpcStream = currentClient.subscribeCheckpointsRaw(RAW_CHECKPOINT_READ_MASK_PATHS);
             for await (const responseBytes of grpcStream) {
               if (stopped) break;
-              const response = decodeSubscribeCheckpointsResponseNative(responseBytes);
-              if (!response) throw new Error("Native checkpoint decoder unavailable");
-              yield checkpointFromGrpcResponse(response, "live");
+              const binary = decodeSubscribeResponseBinary(responseBytes);
+              if (!binary || binary.byteLength < 8) {
+                // Fallback to JSON path
+                const response = decodeSubscribeCheckpointsResponseNative(responseBytes);
+                if (response) yield checkpointFromGrpcResponse(response, "live");
+                continue;
+              }
+              // First 8 bytes = cursor (u64 LE), rest = binary checkpoint
+              const view = new DataView(binary.buffer, binary.byteOffset, binary.byteLength);
+              const _cursor = view.getBigUint64(0, true);
+              const checkpointBinary = binary.subarray(8);
+              const parsed = parseBinaryCheckpoint(checkpointBinary);
+              const checkpoint: Checkpoint = {
+                ...parsed.checkpoint,
+                source: "live",
+              };
+              (checkpoint as any)._rawBinary = checkpointBinary;
+              (checkpoint as any)._preProcessed = parsed.processed;
+              yield checkpoint;
             }
           } else {
+            // JS fallback: parse gRPC JSON response
             const grpcStream = currentClient.subscribeCheckpoints();
             for await (const response of grpcStream) {
               if (stopped) break;

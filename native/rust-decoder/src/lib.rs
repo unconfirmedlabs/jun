@@ -113,6 +113,51 @@ pub extern "C" fn decode_checkpoint_binary(
     }
 }
 
+/// FFI entry point: decode a SubscribeCheckpointsResponse to flat binary format.
+/// The input is the raw proto response (not compressed). Unwraps the envelope,
+/// extracts the inner checkpoint bytes, then runs the same extraction as archive.
+/// Returns: first 8 bytes = cursor (u64 LE), then binary checkpoint data.
+#[no_mangle]
+pub extern "C" fn decode_subscribe_response_binary(
+    input_ptr: *const u8,
+    input_len: u32,
+    output_ptr: *mut u8,
+    output_capacity: u32,
+) -> u32 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, output_capacity as usize) };
+
+    match decode_subscribe_response_binary_inner(input, output) {
+        Ok(n) => n as u32,
+        Err(_) => 0,
+    }
+}
+
+fn decode_subscribe_response_binary_inner(
+    response_bytes: &[u8],
+    output: &mut [u8],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    // Unwrap subscription response to get cursor + checkpoint bytes
+    let parsed = proto::parse_subscribe_checkpoints_response(response_bytes)?;
+    let cursor: u64 = parsed.cursor.parse().unwrap_or(0);
+
+    // Write cursor as first 8 bytes of output
+    if output.len() < 8 {
+        return Err("output buffer too small".into());
+    }
+    output[..8].copy_from_slice(&cursor.to_le_bytes());
+
+    // Extract checkpoint binary using the same path as archive
+    // (checkpoint_bytes is already decompressed — no zstd needed)
+    let (written, _profile) = if use_direct_binary() {
+        direct::extract_and_write_binary(parsed.checkpoint_bytes, &mut output[8..])?
+    } else {
+        extract::extract_checkpoint_binary(parsed.checkpoint_bytes, &mut output[8..])?
+    };
+
+    Ok(8 + written)
+}
+
 fn use_direct_binary() -> bool {
     USE_DIRECT.with(|v| *v)
 }

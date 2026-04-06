@@ -40,7 +40,7 @@ export const RAW_CHECKPOINT_READ_MASK_PATHS = [
   "transactions.transaction.bcs",
   "transactions.effects.bcs",
   "transactions.events.bcs",
-  "transactions.balance_changes",
+  "objects",
 ];
 
 const PROTO_LOAD_OPTIONS: protoLoader.Options = {
