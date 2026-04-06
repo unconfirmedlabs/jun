@@ -1,56 +1,19 @@
 /**
- * Pipeline orchestrator — connects Sources → Processors → Destinations.
+ * Pipeline orchestrator — Source → Storage + Broadcast.
  *
- * Production-grade execution engine with:
- * - Buffered writes with backpressure and retry
- * - Checkpoint cursor persistence (resume after restart)
- * - Metrics (Prometheus format) + HTTP server (/health, /status, /metrics)
- * - Auto-reload (periodic config fetch → processor.reload())
- * - Adaptive backfill throttle
- * - Gap repair
- * - Graceful shutdown (SIGINT/SIGTERM)
- *
- * @example
- * ```ts
- * import { createPipeline } from "jun/pipeline";
- * import { createGrpcLiveSource } from "jun/pipeline/sources/grpc";
- * import { createEventDecoder } from "jun/pipeline/processors/events";
- * import { createSqlStorage } from "jun/pipeline/destinations/sql";
- *
- * const pipeline = createPipeline()
- *   .source(createGrpcLiveSource({ url: "fullnode.testnet.sui.io:443" }))
- *   .processor(createEventDecoder({ handlers: { ... } }))
- *   .storage(createSqlStorage({ url: "postgres://..." }))
- *   .run();
- * ```
+ * Buffers checkpoints, writes to storage in batches, broadcasts after write.
+ * Graceful shutdown on SIGINT/SIGTERM.
  */
-import path from "path";
 import type {
-  Source,
-  Processor,
-  Storage,
-  Broadcast,
-  Pipeline,
-  PipelineConfig,
-  ProcessedCheckpoint,
+  Source, Storage, Broadcast, Pipeline, PipelineConfig, ProcessedCheckpoint,
 } from "./types.ts";
 import { emptyProcessed } from "./types.ts";
-import { createPipelineWriteBuffer, type PipelineWriteBuffer, type PipelineFlushStats } from "./write-buffer.ts";
+import { createPipelineWriteBuffer, type PipelineWriteBuffer } from "./write-buffer.ts";
 import { createLogger } from "../logger.ts";
 import type { Logger } from "../logger.ts";
-import { createMetrics, type IndexerMetrics } from "../serve.ts";
-import { createStateManager, type StateManager } from "../state.ts";
-import { createAdaptiveThrottle, type AdaptiveThrottle } from "../throttle.ts";
-import { fetchRemoteConfig } from "../remote-config.ts";
-import { createPostgresConnection } from "../db.ts";
-
-// ---------------------------------------------------------------------------
-// Implementation
-// ---------------------------------------------------------------------------
 
 export function createPipeline(): Pipeline {
   const sources: Source[] = [];
-  const processors: Processor[] = [];
   const storages: Storage[] = [];
   const broadcasts: Broadcast[] = [];
   let config: PipelineConfig = {};
@@ -58,37 +21,17 @@ export function createPipeline(): Pipeline {
   const log = createLogger();
 
   const pipeline: Pipeline = {
-    source(source: Source): Pipeline {
-      sources.push(source);
-      return pipeline;
-    },
-
-    processor(processor: Processor): Pipeline {
-      processors.push(processor);
-      return pipeline;
-    },
-
-    storage(storage: Storage): Pipeline {
-      storages.push(storage);
-      return pipeline;
-    },
-
-    broadcast(broadcast: Broadcast): Pipeline {
-      broadcasts.push(broadcast);
-      return pipeline;
-    },
-
-    configure(pipelineConfig: PipelineConfig): Pipeline {
-      config = { ...config, ...pipelineConfig };
-      return pipeline;
-    },
+    source(s: Source)       { sources.push(s); return pipeline; },
+    processor()             { return pipeline; }, // no-op — Rust handles extraction
+    storage(s: Storage)     { storages.push(s); return pipeline; },
+    broadcast(b: Broadcast) { broadcasts.push(b); return pipeline; },
+    configure(c: PipelineConfig) { config = { ...config, ...c }; return pipeline; },
 
     async run(): Promise<void> {
       if (sources.length === 0) throw new Error("Pipeline has no sources");
 
       const humanOutput = !config.quiet;
 
-      // Machine logs: off by default, enabled with --log or --log=LEVEL
       if (config.log) {
         const level = typeof config.log === "string" ? config.log : "info";
         process.env.LOG_LEVEL = level;
@@ -98,260 +41,70 @@ export function createPipeline(): Pipeline {
         log.level = "silent";
       }
 
-      // Initialize processors
-      for (const processor of processors) {
-        if (processor.initialize) {
-          await processor.initialize();
-          log.info({ processor: processor.name }, "processor initialized");
-        }
-      }
+      // Initialize
+      for (const s of storages) { await s.initialize(); log.info({ storage: s.name }, "storage initialized"); }
+      for (const b of broadcasts) { await b.initialize(); log.info({ broadcast: b.name }, "broadcast initialized"); }
 
-      // Initialize storages directly (creates tables, etc.) — no worker layer.
-      for (const storage of storages) {
-        await storage.initialize();
-        log.info({ storage: storage.name }, "storage initialized");
-      }
-
-      // Initialize broadcast destinations
-      for (const broadcast of broadcasts) {
-        await broadcast.initialize();
-        log.info({ broadcast: broadcast.name }, "broadcast initialized");
-      }
-
-      // --- State manager (cursor persistence) ---
-      let state: StateManager | null = null;
-      let sql: any = null;
-      if (config.database && config.database.startsWith("postgres")) {
-        sql = createPostgresConnection(config.database);
-        state = await createStateManager(sql);
-        log.info("state manager initialized");
-      }
-
-      // --- Metrics ---
-      const metrics = createMetrics();
-
-      // --- Adaptive throttle ---
-      let throttle: AdaptiveThrottle | null = null;
-      if (config.throttle) {
-        throttle = createAdaptiveThrottle({
-          initialConcurrency: config.throttle.initialConcurrency ?? 50,
-          minConcurrency: config.throttle.minConcurrency,
-          maxConcurrency: config.throttle.maxConcurrency,
-        }, log.child({ component: "throttle" }));
-        log.info({ concurrency: throttle.getConcurrency() }, "adaptive throttle enabled");
-      }
-
-      // Print human-readable banner
       if (humanOutput) {
         console.log("\n=== Jun Pipeline ===");
         console.log(`Sources:    ${sources.map(s => s.name).join(", ")}`);
-        if (processors.length > 0) console.log(`Processors: ${processors.map(p => p.name).join(", ")}`);
         if (storages.length > 0) console.log(`Storage:    ${storages.map(s => s.name).join(", ")}`);
         if (broadcasts.length > 0) console.log(`Broadcast:  ${broadcasts.map(b => b.name).join(", ")}`);
-        if (config.serve) console.log(`HTTP Server: port ${config.serve.port}`);
-        if (state) console.log(`Cursors:    enabled (Postgres)`);
         console.log("");
       }
 
-      // --- Signal handlers (graceful shutdown) ---
+      // Graceful shutdown
       let signalCount = 0;
       const shutdownHandler = () => {
         signalCount++;
         if (signalCount === 1) {
-          log.info("shutting down gracefully...");
           if (humanOutput) console.log("\nShutting down gracefully...");
           stopped = true;
-          for (const source of sources) source.stop();
+          for (const s of sources) s.stop();
         } else {
-          log.warn("forced exit");
           process.exit(1);
         }
       };
       process.on("SIGINT", shutdownHandler);
       process.on("SIGTERM", shutdownHandler);
 
-      // --- HTTP server (worker thread) ---
-      let httpWorker: Worker | null = null;
-      let metricsInterval: Timer | null = null;
-      if (config.serve) {
-        const workerUrl = path.join(import.meta.dir, "..", "serve-worker.ts");
-        httpWorker = new Worker(workerUrl);
-
-        httpWorker.postMessage({
-          type: "config",
-          port: config.serve.port,
-          hostname: config.serve.hostname ?? "127.0.0.1",
-          database: config.database ?? "",
-          adminToken: process.env.JUN_ADMIN_TOKEN,
-          configUrl: config.configUrl,
-        });
-
-        // Handle reload messages from HTTP worker
-        httpWorker.onmessage = (event: MessageEvent) => {
-          if (event.data.type === "reload") {
-            (async () => {
-              try {
-                let yamlContent = event.data.body;
-                if (!yamlContent?.trim() && event.data.configUrl) {
-                  const result = await fetchRemoteConfig(event.data.configUrl);
-                  yamlContent = result?.content;
-                }
-                if (!yamlContent?.trim()) return;
-
-                const { parsePipelineConfig } = await import("./config-parser.ts");
-                const parsed = await parsePipelineConfig(yamlContent);
-                for (const processor of processors) {
-                  if (processor.reload) {
-                    const matchingNew = parsed.processors.find(p => p.name === processor.name);
-                    if (matchingNew && matchingNew.reload) {
-                      // Extract config from the newly parsed processor (it was initialized with the new config)
-                      processor.reload((matchingNew as any)._reloadConfig);
-                    }
-                  }
-                }
-                log.info("config reloaded via HTTP worker");
-              } catch (err) {
-                log.error({ err }, "reload from HTTP worker failed");
-              }
-            })();
-          }
-        };
-
-        metricsInterval = setInterval(() => {
-          if (httpWorker) {
-            httpWorker.postMessage({
-              type: "metrics",
-              snapshot: metrics.snapshot(),
-              prometheus: metrics.prometheus(),
-            });
-          }
-        }, 500);
-
-        log.info({ port: config.serve.port }, "HTTP server worker starting");
-      }
-
-      // --- Auto-reload timer ---
-      let autoReloadInterval: Timer | null = null;
-      if (config.configAutoReloadMs && config.configUrl) {
-        const reloadLog = log.child({ component: "auto-reload" });
-        reloadLog.info({ intervalMs: config.configAutoReloadMs, configUrl: config.configUrl }, "auto-reload enabled");
-
-        let lastEtag: string | undefined;
-        autoReloadInterval = setInterval(async () => {
-          try {
-            const fetchResult = await fetchRemoteConfig(config.configUrl!, { etag: lastEtag });
-            if (!fetchResult) {
-              reloadLog.debug("config unchanged (etag match)");
-              return;
-            }
-            lastEtag = fetchResult.etag;
-
-            const { parsePipelineConfig } = await import("./config-parser.ts");
-            const parsed = await parsePipelineConfig(fetchResult.content);
-
-            for (const processor of processors) {
-              if (processor.reload) {
-                const matchingNew = parsed.processors.find(p => p.name === processor.name);
-                if (matchingNew) {
-                  // The newly parsed processor has the updated config baked in.
-                  // We call reload with the new config to swap handlers.
-                  processor.reload((matchingNew as any)._reloadConfig);
-                }
-              }
-            }
-            reloadLog.info("config reloaded");
-          } catch (err) {
-            reloadLog.error({ err }, "auto-reload failed");
-          }
-        }, config.configAutoReloadMs);
-      } else if (config.configAutoReloadMs && !config.configUrl) {
-        log.warn("configAutoReloadMs requires configUrl — auto-reload disabled");
-      }
-
-      // --- Create write buffers per source ---
+      // Write buffers — one per source
       const writeBuffers: Map<string, PipelineWriteBuffer> = new Map();
       for (const source of sources) {
         const isLive = source.name.includes("live");
-        const intervalMs = config.buffer?.intervalMs ?? (isLive ? 200 : 1000);
-        const maxBatchSize = config.buffer?.maxBatchSize ?? (isLive ? 50 : 1000);
-        const cursorKey = `${source.name}:${config.network ?? "default"}`;
-
         const buffer = createPipelineWriteBuffer(
           storages,
-          state,
-          cursorKey,
+          null, // no cursor persistence
+          source.name,
           {
             label: source.name,
-            intervalMs,
-            maxBatchSize,
+            intervalMs: config.buffer?.intervalMs ?? (isLive ? 200 : 1000),
+            maxBatchSize: config.buffer?.maxBatchSize ?? (isLive ? 50 : 1000),
             retries: config.buffer?.retries ?? 3,
-            onFlush: (stats: PipelineFlushStats) => {
-              if (isLive) {
-                metrics.recordLiveFlush({
-                  eventsWritten: stats.eventsWritten,
-                  tablesWritten: 0,
-                  flushDurationMs: stats.flushDurationMs,
-                  cursorKeys: new Map(),
-                  bufferSizeAfter: stats.bufferSizeAfter,
-                });
-              } else {
-                metrics.recordBackfillFlush({
-                  eventsWritten: stats.eventsWritten,
-                  tablesWritten: 0,
-                  flushDurationMs: stats.flushDurationMs,
-                  cursorKeys: new Map(),
-                  bufferSizeAfter: stats.bufferSizeAfter,
-                });
-                if (throttle) {
-                  throttle.recordLatency(stats.flushDurationMs);
-                  metrics.recordThrottleState(throttle.getConcurrency(), throttle.isPaused());
-                }
-              }
-            },
-            onBatchFlushed: (batch) => {
-              // Broadcast after successful storage write
+            onBatchFlushed: broadcasts.length > 0 ? (batch) => {
               for (const processed of batch) {
-                for (const broadcast of broadcasts) {
-                  try { broadcast.push(processed); } catch {}
+                for (const b of broadcasts) {
+                  try { b.push(processed); } catch {}
                 }
               }
-            },
+            } : undefined,
           },
           log.child({ component: `buffer:${source.name}` }),
         );
-
         buffer.start();
         writeBuffers.set(source.name, buffer);
       }
 
-      // --- Run all sources concurrently ---
-      const sourcePromises = sources.map(source =>
-        runSource(source, processors, writeBuffers.get(source.name)!, metrics, config, log, humanOutput),
-      );
-      await Promise.all(sourcePromises);
+      // Run all sources concurrently
+      await Promise.all(sources.map(source =>
+        runSource(source, writeBuffers.get(source.name)!, config, log, humanOutput),
+      ));
 
-      // --- Cleanup ---
-      if (autoReloadInterval) clearInterval(autoReloadInterval);
-      if (metricsInterval) clearInterval(metricsInterval);
-      if (httpWorker) httpWorker.terminate();
+      // Cleanup
+      for (const buf of writeBuffers.values()) await buf.stop();
+      for (const s of storages) await s.shutdown();
+      for (const b of broadcasts) await b.shutdown();
 
-      // Stop write buffers (flushes remaining data synchronously — errors throw here)
-      for (const buffer of writeBuffers.values()) {
-        await buffer.stop();
-      }
-
-      // Shutdown storages (triggers deferred indexes, balance materialization, VACUUM)
-      for (const storage of storages) {
-        await storage.shutdown();
-      }
-
-      // Shutdown broadcasts
-      for (const broadcast of broadcasts) await broadcast.shutdown();
-
-      // Close SQL connection
-      if (sql) await sql.close();
-
-      // Remove signal handlers
       process.removeListener("SIGINT", shutdownHandler);
       process.removeListener("SIGTERM", shutdownHandler);
 
@@ -360,9 +113,7 @@ export function createPipeline(): Pipeline {
 
     async stop(): Promise<void> {
       stopped = true;
-      for (const source of sources) {
-        await source.stop();
-      }
+      for (const s of sources) await s.stop();
     },
   };
 
@@ -370,7 +121,7 @@ export function createPipeline(): Pipeline {
 }
 
 // ---------------------------------------------------------------------------
-// Source runner — processes checkpoints from a single source
+// Source runner
 // ---------------------------------------------------------------------------
 
 function progressBar(pct: number, width = 20): string {
@@ -380,131 +131,46 @@ function progressBar(pct: number, width = 20): string {
 
 async function runSource(
   source: Source,
-  processors: Processor[],
   buffer: PipelineWriteBuffer,
-  metrics: IndexerMetrics,
   config: PipelineConfig,
   log: Logger,
   humanOutput: boolean,
 ): Promise<void> {
-  const isLive = source.name.includes("live");
-
-  let checkpointCount = 0;
-  const startTime = performance.now();
+  let count = 0;
+  const start = performance.now();
 
   for await (const checkpoint of source.stream()) {
-    // Deferred binary parsing: raw binary flows through to the write buffer.
-    // The SQL writer will parse at flush time.
     const rawBinary = (checkpoint as any)._rawBinary as Uint8Array | undefined;
+    const preProcessed = (checkpoint as any)._preProcessed as ProcessedCheckpoint | undefined;
+
+    const processed = preProcessed ?? emptyProcessed(checkpoint);
     if (rawBinary) {
-      // Use _preProcessed for broadcasts if available (live source parses eagerly)
-      const preProcessed = (checkpoint as any)._preProcessed as ProcessedCheckpoint | undefined;
-      const processed = preProcessed ?? emptyProcessed(checkpoint);
       (processed as any)._rawBinary = rawBinary;
       (processed as any)._enabledProcessors = (checkpoint as any)._enabledProcessors;
       (processed as any)._balanceCoinTypes = (checkpoint as any)._balanceCoinTypes;
-      await buffer.push(processed);
-      checkpointCount++;
-      if (checkpointCount % 100 === 0) {
-        const elapsedSecs = (performance.now() - startTime) / 1000;
-        const rate = Math.round(checkpointCount / (elapsedSecs || 1));
-        const isBackfill = source.name !== "live";
-        const total = (config.totalCheckpoints && isBackfill) ? Number(config.totalCheckpoints) : undefined;
-        if (total) {
-          const pct = Math.round((checkpointCount / total) * 100);
-          const remaining = Math.round((total - checkpointCount) / (rate || 1));
-          const bar = progressBar(pct);
-          process.stderr.write(`\r[${source.name}] ${bar} ${pct}% | ${checkpointCount.toLocaleString()}/${total.toLocaleString()} | ${rate}/s | ETA ${remaining}s  `);
-        }
-        log.info({ source: source.name, checkpoints: checkpointCount, rate: `${rate}/s` }, "progress");
-      }
-      continue;
     }
 
-    // If workers already ran processors (archive backfill), skip the loop.
-    // Live (gRPC) checkpoints still run processors on the main thread.
-    let processed: ProcessedCheckpoint;
-    const preProcessed = (checkpoint as any)._preProcessed as ProcessedCheckpoint | undefined;
-
-    if (preProcessed) {
-      processed = preProcessed;
-    } else {
-      processed = emptyProcessed(checkpoint);
-      for (const processor of processors) {
-        const result = processor.process(checkpoint);
-        processed.events.push(...result.events);
-        processed.balanceChanges.push(...result.balanceChanges);
-        processed.transactions.push(...result.transactions);
-        processed.moveCalls.push(...result.moveCalls);
-        processed.objectChanges.push(...result.objectChanges);
-        processed.dependencies.push(...result.dependencies);
-        processed.inputs.push(...result.inputs);
-        processed.commands.push(...result.commands);
-        processed.systemTransactions.push(...result.systemTransactions);
-        processed.unchangedConsensusObjects.push(...result.unchangedConsensusObjects);
-        processed.rawEvents.push(...result.rawEvents);
-      }
-    }
-
-    // Human output
-    if (humanOutput) {
-      for (const event of processed.events) {
-        const shortSender = event.sender.slice(0, 10) + "..." + event.sender.slice(-4);
-        console.log(`[${source.name}] EVENT  cp:${event.checkpointSeq} ${event.handlerName} sender:${shortSender} ${JSON.stringify(event.data)}`);
-      }
-      for (const change of processed.balanceChanges) {
-        const shortAddress = change.address.slice(0, 10) + "..." + change.address.slice(-4);
-        const sign = BigInt(change.amount) >= 0n ? "+" : "";
-        const coinName = change.coinType.split("::").pop();
-        console.log(`[${source.name}] BALANCE cp:${change.checkpointSeq} ${shortAddress} ${sign}${change.amount} ${coinName}`);
-      }
-      for (const tx of processed.transactions) {
-        const shortSender = tx.sender.slice(0, 10) + "..." + tx.sender.slice(-4);
-        const status = tx.success ? "ok" : "FAIL";
-        console.log(`[${source.name}] TX     cp:${tx.checkpointSeq} ${tx.digest.slice(0, 16)}... sender:${shortSender} ${status} calls:${tx.moveCallCount}`);
-      }
-    }
-
-    // Push to write buffer (handles batching, backpressure, retry, cursor persistence)
     await buffer.push(processed);
+    count++;
 
-    // Update metrics
-    if (isLive) {
-      metrics.setLiveCursor(checkpoint.sequenceNumber);
-      metrics.recordLiveCheckpoint();
-    } else {
-      metrics.setBackfillCursor(checkpoint.sequenceNumber);
-      metrics.recordBackfillCheckpoint();
-    }
+    // Progress bar (every 100 checkpoints)
+    if (count % 100 === 0) {
+      const elapsed = (performance.now() - start) / 1000;
+      const rate = Math.round(count / (elapsed || 1));
+      const total = config.totalCheckpoints ? Number(config.totalCheckpoints) : undefined;
 
-    // Progress logging
-    checkpointCount++;
-    if (checkpointCount % 100 === 0) {
-      const elapsedSecs = (performance.now() - startTime) / 1000;
-      const elapsed = elapsedSecs.toFixed(1);
-      const rate = Math.round(checkpointCount / (elapsedSecs || 1));
-      const isBackfill = source.name !== "live";
-      const total = (config.totalCheckpoints && isBackfill) ? Number(config.totalCheckpoints) : undefined;
-
-      if (config.onProgress) {
-        config.onProgress({ source: source.name, checkpoints: checkpointCount, total, rate, elapsedSecs });
-      } else if (total) {
-        // Progress bar always goes to stderr (even with --quiet)
-        const pct = Math.round((checkpointCount / total) * 100);
-        const remaining = Math.round((total - checkpointCount) / (rate || 1));
-        const bar = progressBar(pct);
-        process.stderr.write(`\r[${source.name}] ${bar} ${pct}% | ${checkpointCount.toLocaleString()}/${total.toLocaleString()} | ${rate}/s | ETA ${remaining}s  `);
-      } else if (humanOutput) {
-        console.log(`[${source.name}] ${checkpointCount} checkpoints (${rate}/s, ${elapsed}s)`);
+      if (total) {
+        const pct = Math.round((count / total) * 100);
+        const remaining = Math.round((total - count) / (rate || 1));
+        process.stderr.write(`\r[${source.name}] ${progressBar(pct)} ${pct}% | ${count.toLocaleString()}/${total.toLocaleString()} | ${rate}/s | ETA ${remaining}s  `);
       }
-      log.info({ source: source.name, checkpoints: checkpointCount, rate: `${rate}/s`, elapsed }, "progress");
     }
   }
 
-  // Clear progress bar line
-  if (config.totalCheckpoints && source.name !== "live" && !config.onProgress) {
-    const elapsedSecs = (performance.now() - startTime) / 1000;
-    const rate = Math.round(checkpointCount / (elapsedSecs || 1));
-    process.stderr.write(`\r[${source.name}] ${progressBar(100)} 100% | ${checkpointCount.toLocaleString()} checkpoints | ${rate}/s | ${elapsedSecs.toFixed(1)}s\n`);
+  // Final progress bar
+  if (config.totalCheckpoints && source.name !== "live") {
+    const elapsed = (performance.now() - start) / 1000;
+    const rate = Math.round(count / (elapsed || 1));
+    process.stderr.write(`\r[${source.name}] ${progressBar(100)} 100% | ${count.toLocaleString()} checkpoints | ${rate}/s | ${elapsed.toFixed(1)}s\n`);
   }
 }
