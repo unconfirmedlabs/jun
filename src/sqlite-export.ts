@@ -7,7 +7,18 @@ import { Database } from "bun:sqlite";
 import { dirname, extname } from "path";
 import { mkdirSync, unlinkSync } from "fs";
 
-export type SqliteExportDataset = "transactions" | "balance_changes" | "balances" | "events";
+export type SqliteExportDataset =
+  | "transactions"
+  | "balance_changes"
+  | "balances"
+  | "events"
+  | "checkpoints"
+  | "object_changes"
+  | "transaction_dependencies"
+  | "transaction_inputs"
+  | "commands"
+  | "system_transactions"
+  | "unchanged_consensus_objects";
 
 export interface SqliteDatasetExport {
   dataset: SqliteExportDataset;
@@ -15,7 +26,12 @@ export interface SqliteDatasetExport {
   tables: string[];
 }
 
-const CORE_TABLES = new Set(["transactions", "move_calls", "balance_changes", "balances"]);
+const CORE_TABLES = new Set([
+  "transactions", "move_calls", "balance_changes", "balances",
+  "checkpoints", "object_changes", "transaction_dependencies",
+  "transaction_inputs", "commands", "system_transactions",
+  "unchanged_consensus_objects",
+]);
 
 function quoteSqliteString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
@@ -126,6 +142,34 @@ export function exportSplitSqliteDatasets(sourcePath: string): SqliteDatasetExpo
     {
       dataset: "balances",
       tables: sourceTables.filter(table => table === "balances"),
+    },
+    {
+      dataset: "checkpoints",
+      tables: sourceTables.filter(table => table === "checkpoints"),
+    },
+    {
+      dataset: "object_changes",
+      tables: sourceTables.filter(table => table === "object_changes"),
+    },
+    {
+      dataset: "transaction_dependencies",
+      tables: sourceTables.filter(table => table === "transaction_dependencies"),
+    },
+    {
+      dataset: "transaction_inputs",
+      tables: sourceTables.filter(table => table === "transaction_inputs"),
+    },
+    {
+      dataset: "commands",
+      tables: sourceTables.filter(table => table === "commands"),
+    },
+    {
+      dataset: "system_transactions",
+      tables: sourceTables.filter(table => table === "system_transactions"),
+    },
+    {
+      dataset: "unchanged_consensus_objects",
+      tables: sourceTables.filter(table => table === "unchanged_consensus_objects"),
     },
     {
       dataset: "events",
