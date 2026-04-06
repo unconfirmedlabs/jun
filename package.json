@@ -19,7 +19,7 @@
     "./mcp": "./src/mcp.ts",
     "./signing": "./src/signing.ts",
     "./logger": "./src/logger.ts",
-    "./nats-types": "./src/nats-types.ts",
+    "./types/nats": "./src/types/nats.ts",
     "./normalize": "./src/normalize.ts",
     "./decompiler": "./src/decompiler.ts",
     "./package-reader": "./src/package-reader.ts"
