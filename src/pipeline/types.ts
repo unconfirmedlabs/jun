@@ -209,6 +209,19 @@ export interface UnchangedConsensusObjectRecord {
 }
 
 /** The result of processing a checkpoint. */
+/** Raw event record — generic schema, no BCS decoding. */
+export interface RawEventRecord {
+  txDigest: string;
+  eventSeq: number;
+  packageId: string;
+  module: string;
+  eventType: string;
+  sender: string;
+  contents: string;
+  checkpointSeq: bigint;
+  timestamp: Date;
+}
+
 export interface ProcessedCheckpoint {
   checkpoint: Checkpoint;
   events: DecodedEvent[];
@@ -221,6 +234,7 @@ export interface ProcessedCheckpoint {
   commands: CommandRecord[];
   systemTransactions: SystemTransactionRecord[];
   unchangedConsensusObjects: UnchangedConsensusObjectRecord[];
+  rawEvents: RawEventRecord[];
 }
 
 /** Build an empty ProcessedCheckpoint wrapping the given checkpoint. */
@@ -237,6 +251,7 @@ export function emptyProcessed(checkpoint: Checkpoint): ProcessedCheckpoint {
     commands: [],
     systemTransactions: [],
     unchangedConsensusObjects: [],
+    rawEvents: [],
   };
 }
 

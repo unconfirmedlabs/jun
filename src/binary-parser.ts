@@ -7,6 +7,7 @@ import type {
   MoveCallRecord,
   ObjectChangeRecord,
   ProcessedCheckpoint,
+  RawEventRecord,
   SystemTransactionRecord,
   TransactionDependencyRecord,
   TransactionInputRecord,
@@ -228,16 +229,39 @@ export function parseBinaryCheckpoint(buf: Uint8Array): ParsedBinaryCheckpoint {
     });
   }
 
-  // Raw event records are emitted by Rust, but they do not map to the JS
-  // event-decoder contract. Read and discard them so the cursor stays aligned.
+  // Raw event records — generic schema, no BCS decoding
+  const rawEvents: RawEventRecord[] = [];
   for (let i = 0; i < numEvents; i++) {
-    readStr(); // handler_name / raw event type
-    readStr(); // checkpoint_seq
-    readStr(); // tx_digest
-    readU32(); // event_seq
-    readStr(); // sender
-    readStr(); // timestamp
-    readStr(); // data_json
+    const eventType = readStr();
+    const checkpointSeq = parseBigInt(readStr());
+    const txDigest = readStr();
+    const eventSeq = readU32();
+    const sender = readStr();
+    const timestamp = parseDate(readStr());
+    const dataJson = readStr();
+
+    // data_json: {"packageId":"0x...","module":"...","eventType":"...","contents":"0x..."}
+    let packageId = "";
+    let module = "";
+    let contents = "";
+    try {
+      const data = JSON.parse(dataJson);
+      packageId = data.packageId ?? "";
+      module = data.module ?? "";
+      contents = data.contents ?? "";
+    } catch {}
+
+    rawEvents.push({
+      txDigest,
+      eventSeq,
+      packageId,
+      module,
+      eventType,
+      sender,
+      contents,
+      checkpointSeq,
+      timestamp,
+    });
   }
 
   const balanceChanges: BalanceChange[] = [];
@@ -301,6 +325,7 @@ export function parseBinaryCheckpoint(buf: Uint8Array): ParsedBinaryCheckpoint {
     commands,
     systemTransactions,
     unchangedConsensusObjects,
+    rawEvents,
   };
 
   return { checkpoint, processed };

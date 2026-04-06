@@ -18,7 +18,7 @@ import type {
   Storage, ProcessedCheckpoint, DecodedEvent, BalanceChange,
   TransactionRecord, MoveCallRecord, Checkpoint, ObjectChangeRecord,
   TransactionDependencyRecord, TransactionInputRecord, CommandRecord,
-  SystemTransactionRecord, UnchangedConsensusObjectRecord,
+  SystemTransactionRecord, UnchangedConsensusObjectRecord, RawEventRecord,
 } from "../types.ts";
 import type { Database } from "bun:sqlite";
 import type { FieldDefs } from "../../schema.ts";
@@ -58,10 +58,14 @@ export interface SqlStorageConfig {
   systemTransactions?: boolean;
   /** Enable unchanged_consensus_objects table */
   unchangedConsensusObjects?: boolean;
+  /** Enable raw_events table (generic schema, no BCS decode) */
+  rawEvents?: boolean;
   /** Defer index creation until shutdown (faster bulk inserts for snapshots) */
   deferIndexes?: boolean;
   /** Use UNLOGGED tables for Postgres (no WAL during inserts, faster bulk load) */
   pgUnlogged?: boolean;
+  /** Skip balance materialization at shutdown (balance_changes only, no balances table) */
+  skipBalanceMaterialization?: boolean;
 }
 
 type Dialect = "postgres" | "sqlite";
@@ -169,6 +173,119 @@ function createSqliteDriver(path: string): SqlDriver {
     async close() {
       stmtCache.clear();
       database.close();
+    },
+  };
+}
+
+/** Map table names to their DB file. Each table gets its own file.
+ *  Event handler tables (user-defined names) all go to events.db. */
+const TABLE_TO_FILE: Record<string, string> = {
+  transactions: "transactions",
+  move_calls: "move_calls",
+  balance_changes: "balance_changes",
+  object_changes: "object_changes",
+  transaction_dependencies: "transaction_dependencies",
+  transaction_inputs: "transaction_inputs",
+  commands: "commands",
+  system_transactions: "system_transactions",
+  unchanged_consensus_objects: "unchanged_consensus_objects",
+  checkpoints: "checkpoints",
+  raw_events: "events",
+};
+
+function resolveDbFile(tableName: string): string {
+  return TABLE_TO_FILE[tableName] ?? "events";
+}
+
+function extractTableNameFromSql(query: string): string | null {
+  const match = query.match(
+    /(?:CREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?|INSERT\s+INTO\s+|FROM\s+|ON\s+|DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?)(\w+)/i,
+  );
+  return match?.[1] ?? null;
+}
+
+function createPerTableSqliteDriver(dir: string): SqlDriver {
+  const { mkdirSync } = require("fs") as typeof import("fs");
+  const path = require("path") as typeof import("path");
+  mkdirSync(dir, { recursive: true });
+
+  const connections = new Map<string, Database>();
+  const stmtCaches = new Map<string, Map<string, ReturnType<Database["query"]>>>();
+
+  function getDb(tableName: string): Database {
+    const fileKey = resolveDbFile(tableName);
+    let db = connections.get(fileKey);
+    if (!db) {
+      const dbPath = path.join(dir, `${fileKey}.db`);
+      db = new Database(dbPath);
+      db.exec("PRAGMA synchronous = OFF");
+      db.exec("PRAGMA journal_mode = OFF");
+      db.exec("PRAGMA locking_mode = EXCLUSIVE");
+      db.exec("PRAGMA temp_store = MEMORY");
+      db.exec("PRAGMA page_size = 32768");
+      connections.set(fileKey, db);
+    }
+    return db;
+  }
+
+  function getStmt(tableName: string, sql: string): ReturnType<Database["query"]> {
+    const fileKey = resolveDbFile(tableName);
+    let cache = stmtCaches.get(fileKey);
+    if (!cache) { cache = new Map(); stmtCaches.set(fileKey, cache); }
+    let stmt = cache.get(sql);
+    if (!stmt) { stmt = getDb(tableName).query(sql); cache.set(sql, stmt); }
+    return stmt;
+  }
+
+  return {
+    dialect: "sqlite",
+
+    async exec(query: string, params?: unknown[]) {
+      const tableName = extractTableNameFromSql(query) ?? "default";
+      const db = getDb(tableName);
+      if (params && params.length > 0) {
+        return db.prepare(query).all(...(params as any[]));
+      }
+      return db.exec(query);
+    },
+
+    async transaction(fn) {
+      // Begin transaction on ALL open connections
+      for (const db of connections.values()) db.exec("BEGIN");
+      try {
+        const exec = async (query: string, params?: unknown[]) => {
+          const tableName = extractTableNameFromSql(query) ?? "default";
+          const db = getDb(tableName);
+          if (params && params.length > 0) return db.prepare(query).all(...(params as any[]));
+          return db.exec(query);
+        };
+        await fn(exec);
+        for (const db of connections.values()) db.exec("COMMIT");
+      } catch (e) {
+        for (const db of connections.values()) {
+          try { db.exec("ROLLBACK"); } catch {}
+        }
+        throw e;
+      }
+    },
+
+    insertBulk(table: string, columns: string[], rows: unknown[][], conflictClause = "") {
+      if (rows.length === 0) return;
+      const placeholders = columns.map(() => "?").join(", ");
+      const normalized = conflictClause.trim();
+      const sql = normalized
+        ? `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ${normalized}`
+        : `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
+      const stmt = getStmt(table, sql);
+      for (const row of rows) {
+        stmt.run(...(row as any[]));
+      }
+    },
+
+    async close() {
+      stmtCaches.clear();
+      for (const db of connections.values()) db.close();
+      connections.clear();
     },
   };
 }
@@ -624,6 +741,25 @@ async function writeUnchangedConsensusObjects(ctx: WriteContext, records: Unchan
   );
 }
 
+async function writeRawEvents(ctx: WriteContext, records: RawEventRecord[]): Promise<void> {
+  if (records.length === 0) return;
+  const conflict = ctx.snapshotMode ? "" : "ON CONFLICT (tx_digest, event_seq) DO NOTHING";
+  const rows = records.map(r => [
+    r.txDigest, r.eventSeq, r.packageId, r.module, r.eventType,
+    r.sender, r.contents,
+    r.checkpointSeq.toString(),
+    r.timestamp.toISOString(),
+  ]);
+  await insertRows(
+    ctx,
+    "raw_events",
+    ["tx_digest", "event_seq", "package_id", "module", "event_type", "sender", "contents", "checkpoint_seq", "sui_timestamp"],
+    rows,
+    conflict,
+    ["text", "integer", "text", "text", "text", "text", "text", "numeric", "timestamptz"],
+  );
+}
+
 async function writeMoveCalls(ctx: WriteContext, moveCalls: MoveCallRecord[]): Promise<void> {
   if (moveCalls.length === 0) return;
 
@@ -804,6 +940,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
   const isPostgres = config.url.startsWith("postgres");
   const isSqlite = config.url.startsWith("sqlite:");
   const sqlitePath = isSqlite ? config.url.slice(7) : "";
+  const isPerTableMode = isSqlite && (sqlitePath.endsWith("/") || sqlitePath.endsWith(require("path").sep));
 
   // Snapshot optimization: use aggressive SQLite pragmas + skip conflict checks
   const snapshotMode = !!config.deferIndexes;
@@ -820,7 +957,9 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
     async initialize(): Promise<void> {
       driver = isPostgres
         ? createPostgresDriver(config.url)
-        : createSqliteDriver(sqlitePath);
+        : isPerTableMode
+          ? createPerTableSqliteDriver(sqlitePath)
+          : createSqliteDriver(sqlitePath);
 
       // Snapshot mode: drop existing tables to avoid stale constraints
       if (snapshotMode || pgUnlogged) {
@@ -1449,6 +1588,51 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         log.info("unchanged_consensus_objects table created");
       }
 
+      // Create raw_events table
+      if (config.rawEvents) {
+        const pkClause = snapshotMode ? "" : "PRIMARY KEY";
+        if (driver.dialect === "postgres") {
+          const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
+          await driver.exec(`
+            CREATE ${unloggedKw} TABLE IF NOT EXISTS raw_events (
+              tx_digest TEXT NOT NULL,
+              event_seq INTEGER NOT NULL,
+              package_id TEXT NOT NULL,
+              module TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              sender TEXT NOT NULL,
+              contents TEXT NOT NULL,
+              checkpoint_seq NUMERIC NOT NULL,
+              sui_timestamp TIMESTAMPTZ NOT NULL
+            )
+          `);
+        } else {
+          await driver.exec(`
+            CREATE TABLE IF NOT EXISTS raw_events (
+              tx_digest TEXT NOT NULL,
+              event_seq INTEGER NOT NULL,
+              package_id TEXT NOT NULL,
+              module TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              sender TEXT NOT NULL,
+              contents TEXT NOT NULL,
+              checkpoint_seq TEXT NOT NULL,
+              sui_timestamp TEXT NOT NULL
+            )
+          `);
+        }
+        if (snapshotMode) {
+          deferredIndexes.push(`CREATE INDEX IF NOT EXISTS idx_raw_events_type ON raw_events(event_type)`);
+          deferredIndexes.push(`CREATE INDEX IF NOT EXISTS idx_raw_events_pkg ON raw_events(package_id)`);
+          deferredIndexes.push(`CREATE INDEX IF NOT EXISTS idx_raw_events_cp ON raw_events(checkpoint_seq)`);
+        } else {
+          await driver.exec(`CREATE INDEX IF NOT EXISTS idx_raw_events_type ON raw_events(event_type)`);
+          await driver.exec(`CREATE INDEX IF NOT EXISTS idx_raw_events_pkg ON raw_events(package_id)`);
+          await driver.exec(`CREATE INDEX IF NOT EXISTS idx_raw_events_cp ON raw_events(checkpoint_seq)`);
+        }
+        log.info("raw_events table created");
+      }
+
       if (deferredIndexes.length > 0) {
         log.info({ count: deferredIndexes.length }, "indexes deferred to shutdown");
       }
@@ -1502,6 +1686,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       const allCommands: CommandRecord[] = [];
       const allSystemTransactions: SystemTransactionRecord[] = [];
       const allUnchangedConsensusObjects: UnchangedConsensusObjectRecord[] = [];
+      const allRawEvents: RawEventRecord[] = [];
 
       const _parseStart = performance.now();
       const parsedBatch: ProcessedCheckpoint[] = [];
@@ -1526,6 +1711,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
             commands: enabledProcessors?.commands ? parsed.processed.commands : [],
             systemTransactions: enabledProcessors?.systemTransactions ? parsed.processed.systemTransactions : [],
             unchangedConsensusObjects: enabledProcessors?.unchangedConsensusObjects ? parsed.processed.unchangedConsensusObjects : [],
+            rawEvents: parsed.processed.rawEvents ?? [],
           };
         }
         parsedBatch.push(processed);
@@ -1544,6 +1730,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         allCommands.push(...(processed.commands ?? []));
         allSystemTransactions.push(...(processed.systemTransactions ?? []));
         allUnchangedConsensusObjects.push(...(processed.unchangedConsensusObjects ?? []));
+        allRawEvents.push(...(processed.rawEvents ?? []));
       }
 
       const _parseMs = performance.now() - _parseStart;
@@ -1669,6 +1856,12 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       }
       _te("uco");
 
+      _t("raw_events");
+      if (config.rawEvents && allRawEvents.length > 0) {
+        await writeRawEvents(ctx, allRawEvents);
+      }
+      _te("raw_events");
+
       // Profile output
       const _total = Object.values(_wt).reduce((a, b) => a + b, 0);
       if (_total > 100) {
@@ -1723,7 +1916,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       }
 
       // Materialize balances from balance_changes (snapshot mode)
-      if (driver && snapshotMode && config.balances) {
+      if (driver && snapshotMode && config.balances && !config.skipBalanceMaterialization) {
         log.info("materializing balances from balance_changes...");
         const startTime = performance.now();
         if (isPostgres) {
