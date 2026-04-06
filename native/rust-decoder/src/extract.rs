@@ -1327,6 +1327,11 @@ fn default_summary() -> DecodedSummary {
     }
 }
 
+/// Public wrapper for direct.rs to call.
+pub fn decode_transaction_data_pub(tx_bcs: &[u8]) -> Option<TransactionData> {
+    decode_transaction_data(tx_bcs)
+}
+
 fn decode_transaction_data(tx_bcs: &[u8]) -> Option<TransactionData> {
     let raw = bcs::from_bytes::<TransactionData>(tx_bcs).ok();
     let signed = bcs::from_bytes::<SenderSignedData>(tx_bcs)

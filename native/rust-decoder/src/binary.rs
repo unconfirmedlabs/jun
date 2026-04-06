@@ -65,6 +65,139 @@ impl<'a> BinaryWriter<'a> {
     pub fn write_usize_as_u32(&mut self, v: usize) {
         self.write_u32(v as u32);
     }
+
+    /// Patch a u32 at a previously written position.
+    #[inline]
+    pub fn write_u32_at(&mut self, pos: usize, v: u32) {
+        self.buf[pos..pos + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// Write null sentinel for an optional string.
+    #[inline]
+    pub fn write_null(&mut self) {
+        self.write_u16(NULL_STR);
+    }
+
+    /// Write a byte slice as "0x"-prefixed hex, length-prefixed.
+    #[inline]
+    pub fn write_hex(&mut self, bytes: &[u8]) {
+        let len = 2 + bytes.len() * 2;
+        self.write_u16(len as u16);
+        self.buf[self.pos] = b'0';
+        self.buf[self.pos + 1] = b'x';
+        self.pos += 2;
+        for &b in bytes {
+            self.buf[self.pos] = HEX_CHARS[(b >> 4) as usize];
+            self.buf[self.pos + 1] = HEX_CHARS[(b & 0x0f) as usize];
+            self.pos += 2;
+        }
+    }
+
+    /// Write an optional byte slice as hex, or null.
+    #[inline]
+    pub fn write_opt_hex(&mut self, bytes: Option<&[u8]>) {
+        match bytes {
+            Some(b) => self.write_hex(b),
+            None => self.write_null(),
+        }
+    }
+
+    /// Write u64 as decimal string, length-prefixed.
+    #[inline]
+    pub fn write_u64_dec(&mut self, v: u64) {
+        // Max u64 is 20 digits. Write to a small stack buffer.
+        let mut tmp = [0u8; 20];
+        let s = format_u64(v, &mut tmp);
+        self.write_str(s);
+    }
+
+    /// Write i128 as decimal string, length-prefixed.
+    #[inline]
+    pub fn write_i128_dec(&mut self, v: i128) {
+        let mut tmp = [0u8; 40];
+        let s = format_i128(v, &mut tmp);
+        self.write_str(s);
+    }
+
+    /// Write an optional u64 as decimal, or null.
+    #[inline]
+    pub fn write_opt_u64_dec(&mut self, v: Option<u64>) {
+        match v {
+            Some(n) => self.write_u64_dec(n),
+            None => self.write_null(),
+        }
+    }
+
+    /// Write Display impl as a length-prefixed string.
+    #[inline]
+    pub fn write_display<T: std::fmt::Display>(&mut self, v: &T) {
+        use std::fmt::Write;
+        // Reserve 2 bytes for length prefix, write directly after
+        let len_pos = self.pos;
+        self.pos += 2;
+        let start = self.pos;
+        // Write into a wrapper that writes directly to the buffer
+        let mut writer = BufWriter { buf: self.buf, pos: self.pos };
+        let _ = write!(writer, "{}", v);
+        self.pos = writer.pos;
+        let len = self.pos - start;
+        self.buf[len_pos..len_pos + 2].copy_from_slice(&(len as u16).to_le_bytes());
+    }
+
+    /// Write an empty string (length 0).
+    #[inline]
+    pub fn write_empty_str(&mut self) {
+        self.write_u16(0);
+    }
+}
+
+static HEX_CHARS: [u8; 16] = *b"0123456789abcdef";
+
+struct BufWriter<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> std::fmt::Write for BufWriter<'a> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let bytes = s.as_bytes();
+        self.buf[self.pos..self.pos + bytes.len()].copy_from_slice(bytes);
+        self.pos += bytes.len();
+        Ok(())
+    }
+}
+
+fn format_u64(v: u64, buf: &mut [u8; 20]) -> &str {
+    if v == 0 {
+        return "0";
+    }
+    let mut n = v;
+    let mut i = 20;
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    unsafe { std::str::from_utf8_unchecked(&buf[i..]) }
+}
+
+fn format_i128(v: i128, buf: &mut [u8; 40]) -> &str {
+    if v == 0 {
+        return "0";
+    }
+    let negative = v < 0;
+    let mut n = if negative { (v as i128).unsigned_abs() } else { v as u128 };
+    let mut i = 40;
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    if negative {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    unsafe { std::str::from_utf8_unchecked(&buf[i..]) }
 }
 
 /// Serialize an ExtractedCheckpoint into the binary format.

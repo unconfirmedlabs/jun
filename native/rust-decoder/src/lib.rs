@@ -9,6 +9,7 @@ use std::io::Read;
 
 mod binary;
 mod canonical;
+mod direct;
 mod extract;
 mod proto;
 
@@ -108,6 +109,14 @@ pub extern "C" fn decode_checkpoint_binary(
     }
 }
 
+fn use_direct_binary() -> bool {
+    USE_DIRECT.with(|v| *v)
+}
+
+thread_local! {
+    static USE_DIRECT: bool = std::env::var("JUN_DIRECT_BINARY").map(|v| v == "1").unwrap_or(false);
+}
+
 pub(crate) fn decode_checkpoint_binary_inner(
     compressed: &[u8],
     output: &mut [u8],
@@ -120,7 +129,11 @@ pub(crate) fn decode_checkpoint_binary_inner(
     decoder.read_to_end(&mut decompressed)?;
     let zstd_ns = t0.elapsed().as_nanos() as u64;
 
-    let (written, profile) = extract::extract_checkpoint_binary(&decompressed, output)?;
+    let (written, profile) = if use_direct_binary() {
+        direct::extract_and_write_binary(&decompressed, output)?
+    } else {
+        extract::extract_checkpoint_binary(&decompressed, output)?
+    };
 
     PROFILE_ACCUM.with(|acc| {
         let mut a = acc.borrow_mut();
