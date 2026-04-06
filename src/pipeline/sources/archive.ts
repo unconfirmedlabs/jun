@@ -199,45 +199,125 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
 
       try {
         const pool = decoderPool!;
-        const concurrencyPerWorker = Math.max(1, Math.ceil(fetchConcurrency / workerCount));
+        const maxInFlight = fetchConcurrency * 2;
+        let inFlight = 0;
+        let nextToFetch = config.from;
 
-        for await (const result of pool.stream(config.from, endSeq, config.archiveUrl, concurrencyPerWorker)) {
-          if (stopped) break;
-          const parseStart = performance.now();
-
-          let checkpoint: Checkpoint;
-          if (result.binary) {
-            checkpoint = checkpointFromBinaryResult(
-              result.binary,
-              config.enabledProcessors,
-              balanceCoinTypes,
-            );
-          } else if (result.payload) {
-            checkpoint = checkpointFromGrpcResponse(
-              result.payload.decoded,
-              "backfill",
-              result.payload.precomputedBalanceChanges,
-            );
-          } else {
-            throw new Error(`Checkpoint ${result.seq} decode returned no payload`);
-          }
-
-          parseTime += performance.now() - parseStart;
-          totalProcessed += 1;
-
-          if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
-            const elapsed = (performance.now() - profilingStart) / 1000;
-            const rate = Math.round(totalProcessed / Math.max(elapsed, 0.001));
-            const avgParse = (parseTime / totalProcessed).toFixed(2);
-            console.error(
-              `[archive-main] ${totalProcessed} checkpoints ${rate} checkpoint/s avg_parse=${avgParse}ms pending=${pending.size}`,
-            );
-          }
-
-          for await (const ready of emitCheckpoint(result.seq, checkpoint)) {
-            yield ready;
+        // Backpressure signaling
+        let backpressureResolve: (() => void) | null = null;
+        function signalBackpressure() {
+          if (backpressureResolve && inFlight < maxInFlight) {
+            const resolve = backpressureResolve;
+            backpressureResolve = null;
+            resolve();
           }
         }
+        function waitForBackpressure(): Promise<void> {
+          if (inFlight < maxInFlight) return Promise.resolve();
+          return new Promise(resolve => { backpressureResolve = resolve; });
+        }
+
+        // Drain signaling
+        let drainResolve: (() => void) | null = null;
+        function signalDrain() {
+          if (drainResolve) {
+            const resolve = drainResolve;
+            drainResolve = null;
+            resolve();
+          }
+        }
+        function waitForDrain(): Promise<void> {
+          return new Promise(resolve => { drainResolve = resolve; });
+        }
+
+        // Main-thread fetch → worker decode → push to pending
+        async function processCheckpoint(seq: bigint): Promise<void> {
+          try {
+            const url = `${config.archiveUrl}/${seq}.binpb.zst`;
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status} for checkpoint ${seq}`);
+            const compressed = new Uint8Array(await resp.arrayBuffer());
+            if (stopped) return;
+
+            const result = await pool.decode(seq, compressed);
+            if (stopped) return;
+
+            let checkpoint: Checkpoint;
+            if (result.binary) {
+              checkpoint = checkpointFromBinaryResult(
+                result.binary,
+                config.enabledProcessors,
+                balanceCoinTypes,
+              );
+            } else if (result.payload) {
+              checkpoint = checkpointFromGrpcResponse(
+                result.payload.decoded,
+                "backfill",
+                result.payload.precomputedBalanceChanges,
+              );
+            } else {
+              throw new Error(`Checkpoint ${seq} decode returned no payload`);
+            }
+
+            pending.set(seq, checkpoint);
+            totalProcessed += 1;
+
+            if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
+              const elapsed = (performance.now() - profilingStart) / 1000;
+              const rate = Math.round(totalProcessed / Math.max(elapsed, 0.001));
+              console.error(
+                `[archive-main] ${totalProcessed} checkpoints ${rate} checkpoint/s pending=${pending.size}`,
+              );
+            }
+          } catch (error) {
+            log.error({ checkpoint: seq.toString(), error }, "failed to fetch/decode checkpoint");
+          } finally {
+            inFlight--;
+            signalDrain();
+            signalBackpressure();
+          }
+        }
+
+        // Fetcher: fire-and-forget, backpressure when too many in-flight
+        let fetcherDone = false;
+        const fetcherPromise = (async () => {
+          while (nextToFetch <= endSeq && !stopped) {
+            await waitForBackpressure();
+            if (stopped) break;
+            const seq = nextToFetch++;
+            inFlight++;
+            processCheckpoint(seq);
+          }
+          fetcherDone = true;
+          signalDrain();
+        })();
+
+        // Drain: yield checkpoints as they arrive
+        while (!stopped) {
+          if (config.unorderedDrain) {
+            // Yield any available checkpoint from pending
+            let yielded = false;
+            for (const [seq, cp] of pending) {
+              pending.delete(seq);
+              yield cp;
+              yielded = true;
+            }
+            if (!yielded && fetcherDone && inFlight === 0) break;
+            if (!yielded) await waitForDrain();
+          } else {
+            // Ordered: yield contiguous from watermark
+            while (pending.has(watermark + 1n)) {
+              watermark += 1n;
+              const ready = pending.get(watermark)!;
+              pending.delete(watermark);
+              yield ready;
+            }
+            if (fetcherDone && inFlight === 0 && !pending.has(watermark + 1n)) break;
+            await waitForDrain();
+          }
+        }
+
+        await fetcherPromise;
       } finally {
         if (decoderPool) {
           decoderPool.shutdown();
