@@ -114,7 +114,7 @@ fn use_direct_binary() -> bool {
 }
 
 thread_local! {
-    static USE_DIRECT: bool = std::env::var("JUN_DIRECT_BINARY").map(|v| v == "1").unwrap_or(false);
+    static USE_DIRECT: bool = std::env::var("JUN_DIRECT_BINARY").map(|v| v != "0").unwrap_or(true);
 }
 
 pub(crate) fn decode_checkpoint_binary_inner(
