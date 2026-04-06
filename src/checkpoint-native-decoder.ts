@@ -183,6 +183,7 @@ export function decodeArchiveCheckpointBinary(input: Uint8Array): Uint8Array | n
 }
 
 export function hasDownloadAndDecodeRange(): boolean {
+  if (process.env.JUN_NATIVE_RANGE === "0") return false;
   return isNativeCheckpointDecoderAvailable()
     && typeof nativeDecoder?.download_and_decode_archive_checkpoint_range === "function";
 }
