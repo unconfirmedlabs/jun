@@ -2436,7 +2436,6 @@ pipelineCmd
   .command("index-chain")
   .description("Extract all structural chain data to per-table SQLite files")
   .option("--output <dir>", "output directory for per-table SQLite files")
-  .option("--sqlite <path>", "single SQLite file (for live mode)")
   .option("--epoch <number>", "backfill a completed epoch")
   .option("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
@@ -2502,24 +2501,10 @@ pipelineCmd
     }
     // Live-only mode: from/to stay undefined, no archive source created
 
-    // Create storage
-    let storage: any;
-    if (isLive && opts.sqlite) {
-      // Live mode with single SQLite file — use the existing sql storage
-      const { createSqlStorage } = await import("./pipeline/destinations/sql.ts");
-      storage = createSqlStorage({
-        url: `sqlite:${opts.sqlite}`,
-        balances: true, transactions: true, checkpoints: true,
-        objectChanges: true, dependencies: true, inputs: true,
-        commands: true, systemTransactions: true, unchangedConsensusObjects: true,
-        rawEvents: true, skipBalanceMaterialization: true,
-      });
-    } else {
-      // Per-table SQLite files (default for snapshot mode)
-      const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./index-chain");
-      const { createPerTableSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
-      storage = createPerTableSqliteStorage(outputDir);
-    }
+    // Create storage — per-table SQLite files for both archive and live
+    const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./index-chain");
+    const { createPerTableSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
+    const storage = createPerTableSqliteStorage(outputDir);
 
     // Build pipeline
     const pipeline = createPipeline();
@@ -2603,7 +2588,7 @@ pipelineCmd
 
     // Print summary
     if (!opts.quiet) {
-      const outputLabel = isLive ? (opts.sqlite ?? "live") : (opts.output ?? `./epoch-${opts.epoch ?? "chain"}`);
+      const outputLabel = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./index-chain");
       console.error("");
       console.error("  index-chain");
       console.error("  ───────────");

@@ -29,6 +29,9 @@ export const DEFAULT_READ_MASK_PATHS = [
   "summary.content_digest",
   "summary.total_network_transactions",
   "summary.epoch_rolling_gas_cost_summary",
+  "objects.object_id",
+  "objects.version",
+  "objects.object_type",
 ];
 
 export const RAW_CHECKPOINT_READ_MASK_PATHS = [
