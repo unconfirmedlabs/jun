@@ -266,41 +266,52 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
         }
 
         let allDecodesDone = false;
-        const decodePromises: Promise<void>[] = [];
+        let nextDecodeSeq = config.from;
+        let inflight = 0;
+        const MAX_INFLIGHT = workerCount * 64;
 
-        // Workers read cached files directly from disk — no main thread I/O,
-        // no postMessage transfer of compressed bytes. Just send the file path.
-        for (let seq = config.from; seq <= endSeq && !stopped; seq++) {
-          const cachePath = join(cacheDir, `${seq}.binpb.zst`);
-          const p = pool.decodeCached(seq, cachePath).then(result => {
+        function onDecodeResult(seq: bigint, result: import("../../checkpoint-decoder-pool.ts").DecodeResult) {
+          inflight--;
 
-            let checkpoint: Checkpoint;
-            if (result.binary) {
-              checkpoint = checkpointFromBinaryResult(
-                result.binary,
-                config.enabledProcessors,
-                balanceCoinTypes,
-              );
-            } else if (result.payload) {
-              checkpoint = checkpointFromGrpcResponse(
-                result.payload.decoded,
-                "backfill",
-                result.payload.precomputedBalanceChanges,
-              );
-            } else {
-              return;
-            }
-            pending.set(seq, checkpoint);
-            totalProcessed++;
-            signalDrain();
-          });
-          decodePromises.push(p);
+          let checkpoint: Checkpoint;
+          if (result.binary) {
+            checkpoint = checkpointFromBinaryResult(
+              result.binary,
+              config.enabledProcessors,
+              balanceCoinTypes,
+            );
+          } else if (result.payload) {
+            checkpoint = checkpointFromGrpcResponse(
+              result.payload.decoded,
+              "backfill",
+              result.payload.precomputedBalanceChanges,
+            );
+          } else {
+            submitDecodes();
+            return;
+          }
+          pending.set(seq, checkpoint);
+          totalProcessed++;
+          submitDecodes();
+          if (nextDecodeSeq > endSeq && inflight === 0) {
+            allDecodesDone = true;
+          }
+          signalDrain();
         }
 
-        Promise.all(decodePromises).then(() => {
-          allDecodesDone = true;
-          signalDrain();
-        });
+        function submitDecodes() {
+          while (inflight < MAX_INFLIGHT && nextDecodeSeq <= endSeq && !stopped) {
+            const seq = nextDecodeSeq++;
+            inflight++;
+            const cachePath = join(cacheDir, `${seq}.binpb.zst`);
+            pool.decodeCached(seq, cachePath).then(
+              result => onDecodeResult(seq, result),
+              () => { inflight--; submitDecodes(); },
+            );
+          }
+        }
+
+        submitDecodes();
 
         while (!stopped) {
           if (config.unorderedDrain) {
@@ -328,7 +339,6 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           }
         }
 
-        await Promise.all(decodePromises);
         const decodeElapsed = (performance.now() - decodeStart) / 1000;
         log.info(
           { decoded: totalProcessed, elapsed: `${decodeElapsed.toFixed(1)}s`, rate: Math.round(totalProcessed / decodeElapsed) },
