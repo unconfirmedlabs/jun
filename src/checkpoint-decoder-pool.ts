@@ -45,6 +45,12 @@ export interface CheckpointDecoderPool {
   decode(seq: bigint, compressed: Uint8Array): Promise<DecodeResult>;
   /** Decode a checkpoint from a cached file path (worker reads from disk). */
   decodeCached(seq: bigint, cachePath: string): Promise<DecodeResult>;
+  /** Assign cached file ranges to workers — workers own the decode loop. */
+  decodeCachedRange(
+    from: bigint,
+    to: bigint,
+    cacheDir: string,
+  ): AsyncIterable<StreamDecodeResult>;
   /** Assign checkpoint ranges to workers and stream decoded archive results. */
   stream(
     from: bigint,
@@ -282,6 +288,58 @@ export function createCheckpointDecoderPool(
           cachePath,
         });
       });
+    },
+
+    decodeCachedRange(from: bigint, to: bigint, cacheDir: string): AsyncIterable<StreamDecodeResult> {
+      if (pending.size > 0) {
+        throw new Error("checkpoint decoder pool has outstanding decode jobs");
+      }
+      if (activeStream) {
+        throw new Error("checkpoint decoder pool is already streaming");
+      }
+
+      const streamState: StreamState = {
+        queue: [],
+        waiters: [],
+        doneWorkers: 0,
+        closed: false,
+      };
+      activeStream = streamState;
+
+      const ranges = splitRange(from, to, workers.length);
+      for (let i = 0; i < workers.length; i++) {
+        const worker = workers[i]!;
+        const range = ranges[i]!;
+        worker.postMessage({
+          type: "decode-cached-range",
+          from: range.from.toString(),
+          to: range.to.toString(),
+          cacheDir,
+          workerIndex: i,
+        });
+      }
+
+      return {
+        [Symbol.asyncIterator](): AsyncIterator<StreamDecodeResult> {
+          return {
+            next(): Promise<IteratorResult<StreamDecodeResult>> {
+              if (streamState.queue.length > 0) {
+                return Promise.resolve({ value: streamState.queue.shift()!, done: false });
+              }
+              if (streamState.closed) {
+                return Promise.resolve({ value: undefined, done: true });
+              }
+              return new Promise(resolve => {
+                streamState.waiters.push(resolve);
+              });
+            },
+            return(): Promise<IteratorResult<StreamDecodeResult>> {
+              closeStream(streamState);
+              return Promise.resolve({ value: undefined, done: true });
+            },
+          };
+        },
+      };
     },
 
     stream(from: bigint, to: bigint, archiveUrl: string, concurrency: number): AsyncIterable<StreamDecodeResult> {

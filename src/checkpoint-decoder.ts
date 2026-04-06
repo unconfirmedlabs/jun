@@ -216,6 +216,60 @@ async function handleRangeAssignment(message: AssignRangeMessage): Promise<void>
   postMessage({ type: "done" });
 }
 
+interface DecodeCachedRangeMessage {
+  type: "decode-cached-range";
+  from: string;
+  to: string;
+  cacheDir: string;
+  workerIndex: number;
+}
+
+async function handleDecodeCachedRange(msg: DecodeCachedRangeMessage): Promise<void> {
+  const { readFileSync } = await import("fs");
+  const { join } = await import("path");
+
+  const from = BigInt(msg.from);
+  const to = BigInt(msg.to);
+  const useBinary = isNativeCheckpointDecoderAvailable();
+  let processed = 0;
+  const startedAt = performance.now();
+
+  for (let seq = from; seq <= to; seq++) {
+    const cachePath = join(msg.cacheDir, `${seq}.binpb.zst`);
+    try {
+      const compressed = new Uint8Array(readFileSync(cachePath));
+
+      if (useBinary) {
+        const binary = decodeArchiveCheckpointBinary(compressed);
+        if (binary) {
+          postBinaryBySeq(seq, binary);
+          processed++;
+          if (processed % 5000 === 0) {
+            const elapsed = (performance.now() - startedAt) / 1000;
+            console.error(
+              `[decode-worker ${msg.workerIndex}] ${processed} cp ${Math.round(processed / elapsed)} cp/s`,
+            );
+          }
+          continue;
+        }
+      }
+
+      // JS fallback
+      const payload = await decodeCheckpointJson(compressed, seq, null);
+      postMessage(`${seq}\n${JSON.stringify(payload)}`);
+      processed++;
+    } catch (err) {
+      postMessage({
+        type: "error",
+        seq: seq.toString(),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  postMessage({ type: "done" });
+}
+
 async function handleDecodeCached(msg: DecodeFromCacheMessage): Promise<void> {
   const { id, seq, cachePath } = msg;
   try {
@@ -249,6 +303,10 @@ self.onmessage = async (event: MessageEvent) => {
     }
     if (msg.type === "decode-cached") {
       await handleDecodeCached(msg as DecodeFromCacheMessage);
+      return;
+    }
+    if (msg.type === "decode-cached-range") {
+      await handleDecodeCachedRange(msg as DecodeCachedRangeMessage);
       return;
     }
   }

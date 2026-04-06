@@ -175,27 +175,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
       let watermark = config.from - 1n;
       const endSeq = to;
 
-      let parseTime = 0;
       let totalProcessed = 0;
-      const profilingStart = performance.now();
-
-      const emitCheckpoint = async function* (
-        seq: bigint,
-        checkpoint: Checkpoint,
-      ): AsyncGenerator<Checkpoint> {
-        if (config.unorderedDrain) {
-          yield checkpoint;
-          return;
-        }
-
-        pending.set(seq, checkpoint);
-        while (pending.has(watermark + 1n)) {
-          watermark += 1n;
-          const ready = pending.get(watermark)!;
-          pending.delete(watermark);
-          yield ready;
-        }
-      };
 
       try {
         const pool = decoderPool!;
@@ -253,25 +233,13 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
         log.info({ workers: workerCount }, "phase 2: decoding checkpoints");
         const decodeStart = performance.now();
 
-        let drainResolve: (() => void) | null = null;
-        function signalDrain() {
-          if (drainResolve) {
-            const resolve = drainResolve;
-            drainResolve = null;
-            resolve();
-          }
-        }
-        function waitForDrain(): Promise<void> {
-          return new Promise(resolve => { drainResolve = resolve; });
-        }
+        // Workers own the decode loop — each gets a range of files.
+        // No per-checkpoint postMessage from main thread.
+        const resultStream = pool.decodeCachedRange(config.from, endSeq, cacheDir);
 
-        let allDecodesDone = false;
-        let nextDecodeSeq = config.from;
-        let inflight = 0;
-        const MAX_INFLIGHT = workerCount * 64;
-
-        function onDecodeResult(seq: bigint, result: import("../../checkpoint-decoder-pool.ts").DecodeResult) {
-          inflight--;
+        for await (const result of resultStream) {
+          if (stopped) break;
+          const seq = result.seq;
 
           let checkpoint: Checkpoint;
           if (result.binary) {
@@ -287,55 +255,21 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
               result.payload.precomputedBalanceChanges,
             );
           } else {
-            submitDecodes();
-            return;
+            continue;
           }
-          pending.set(seq, checkpoint);
+
           totalProcessed++;
-          submitDecodes();
-          if (nextDecodeSeq > endSeq && inflight === 0) {
-            allDecodesDone = true;
-          }
-          signalDrain();
-        }
 
-        function submitDecodes() {
-          while (inflight < MAX_INFLIGHT && nextDecodeSeq <= endSeq && !stopped) {
-            const seq = nextDecodeSeq++;
-            inflight++;
-            const cachePath = join(cacheDir, `${seq}.binpb.zst`);
-            pool.decodeCached(seq, cachePath).then(
-              result => onDecodeResult(seq, result),
-              () => { inflight--; submitDecodes(); },
-            );
-          }
-        }
-
-        submitDecodes();
-
-        while (!stopped) {
           if (config.unorderedDrain) {
-            let yielded = false;
-            for (const [seq, cp] of pending) {
-              pending.delete(seq);
-              yield cp;
-              yielded = true;
-            }
-            if (!yielded && allDecodesDone) break;
-            if (!yielded) await waitForDrain();
+            yield checkpoint;
           } else {
+            pending.set(seq, checkpoint);
             while (pending.has(watermark + 1n)) {
               watermark += 1n;
-              yield pending.get(watermark)!;
+              const ready = pending.get(watermark)!;
               pending.delete(watermark);
+              yield ready;
             }
-            if (allDecodesDone && !pending.has(watermark + 1n)) break;
-            await waitForDrain();
-          }
-
-          if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
-            const elapsed = (performance.now() - decodeStart) / 1000;
-            console.error(`[decode] ${totalProcessed}/${totalCheckpoints} (${Math.round(totalProcessed / elapsed)} cp/s)`);
           }
         }
 
