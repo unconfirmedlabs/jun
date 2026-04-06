@@ -24,6 +24,8 @@ export interface Checkpoint {
   rawProto?: any;
   /** Pre-computed balance changes from archive worker (bypasses balance tracker) */
   precomputedBalanceChanges?: BalanceChange[];
+  /** Object type lookup: objectId:version → objectType string */
+  objectTypes?: Map<string, string>;
 
   // ─── Checkpoint summary fields ────────────────────────────────────────────
   /** Epoch this checkpoint belongs to */

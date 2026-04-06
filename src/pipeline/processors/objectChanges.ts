@@ -71,11 +71,21 @@ export function createObjectChangeTracker(): Processor {
           const input = flattenOwner(change.inputOwner);
           const output = flattenOwner(change.outputOwner);
 
+          // Look up object type: first from effects, then from ObjectSet
+          let objectType = change.objectType ?? null;
+          if (!objectType && checkpoint.objectTypes) {
+            const outKey = change.outputVersion ? `${change.objectId}:${change.outputVersion}` : null;
+            const inKey = change.inputVersion ? `${change.objectId}:${change.inputVersion}` : null;
+            objectType = (outKey ? checkpoint.objectTypes.get(outKey) : undefined)
+              ?? (inKey ? checkpoint.objectTypes.get(inKey) : undefined)
+              ?? null;
+          }
+
           records.push({
             txDigest: tx.digest,
             objectId: change.objectId,
             changeType,
-            objectType: change.objectType ?? null,
+            objectType,
             inputVersion: change.inputVersion ?? null,
             inputDigest: change.inputDigest ?? null,
             inputOwner: input.address,

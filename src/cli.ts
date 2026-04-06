@@ -2452,7 +2452,6 @@ pipelineCmd
   .option("--sse <port>", "broadcast via SSE on port")
   .option("--nats <url>", "broadcast to NATS")
   .action(async (opts: any) => {
-    const { createArchiveSource } = await import("./pipeline/sources/archive.ts");
     const { createPerTableSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
     const { createPipeline } = await import("./pipeline/pipeline.ts");
 
@@ -2503,7 +2502,6 @@ pipelineCmd
 
     // Create storage — per-table SQLite files for both archive and live
     const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./index-chain");
-    const { createPerTableSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
     const storage = createPerTableSqliteStorage(outputDir);
 
     // Build pipeline
@@ -2539,7 +2537,7 @@ pipelineCmd
     // Live gRPC source
     if (isLive) {
       const { createGrpcLiveSource } = await import("./pipeline/sources/grpc.ts");
-      pipeline.source(createGrpcLiveSource({ url: grpcUrl }));
+      pipeline.source(createGrpcLiveSource({ url: grpcUrl, forceJsonPath: true }));
 
       // Live mode needs JS processors to extract structural data from gRPC checkpoints.
       // Archive mode gets all this from the Rust binary decoder — no processors needed.

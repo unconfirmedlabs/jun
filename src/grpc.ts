@@ -29,9 +29,7 @@ export const DEFAULT_READ_MASK_PATHS = [
   "summary.content_digest",
   "summary.total_network_transactions",
   "summary.epoch_rolling_gas_cost_summary",
-  "objects.object_id",
-  "objects.version",
-  "objects.object_type",
+  "objects",
 ];
 
 export const RAW_CHECKPOINT_READ_MASK_PATHS = [
@@ -348,12 +346,20 @@ export interface GrpcCheckpointSummary {
 }
 
 /** A checkpoint response from gRPC */
+/** Object from the checkpoint's ObjectSet */
+export interface GrpcCheckpointObject {
+  objectId: string;
+  version: string;
+  objectType?: string;
+}
+
 export interface GrpcCheckpointResponse {
   cursor: string; // checkpoint sequence number as string (u64)
   checkpoint: {
     sequenceNumber: string;
     summary: GrpcCheckpointSummary | null;
     transactions: GrpcTransaction[];
+    objects?: { objects: GrpcCheckpointObject[] };
   };
 }
 

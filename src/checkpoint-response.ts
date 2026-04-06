@@ -59,5 +59,17 @@ export function checkpointFromGrpcResponse(
       storageRebate: rollingGas?.storageRebate ?? "0",
       nonRefundableStorageFee: rollingGas?.nonRefundableStorageFee ?? "0",
     },
+    objectTypes: buildObjectTypeMap(response.checkpoint.objects?.objects),
   };
+}
+
+function buildObjectTypeMap(objects?: Array<{ objectId: string; version: string; objectType?: string }>): Map<string, string> | undefined {
+  if (!objects || objects.length === 0) return undefined;
+  const map = new Map<string, string>();
+  for (const obj of objects) {
+    if (obj.objectType) {
+      map.set(`${obj.objectId}:${obj.version}`, obj.objectType);
+    }
+  }
+  return map.size > 0 ? map : undefined;
 }

@@ -23,6 +23,8 @@ export interface GrpcLiveSourceConfig {
   url: string;
   /** Maximum reconnect delay in ms (default: 30000) */
   maxReconnectDelay?: number;
+  /** Force JSON path instead of native raw path (needed when ObjectSet is required) */
+  forceJsonPath?: boolean;
 }
 
 export function createGrpcLiveSource(config: GrpcLiveSourceConfig): Source {
@@ -45,7 +47,7 @@ export function createGrpcLiveSource(config: GrpcLiveSourceConfig): Source {
           log.info({ url: config.url }, "connecting");
           reconnectDelay = 1000;
 
-          if (isNativeCheckpointDecoderAvailable()) {
+          if (isNativeCheckpointDecoderAvailable() && !config.forceJsonPath) {
             const grpcStream = currentClient.subscribeCheckpointsRaw(RAW_CHECKPOINT_READ_MASK_PATHS);
             for await (const responseBytes of grpcStream) {
               if (stopped) break;
