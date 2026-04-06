@@ -2554,7 +2554,11 @@ pipelineCmd
     if (isLive) {
       const { createGrpcLiveSource } = await import("./pipeline/sources/grpc.ts");
       pipeline.source(createGrpcLiveSource({ url: grpcUrl }));
-      // TODO: add raw events processor for live mode (gRPC events need extraction)
+
+      // Live mode needs processors to extract structural data from gRPC checkpoints.
+      // Archive mode gets this from the Rust binary decoder.
+      const { createRawEventsProcessor } = await import("./pipeline/processors/rawEvents.ts");
+      pipeline.processor(createRawEventsProcessor());
     }
 
     // Broadcasts
