@@ -201,31 +201,40 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
         const pool = decoderPool!;
         const totalCheckpoints = Number(endSeq - config.from + 1n);
 
-        // ─── Phase 1: Fetch all compressed checkpoints to disk ─────────
-        // Single connection pool on main thread, maximum CDN throughput.
-        // Writes to a temp directory to avoid memory pressure on small machines.
-        const { mkdirSync, readFileSync, unlinkSync, rmdirSync } = await import("fs");
+        // ─── Phase 1: Fetch all compressed checkpoints to disk cache ────
+        // Single connection pool on main thread = maximum CDN throughput.
+        // Cache dir: ~/.jun/cache/checkpoints/ (or XDG_CACHE_HOME)
+        const { mkdirSync, readFileSync, existsSync } = await import("fs");
         const { join } = await import("path");
-        const tmpDir = join(import.meta.dir, "..", "..", ".jun-fetch-cache");
-        mkdirSync(tmpDir, { recursive: true });
+        const { homedir } = await import("os");
+        const cacheBase = process.env.XDG_CACHE_HOME ?? join(homedir(), ".jun", "cache");
+        const cacheDir = join(cacheBase, "checkpoints");
+        mkdirSync(cacheDir, { recursive: true });
 
-        log.info({ concurrency: fetchConcurrency, total: totalCheckpoints }, "phase 1: fetching checkpoints to disk");
+        log.info({ concurrency: fetchConcurrency, total: totalCheckpoints, cacheDir }, "phase 1: fetching checkpoints");
         const fetchStart = performance.now();
         let fetchNext = config.from;
         let fetchDone = 0;
+        let fetchSkipped = 0;
 
         async function fetchWorker() {
           while (fetchNext <= endSeq && !stopped) {
             const seq = fetchNext++;
+            const cachePath = join(cacheDir, `${seq}.binpb.zst`);
+            // Skip if already cached (stat syscall, O(1) even with millions of files)
+            if (existsSync(cachePath)) {
+              fetchSkipped++;
+              fetchDone++;
+              continue;
+            }
             try {
-              const url = `${config.archiveUrl}/${seq}.binpb.zst`;
-              const resp = await fetch(url);
+              const resp = await fetch(`${config.archiveUrl}/${seq}.binpb.zst`);
               if (resp.ok) {
-                await Bun.write(join(tmpDir, `${seq}.zst`), await resp.arrayBuffer());
+                await Bun.write(cachePath, await resp.arrayBuffer());
                 fetchDone++;
                 if (fetchDone % 10000 === 0) {
                   const elapsed = (performance.now() - fetchStart) / 1000;
-                  console.error(`[fetch] ${fetchDone}/${totalCheckpoints} (${Math.round(fetchDone / elapsed)} req/s)`);
+                  console.error(`[fetch] ${fetchDone}/${totalCheckpoints} (${Math.round(fetchDone / elapsed)} req/s, ${fetchSkipped} cached)`);
                 }
               }
             } catch {}
@@ -235,16 +244,15 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
         await Promise.all(Array.from({ length: fetchConcurrency }, () => fetchWorker()));
         const fetchElapsed = (performance.now() - fetchStart) / 1000;
         log.info(
-          { fetched: fetchDone, elapsed: `${fetchElapsed.toFixed(1)}s`, rate: Math.round(fetchDone / fetchElapsed) },
+          { fetched: fetchDone, skipped: fetchSkipped, elapsed: `${fetchElapsed.toFixed(1)}s`, rate: Math.round(fetchDone / fetchElapsed) },
           "phase 1 complete",
         );
 
-        // ─── Phase 2: Decode from disk via worker pool ─────────────────
-        // No network. Workers do Rust FFI decode from cached compressed bytes.
+        // ─── Phase 2: Decode from disk cache via worker pool ───────────
+        // No network latency. Workers do Rust FFI decode.
         log.info({ workers: workerCount }, "phase 2: decoding checkpoints");
         const decodeStart = performance.now();
 
-        // Drain signaling
         let drainResolve: (() => void) | null = null;
         function signalDrain() {
           if (drainResolve) {
@@ -261,15 +269,16 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
         const decodePromises: Promise<void>[] = [];
 
         for (let seq = config.from; seq <= endSeq && !stopped; seq++) {
-          const filePath = join(tmpDir, `${seq}.zst`);
-          let compressed: Uint8Array;
+          const cachePath = join(cacheDir, `${seq}.binpb.zst`);
+          let bytes: Uint8Array;
           try {
-            compressed = new Uint8Array(readFileSync(filePath));
+            bytes = new Uint8Array(readFileSync(cachePath));
           } catch {
-            continue; // Skip failed fetches
+            continue;
           }
 
-          const p = pool.decode(seq, compressed).then(result => {
+          const p = pool.decode(seq, bytes).then(result => {
+
             let checkpoint: Checkpoint;
             if (result.binary) {
               checkpoint = checkpointFromBinaryResult(
@@ -289,9 +298,6 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
             pending.set(seq, checkpoint);
             totalProcessed++;
             signalDrain();
-
-            // Clean up cached file
-            try { unlinkSync(filePath); } catch {}
           });
           decodePromises.push(p);
         }
@@ -301,7 +307,6 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           signalDrain();
         });
 
-        // Drain results as they arrive
         while (!stopped) {
           if (config.unorderedDrain) {
             let yielded = false;
@@ -324,8 +329,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
 
           if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
             const elapsed = (performance.now() - decodeStart) / 1000;
-            const rate = Math.round(totalProcessed / Math.max(elapsed, 0.001));
-            console.error(`[decode] ${totalProcessed}/${totalCheckpoints} (${rate} cp/s)`);
+            console.error(`[decode] ${totalProcessed}/${totalCheckpoints} (${Math.round(totalProcessed / elapsed)} cp/s)`);
           }
         }
 
@@ -335,9 +339,6 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           { decoded: totalProcessed, elapsed: `${decodeElapsed.toFixed(1)}s`, rate: Math.round(totalProcessed / decodeElapsed) },
           "phase 2 complete",
         );
-
-        // Cleanup temp dir
-        try { rmdirSync(tmpDir, { recursive: true }); } catch {}
       } finally {
         if (decoderPool) {
           decoderPool.shutdown();
