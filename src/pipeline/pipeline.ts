@@ -397,8 +397,9 @@ async function runSource(
     // The SQL writer will parse at flush time.
     const rawBinary = (checkpoint as any)._rawBinary as Uint8Array | undefined;
     if (rawBinary) {
-      // Minimal ProcessedCheckpoint wrapper — write buffer will parse the binary
-      const processed = emptyProcessed(checkpoint);
+      // Use _preProcessed for broadcasts if available (live source parses eagerly)
+      const preProcessed = (checkpoint as any)._preProcessed as ProcessedCheckpoint | undefined;
+      const processed = preProcessed ?? emptyProcessed(checkpoint);
       (processed as any)._rawBinary = rawBinary;
       (processed as any)._enabledProcessors = (checkpoint as any)._enabledProcessors;
       (processed as any)._balanceCoinTypes = (checkpoint as any)._balanceCoinTypes;
