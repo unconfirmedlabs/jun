@@ -356,9 +356,26 @@ impl OrderedBalanceMap {
 // Extraction
 // ---------------------------------------------------------------------------
 
+/// Profiling counters for a single checkpoint extraction.
+#[derive(Default)]
+pub struct ExtractProfile {
+    pub proto_parse_ns: u64,
+    pub bcs_effects_ns: u64,
+    pub bcs_tx_data_ns: u64,
+    pub bcs_events_ns: u64,
+    pub extract_records_ns: u64,
+    pub balance_changes_ns: u64,
+    pub tx_count: usize,
+}
+
 /// Extract checkpoint into the struct (shared by JSON and binary output paths).
-pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<ExtractedCheckpoint, Box<dyn std::error::Error>> {
+pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<(ExtractedCheckpoint, ExtractProfile), Box<dyn std::error::Error>> {
+    use std::time::Instant;
+    let mut profile = ExtractProfile::default();
+
+    let t0 = Instant::now();
     let parsed = proto::parse_checkpoint(decompressed).map_err(|e| format!("proto parse: {e}"))?;
+    profile.proto_parse_ns = t0.elapsed().as_nanos() as u64;
 
     let summary = parsed
         .summary_bcs
@@ -380,14 +397,26 @@ pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<ExtractedCheckpoin
     let mut deleted_objects = HashSet::new();
     let mut accumulator_deltas = Vec::new();
 
+    profile.tx_count = parsed.transactions.len();
+
     for ptx in &parsed.transactions {
+        let t1 = Instant::now();
         let effects = ptx
             .effects_bcs
             .and_then(|bytes| bcs::from_bytes::<TransactionEffects>(bytes).ok());
+        profile.bcs_effects_ns += t1.elapsed().as_nanos() as u64;
+
+        let t2 = Instant::now();
         let tx_data = ptx.transaction_bcs.and_then(decode_transaction_data);
+        profile.bcs_tx_data_ns += t2.elapsed().as_nanos() as u64;
+
+        let t3 = Instant::now();
         let tx_events = ptx
             .events_bcs
             .and_then(|bytes| bcs::from_bytes::<TransactionEvents>(bytes).ok());
+        profile.bcs_events_ns += t3.elapsed().as_nanos() as u64;
+
+        let t4 = Instant::now();
 
         let digest = effects
             .as_ref()
@@ -445,8 +474,11 @@ pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<ExtractedCheckpoin
         if let Some(tx_events) = tx_events.as_ref() {
             events.extend(extract_events(&tx_context, tx_events));
         }
+
+        profile.extract_records_ns += t4.elapsed().as_nanos() as u64;
     }
 
+    let t5 = Instant::now();
     let balance_changes = compute_balance_changes(
         &parsed.objects,
         &created_objects,
@@ -455,6 +487,7 @@ pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<ExtractedCheckpoin
         &checkpoint_seq,
         &checkpoint_timestamp,
     );
+    profile.balance_changes_ns = t5.elapsed().as_nanos() as u64;
 
     let result = ExtractedCheckpoint {
         checkpoint: CheckpointRecord {
@@ -480,20 +513,21 @@ pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<ExtractedCheckpoin
         unchanged_consensus_objects,
     };
 
-    Ok(result)
+    Ok((result, profile))
 }
 
 /// Extract checkpoint and serialize to JSON string.
 pub fn extract_checkpoint(decompressed: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
-    let result = extract_checkpoint_data(decompressed)?;
+    let (result, _profile) = extract_checkpoint_data(decompressed)?;
     Ok(serde_json::to_string(&result)?)
 }
 
 /// Extract checkpoint and serialize to flat binary format.
-/// Returns the number of bytes written to the output buffer.
-pub fn extract_checkpoint_binary(decompressed: &[u8], output: &mut [u8]) -> Result<usize, Box<dyn std::error::Error>> {
-    let result = extract_checkpoint_data(decompressed)?;
-    Ok(crate::binary::write_binary(&result, output))
+/// Returns the number of bytes written and profiling data.
+pub fn extract_checkpoint_binary(decompressed: &[u8], output: &mut [u8]) -> Result<(usize, ExtractProfile), Box<dyn std::error::Error>> {
+    let (result, profile) = extract_checkpoint_data(decompressed)?;
+    let written = crate::binary::write_binary(&result, output);
+    Ok((written, profile))
 }
 
 struct TxContext<'a> {
@@ -1477,7 +1511,6 @@ fn execution_error_kind_name(error: &ExecutionErrorKind) -> String {
 }
 
 fn format_type_tag(tag: &TypeTag) -> String {
-    use std::fmt::Write;
     let mut buf = String::with_capacity(64);
     write_type_tag(tag, &mut buf);
     buf

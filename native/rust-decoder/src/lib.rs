@@ -112,11 +112,83 @@ pub(crate) fn decode_checkpoint_binary_inner(
     compressed: &[u8],
     output: &mut [u8],
 ) -> Result<usize, Box<dyn std::error::Error>> {
+    use std::time::Instant;
+    let t0 = Instant::now();
     let mut decoder = zstd::Decoder::new(compressed)?;
     // Typical checkpoint decompresses to ~4-8x compressed size
     let mut decompressed = Vec::with_capacity(compressed.len() * 6);
     decoder.read_to_end(&mut decompressed)?;
-    extract::extract_checkpoint_binary(&decompressed, output)
+    let zstd_ns = t0.elapsed().as_nanos() as u64;
+
+    let (written, profile) = extract::extract_checkpoint_binary(&decompressed, output)?;
+
+    PROFILE_ACCUM.with(|acc| {
+        let mut a = acc.borrow_mut();
+        a.zstd_ns += zstd_ns;
+        a.proto_ns += profile.proto_parse_ns;
+        a.bcs_effects_ns += profile.bcs_effects_ns;
+        a.bcs_tx_data_ns += profile.bcs_tx_data_ns;
+        a.bcs_events_ns += profile.bcs_events_ns;
+        a.extract_ns += profile.extract_records_ns;
+        a.balance_ns += profile.balance_changes_ns;
+        a.binary_write_ns += t0.elapsed().as_nanos() as u64
+            - zstd_ns
+            - profile.proto_parse_ns
+            - profile.bcs_effects_ns
+            - profile.bcs_tx_data_ns
+            - profile.bcs_events_ns
+            - profile.extract_records_ns
+            - profile.balance_changes_ns;
+        a.count += 1;
+        a.tx_count += profile.tx_count;
+        if a.count % 5000 == 0 {
+            a.print_and_reset();
+        }
+    });
+
+    Ok(written)
+}
+
+use std::cell::RefCell;
+
+#[derive(Default)]
+struct ProfileAccumulator {
+    zstd_ns: u64,
+    proto_ns: u64,
+    bcs_effects_ns: u64,
+    bcs_tx_data_ns: u64,
+    bcs_events_ns: u64,
+    extract_ns: u64,
+    balance_ns: u64,
+    binary_write_ns: u64,
+    count: usize,
+    tx_count: usize,
+}
+
+impl ProfileAccumulator {
+    fn print_and_reset(&mut self) {
+        let total = self.zstd_ns + self.proto_ns + self.bcs_effects_ns + self.bcs_tx_data_ns
+            + self.bcs_events_ns + self.extract_ns + self.balance_ns + self.binary_write_ns;
+        let pct = |v: u64| -> f64 { v as f64 / total as f64 * 100.0 };
+        let avg_us = |v: u64| -> f64 { v as f64 / self.count as f64 / 1000.0 };
+        eprintln!(
+            "[rust-profile] {} checkpoints ({} txs) | zstd {:.0}% ({:.0}µs) | proto {:.0}% ({:.0}µs) | bcs_effects {:.0}% ({:.0}µs) | bcs_tx_data {:.0}% ({:.0}µs) | bcs_events {:.0}% ({:.0}µs) | extract {:.0}% ({:.0}µs) | balance {:.0}% ({:.0}µs) | binary_write {:.0}% ({:.0}µs)",
+            self.count, self.tx_count,
+            pct(self.zstd_ns), avg_us(self.zstd_ns),
+            pct(self.proto_ns), avg_us(self.proto_ns),
+            pct(self.bcs_effects_ns), avg_us(self.bcs_effects_ns),
+            pct(self.bcs_tx_data_ns), avg_us(self.bcs_tx_data_ns),
+            pct(self.bcs_events_ns), avg_us(self.bcs_events_ns),
+            pct(self.extract_ns), avg_us(self.extract_ns),
+            pct(self.balance_ns), avg_us(self.balance_ns),
+            pct(self.binary_write_ns), avg_us(self.binary_write_ns),
+        );
+        *self = Self::default();
+    }
+}
+
+thread_local! {
+    static PROFILE_ACCUM: RefCell<ProfileAccumulator> = RefCell::new(ProfileAccumulator::default());
 }
 
 fn decode_checkpoint_inner(compressed: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
