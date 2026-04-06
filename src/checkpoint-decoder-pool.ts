@@ -50,6 +50,7 @@ export interface CheckpointDecoderPool {
     from: bigint,
     to: bigint,
     cacheDir: string,
+    extractMask?: number,
   ): AsyncIterable<StreamDecodeResult>;
   /** Assign cached file ranges to workers — workers decode, parse, and write SQLite shards. */
   decodeAndWriteRange(
@@ -344,7 +345,7 @@ export function createCheckpointDecoderPool(
       });
     },
 
-    decodeCachedRange(from: bigint, to: bigint, cacheDir: string): AsyncIterable<StreamDecodeResult> {
+    decodeCachedRange(from: bigint, to: bigint, cacheDir: string, extractMask?: number): AsyncIterable<StreamDecodeResult> {
       if (pending.size > 0) {
         throw new Error("checkpoint decoder pool has outstanding decode jobs");
       }
@@ -370,6 +371,7 @@ export function createCheckpointDecoderPool(
           to: range.to.toString(),
           cacheDir,
           workerIndex: i,
+          extractMask,
         });
       }
 

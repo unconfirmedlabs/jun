@@ -373,8 +373,24 @@ const TABLE_FILE: Record<string, string> = {
 // Storage implementation
 // ---------------------------------------------------------------------------
 
-export function createPerTableSqliteStorage(dir: string): Storage {
+// Map table name → ExtractMask bit for filtering
+const TABLE_MASK_BIT: Record<string, number> = {
+  transactions: 1 << 0,
+  move_calls: 1 << 1,
+  balance_changes: 1 << 2,
+  object_changes: 1 << 3,
+  transaction_dependencies: 1 << 4,
+  transaction_inputs: 1 << 5,
+  commands: 1 << 6,
+  system_transactions: 1 << 7,
+  unchanged_consensus_objects: 1 << 8,
+  checkpoints: 1 << 9,
+  raw_events: 1 << 10,
+};
+
+export function createPerTableSqliteStorage(dir: string, enabledMask = 0x7FF): Storage {
   mkdirSync(dir, { recursive: true });
+  const enabledTables = TABLES.filter(t => enabledMask & (TABLE_MASK_BIT[t.name] ?? 0));
 
   const connections = new Map<string, Database>();
   const stmts = new Map<string, ReturnType<Database["query"]>>();
@@ -398,7 +414,7 @@ export function createPerTableSqliteStorage(dir: string): Storage {
     name: "per-table-sqlite",
 
     async initialize(): Promise<void> {
-      for (const tableDef of TABLES) {
+      for (const tableDef of enabledTables) {
         const db = getDb(tableDef);
         // DDL can contain multiple statements (CREATE TABLE + CREATE INDEX)
         for (const stmt of tableDef.ddl.split(";").map(s => s.trim()).filter(Boolean)) {
@@ -428,7 +444,7 @@ export function createPerTableSqliteStorage(dir: string): Storage {
       for (const db of connections.values()) db.exec("BEGIN");
 
       try {
-        for (const tableDef of TABLES) {
+        for (const tableDef of enabledTables) {
           const stmt = stmts.get(tableDef.name);
           if (!stmt) continue;
 

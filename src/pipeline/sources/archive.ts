@@ -48,6 +48,8 @@ export interface ArchiveSourceConfig {
   /** Skip ordered drain — yield checkpoints as they arrive from workers.
    *  Safe for snapshot mode where insert order doesn't matter. */
   unorderedDrain?: boolean;
+  /** Extraction mask bitfield — controls which record types Rust decodes. 0x7FF = all. */
+  extractMask?: number;
 }
 
 function filterBalanceChanges(
@@ -321,7 +323,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
 
         // Workers own the decode loop — each gets a range of files.
         // No per-checkpoint postMessage from main thread.
-        const resultStream = pool.decodeCachedRange(config.from, endSeq, cacheDir);
+        const resultStream = pool.decodeCachedRange(config.from, endSeq, cacheDir, config.extractMask);
 
         for await (const result of resultStream) {
           if (stopped) break;

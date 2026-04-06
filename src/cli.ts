@@ -2440,6 +2440,17 @@ pipelineCmd
   .option("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
   .option("--live", "continuous mode via gRPC subscription")
+  .option("--transactions", "index transactions + move calls")
+  .option("--balance-changes", "index balance changes")
+  .option("--object-changes", "index object changes")
+  .option("--events", "index raw events")
+  .option("--dependencies", "index transaction dependencies")
+  .option("--inputs", "index transaction inputs")
+  .option("--commands", "index all PTB commands")
+  .option("--system-transactions", "index system transactions")
+  .option("--unchanged-consensus-objects", "index unchanged consensus objects")
+  .option("--checkpoints", "index checkpoint summaries")
+  .option("--all", "index all tables (default)")
   .option("--grpc-url <url>", "gRPC endpoint")
   .option("--archive-url <url>", "archive base URL")
   .option("--network <name>", "network name", "mainnet")
@@ -2454,6 +2465,7 @@ pipelineCmd
   .action(async (opts: any) => {
     const { createPerTableSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
     const { createPipeline } = await import("./pipeline/pipeline.ts");
+    const { ExtractMask } = await import("./checkpoint-native-decoder.ts");
 
     const isLive = !!opts.live;
 
@@ -2461,6 +2473,29 @@ pipelineCmd
       console.error("[jun] error: provide --epoch, --from/--to, or --live");
       process.exit(1);
     }
+
+    // Build extraction mask from flags
+    const hasAnyTableFlag = opts.transactions || opts.balanceChanges || opts.objectChanges
+      || opts.events || opts.dependencies || opts.inputs || opts.commands
+      || opts.systemTransactions || opts.unchangedConsensusObjects || opts.checkpoints;
+
+    let mask = 0;
+    if (!hasAnyTableFlag || opts.all) {
+      mask = ExtractMask.ALL;
+    } else {
+      if (opts.transactions)                mask |= ExtractMask.TRANSACTIONS | ExtractMask.MOVE_CALLS;
+      if (opts.balanceChanges)              mask |= ExtractMask.BALANCE_CHANGES;
+      if (opts.objectChanges)               mask |= ExtractMask.OBJECT_CHANGES;
+      if (opts.events)                      mask |= ExtractMask.EVENTS;
+      if (opts.dependencies)                mask |= ExtractMask.DEPENDENCIES;
+      if (opts.inputs)                      mask |= ExtractMask.INPUTS;
+      if (opts.commands)                    mask |= ExtractMask.COMMANDS;
+      if (opts.systemTransactions)          mask |= ExtractMask.SYSTEM_TRANSACTIONS;
+      if (opts.unchangedConsensusObjects)   mask |= ExtractMask.UNCHANGED_CONSENSUS;
+      if (opts.checkpoints)                 mask |= ExtractMask.CHECKPOINTS;
+    }
+    // Always include checkpoints for progress tracking
+    mask |= ExtractMask.CHECKPOINTS;
 
     // Log level
     if (opts.log) {
@@ -2500,9 +2535,9 @@ pipelineCmd
     }
     // Live-only mode: from/to stay undefined, no archive source created
 
-    // Create storage — per-table SQLite files for both archive and live
+    // Create storage — only enabled tables
     const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./index-chain");
-    const storage = createPerTableSqliteStorage(outputDir);
+    const storage = createPerTableSqliteStorage(outputDir, mask);
 
     // Build pipeline
     const pipeline = createPipeline();
@@ -2531,6 +2566,7 @@ pipelineCmd
         },
         unorderedDrain: !isLive,
         grpcUrl: to ? undefined : grpcUrl,
+        extractMask: mask,
       }));
     }
 
@@ -2573,6 +2609,19 @@ pipelineCmd
       console.error(`  mode            ${isLive ? "live (gRPC streaming)" : "snapshot"}`);
       if (opts.epoch) console.error(`  epoch           ${opts.epoch}`);
       if (from !== undefined && to !== undefined) console.error(`  checkpoints     ${from} → ${to} (${(to - from + 1n).toLocaleString()})`);
+      const tableNames: string[] = [];
+      if (mask & ExtractMask.TRANSACTIONS) tableNames.push("transactions");
+      if (mask & ExtractMask.MOVE_CALLS) tableNames.push("move_calls");
+      if (mask & ExtractMask.BALANCE_CHANGES) tableNames.push("balance_changes");
+      if (mask & ExtractMask.OBJECT_CHANGES) tableNames.push("object_changes");
+      if (mask & ExtractMask.DEPENDENCIES) tableNames.push("dependencies");
+      if (mask & ExtractMask.INPUTS) tableNames.push("inputs");
+      if (mask & ExtractMask.COMMANDS) tableNames.push("commands");
+      if (mask & ExtractMask.SYSTEM_TRANSACTIONS) tableNames.push("system_transactions");
+      if (mask & ExtractMask.UNCHANGED_CONSENSUS) tableNames.push("unchanged_consensus");
+      if (mask & ExtractMask.CHECKPOINTS) tableNames.push("checkpoints");
+      if (mask & ExtractMask.EVENTS) tableNames.push("events");
+      console.error(`  tables          ${tableNames.join(", ")}`);
       console.error(`  output          ${outputLabel}`);
       if (!isLive) console.error(`  concurrency     ${opts.concurrency ?? 200}`);
       if (opts.workers) console.error(`  workers         ${opts.workers}`);

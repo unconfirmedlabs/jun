@@ -13,6 +13,7 @@ import { decodeCheckpointFromProto, getCheckpointType } from "./archive.ts";
 import type { BalanceChange } from "./balance-processor.ts";
 import {
   decodeArchiveCheckpointBinary,
+  decodeArchiveCheckpointBinarySelective,
   decodeArchiveCheckpointCompressedNative,
   isNativeCheckpointDecoderAvailable,
 } from "./checkpoint-native-decoder.ts";
@@ -222,6 +223,8 @@ interface DecodeCachedRangeMessage {
   to: string;
   cacheDir: string;
   workerIndex: number;
+  /** Extraction mask bitfield — controls which record types Rust decodes. 0x7FF = all. */
+  extractMask?: number;
 }
 
 interface DecodeAndWriteRangeMessage {
@@ -261,7 +264,9 @@ async function handleDecodeCachedRange(msg: DecodeCachedRangeMessage): Promise<v
       const compressed = new Uint8Array(readFileSync(cachePath));
 
       if (useBinary) {
-        const binary = decodeArchiveCheckpointBinary(compressed);
+        const binary = msg.extractMask !== undefined && msg.extractMask !== 0x7FF
+          ? decodeArchiveCheckpointBinarySelective(compressed, msg.extractMask)
+          : decodeArchiveCheckpointBinary(compressed);
         if (binary) {
           postBinaryBySeq(seq, binary);
           processed++;
