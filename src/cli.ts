@@ -2071,7 +2071,13 @@ addTableFlags(indexCmd
     const { createPerTableSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
     const { createPipeline } = await import("./pipeline/pipeline.ts");
     const { createArchiveSource } = await import("./pipeline/sources/archive.ts");
-    const { ExtractMask } = await import("./checkpoint-native-decoder.ts");
+    const { ExtractMask, isNativeCheckpointDecoderAvailable } = await import("./checkpoint-native-decoder.ts");
+
+    if (!isNativeCheckpointDecoderAvailable()) {
+      console.error("[jun] error: native Rust decoder not found. Build it with:");
+      console.error("  cd native/rust-decoder && cargo build --release");
+      process.exit(1);
+    }
 
     if (!opts.epoch && !opts.from) {
       console.error("[jun] error: provide --epoch or --from/--to");
@@ -2187,7 +2193,13 @@ addTableFlags(indexCmd
   .action(async (opts: any) => {
     const { createPipeline } = await import("./pipeline/pipeline.ts");
     const { createGrpcLiveSource } = await import("./pipeline/sources/grpc.ts");
-    const { ExtractMask } = await import("./checkpoint-native-decoder.ts");
+    const { ExtractMask, isNativeCheckpointDecoderAvailable } = await import("./checkpoint-native-decoder.ts");
+
+    if (!isNativeCheckpointDecoderAvailable()) {
+      console.error("[jun] error: native Rust decoder not found. Build it with:");
+      console.error("  cd native/rust-decoder && cargo build --release");
+      process.exit(1);
+    }
 
     const mask = buildExtractMask(opts, ExtractMask);
     const grpcUrl = opts.grpcUrl ?? "hayabusa.mainnet.unconfirmed.cloud:443";

@@ -44,8 +44,12 @@ export const ExtractMask = {
   ALL:                  0x7FF,
 } as const;
 
+const PLATFORM = `${process.platform}-${process.arch === "x64" ? "x64" : process.arch === "arm64" ? "arm64" : process.arch}`;
 const LIB_NAME = `libjun_checkpoint_decoder.${suffix}`;
 const LIB_PATHS = [
+  // Prebuilt binaries (shipped with package — no Rust toolchain needed)
+  join(import.meta.dir, "..", "native", "lib", `libjun_checkpoint_decoder.${PLATFORM}.${suffix}`),
+  // Local dev build
   join(import.meta.dir, "..", "native", "rust-decoder", "target", "release", LIB_NAME),
   join(import.meta.dir, "..", "native", "rust-decoder", "target", "debug", LIB_NAME),
 ];
