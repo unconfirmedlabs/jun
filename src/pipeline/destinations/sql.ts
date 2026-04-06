@@ -943,6 +943,8 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
   // Snapshot optimization: use aggressive SQLite pragmas + skip conflict checks
   const snapshotMode = !!config.deferIndexes;
+  // Per-table mode: indexes/PKs created upfront (small files = cheap maintenance)
+  const effectiveSnapshotMode = snapshotMode && !isPerTableMode;
   // UNLOGGED tables for Postgres bulk loading (no WAL writes)
   const pgUnlogged = !!(config.pgUnlogged || (snapshotMode && isPostgres));
 
@@ -997,9 +999,10 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
         }
       }
 
-      // Helper: execute index SQL now or defer it
+      // Helper: execute index SQL now or defer it.
+      // Per-table mode always creates indexes upfront (effectiveSnapshotMode = false).
       const indexOrDefer = async (sql: string) => {
-        if (config.deferIndexes) deferredIndexes.push(sql);
+        if (effectiveSnapshotMode) deferredIndexes.push(sql);
         else await driver!.exec(sql);
       };
 
@@ -1291,7 +1294,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       if (config.checkpoints) {
         const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
         if (driver.dialect === "postgres") {
-          const pkClause = snapshotMode ? "" : "PRIMARY KEY";
+          const pkClause = effectiveSnapshotMode ? "" : "PRIMARY KEY";
           await driver.exec(`
             CREATE ${unloggedKw} TABLE IF NOT EXISTS checkpoints (
               sequence_number NUMERIC NOT NULL ${pkClause},
@@ -1311,7 +1314,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
             deferredIndexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoints_seq ON checkpoints(sequence_number)`);
           }
         } else {
-          const pkClause = snapshotMode ? "" : "PRIMARY KEY";
+          const pkClause = effectiveSnapshotMode ? "" : "PRIMARY KEY";
           await driver.exec(`
             CREATE TABLE IF NOT EXISTS checkpoints (
               sequence_number TEXT NOT NULL ${pkClause},
@@ -1338,7 +1341,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       // ─── object_changes ──────────────────────────────────────────────────
       if (config.objectChanges) {
         const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
-        const pkClause = snapshotMode ? "" : ", PRIMARY KEY (tx_digest, object_id)";
+        const pkClause = effectiveSnapshotMode ? "" : ", PRIMARY KEY (tx_digest, object_id)";
         if (driver.dialect === "postgres") {
           await driver.exec(`
             CREATE ${unloggedKw} TABLE IF NOT EXISTS object_changes (
@@ -1393,7 +1396,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       // ─── transaction_dependencies ────────────────────────────────────────
       if (config.dependencies) {
         const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
-        const pkClause = snapshotMode ? "" : ", PRIMARY KEY (tx_digest, depends_on_digest)";
+        const pkClause = effectiveSnapshotMode ? "" : ", PRIMARY KEY (tx_digest, depends_on_digest)";
         if (driver.dialect === "postgres") {
           await driver.exec(`
             CREATE ${unloggedKw} TABLE IF NOT EXISTS transaction_dependencies (
@@ -1423,7 +1426,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       // ─── transaction_inputs ──────────────────────────────────────────────
       if (config.inputs) {
         const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
-        const pkClause = snapshotMode ? "" : ", PRIMARY KEY (tx_digest, input_index)";
+        const pkClause = effectiveSnapshotMode ? "" : ", PRIMARY KEY (tx_digest, input_index)";
         if (driver.dialect === "postgres") {
           await driver.exec(`
             CREATE ${unloggedKw} TABLE IF NOT EXISTS transaction_inputs (
@@ -1474,7 +1477,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       // ─── commands ────────────────────────────────────────────────────────
       if (config.commands) {
         const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
-        const pkClause = snapshotMode ? "" : ", PRIMARY KEY (tx_digest, command_index)";
+        const pkClause = effectiveSnapshotMode ? "" : ", PRIMARY KEY (tx_digest, command_index)";
         if (driver.dialect === "postgres") {
           await driver.exec(`
             CREATE ${unloggedKw} TABLE IF NOT EXISTS commands (
@@ -1519,7 +1522,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       // ─── system_transactions ─────────────────────────────────────────────
       if (config.systemTransactions) {
         const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
-        const pkClause = snapshotMode ? "" : "PRIMARY KEY";
+        const pkClause = effectiveSnapshotMode ? "" : "PRIMARY KEY";
         if (driver.dialect === "postgres") {
           await driver.exec(`
             CREATE ${unloggedKw} TABLE IF NOT EXISTS system_transactions (
@@ -1552,7 +1555,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       // ─── unchanged_consensus_objects ─────────────────────────────────────
       if (config.unchangedConsensusObjects) {
         const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
-        const pkClause = snapshotMode ? "" : ", PRIMARY KEY (tx_digest, object_id)";
+        const pkClause = effectiveSnapshotMode ? "" : ", PRIMARY KEY (tx_digest, object_id)";
         if (driver.dialect === "postgres") {
           await driver.exec(`
             CREATE ${unloggedKw} TABLE IF NOT EXISTS unchanged_consensus_objects (
@@ -1590,7 +1593,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
       // Create raw_events table
       if (config.rawEvents) {
-        const pkClause = snapshotMode ? "" : "PRIMARY KEY";
+        const pkClause = effectiveSnapshotMode ? "" : "PRIMARY KEY";
         if (driver.dialect === "postgres") {
           const unloggedKw = pgUnlogged ? "UNLOGGED" : "";
           await driver.exec(`
@@ -1607,6 +1610,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
             )
           `);
         } else {
+          const uniqueClause = effectiveSnapshotMode ? "" : ", UNIQUE (tx_digest, event_seq)";
           await driver.exec(`
             CREATE TABLE IF NOT EXISTS raw_events (
               tx_digest TEXT NOT NULL,
@@ -1618,6 +1622,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
               contents TEXT NOT NULL,
               checkpoint_seq TEXT NOT NULL,
               sui_timestamp TEXT NOT NULL
+              ${uniqueClause}
             )
           `);
         }
@@ -1738,7 +1743,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
 
       // Wrap all writes in a single transaction
       await d.transaction(async (exec, rawTx) => {
-      const ctx: WriteContext = { dialect, exec, rawTx, snapshotMode, driver: d };
+      const ctx: WriteContext = { dialect, exec, rawTx, snapshotMode: effectiveSnapshotMode, driver: d };
       const _wt: Record<string, number> = {};
       const _t = (label: string) => { _wt[label] = performance.now(); };
       const _te = (label: string) => { _wt[label] = performance.now() - _wt[label]; };
