@@ -1,50 +1,17 @@
 /**
- * jun/checkpoint-decoder-pool — Pool of Bun Workers for parallel archive
- * checkpoint decoding.
+ * Checkpoint decoder worker pool — manages Bun Workers for parallel decode.
  *
- * Archive backfill path:
- * - workers own fetch + decode for assigned checkpoint ranges
- * - binary fast path when the native Rust decoder is available
- * - JSON fallback when native decode is unavailable
- *
- * Direct decode path:
- * - retained for non-archive callers that still post compressed bytes to a worker
+ * Assigns checkpoint ranges to workers. Each worker reads cached .binpb.zst
+ * files, runs Rust FFI binary decode, and posts results back via postMessage.
  */
-import type { GrpcCheckpointResponse } from "./grpc.ts";
-import type { SerializedBalanceChange } from "./checkpoint-response.ts";
-import { isNativeCheckpointDecoderAvailable } from "./checkpoint-native-decoder.ts";
 import path from "path";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export interface SerializedDecodedCheckpoint {
-  decoded: GrpcCheckpointResponse;
-  precomputedBalanceChanges?: SerializedBalanceChange[];
-}
-
-export interface DecodeResult {
-  binary?: Uint8Array;
-  payload?: SerializedDecodedCheckpoint;
-}
 
 export interface StreamDecodeResult {
   seq: bigint;
   binary?: Uint8Array;
-  payload?: SerializedDecodedCheckpoint;
-}
-
-export interface CheckpointDecoderPoolOptions {
-  balanceCoinTypes?: string[] | "*";
-  useBinaryPreprocessing?: boolean;
 }
 
 export interface CheckpointDecoderPool {
-  /** Decode a compressed checkpoint in a worker thread. */
-  decode(seq: bigint, compressed: Uint8Array): Promise<DecodeResult>;
-  /** Decode a checkpoint from a cached file path (worker reads from disk). */
-  decodeCached(seq: bigint, cachePath: string): Promise<DecodeResult>;
   /** Assign cached file ranges to workers — workers own the decode loop. */
   decodeCachedRange(
     from: bigint,
@@ -52,85 +19,29 @@ export interface CheckpointDecoderPool {
     cacheDir: string,
     extractMask?: number,
   ): AsyncIterable<StreamDecodeResult>;
-  /** Assign cached file ranges to workers — workers decode, parse, and write SQLite shards. */
-  decodeAndWriteRange(
-    from: bigint,
-    to: bigint,
-    cacheDir: string,
-    shardDir: string,
-    enabledProcessors: {
-      balances: boolean;
-      transactions: boolean;
-      objectChanges: boolean;
-      dependencies: boolean;
-      inputs: boolean;
-      commands: boolean;
-      systemTransactions: boolean;
-      unchangedConsensusObjects: boolean;
-      events: boolean;
-      checkpoints: boolean;
-    },
-  ): Promise<string[]>;
-  /** Assign checkpoint ranges to workers and stream decoded archive results. */
-  stream(
-    from: bigint,
-    to: bigint,
-    archiveUrl: string,
-    concurrency: number,
-  ): AsyncIterable<StreamDecodeResult>;
   /** Terminate all workers. */
   shutdown(): void;
   /** Number of workers in the pool. */
   readonly size: number;
 }
 
-interface PendingJob {
-  resolve: (result: DecodeResult) => void;
-  reject: (err: Error) => void;
-}
-
-interface StreamState {
-  queue: StreamDecodeResult[];
-  waiters: Array<(result: IteratorResult<StreamDecodeResult>) => void>;
-  doneWorkers: number;
-  closed: boolean;
-}
-
-interface DecodeAndWriteState {
-  doneWorkers: number;
-  shardPaths: string[];
-  resolve: (paths: string[]) => void;
-  reject: (error: Error) => void;
-}
-
-// ---------------------------------------------------------------------------
-// Implementation
-// ---------------------------------------------------------------------------
-
 export function defaultWorkerCount(): number {
   const cpus = navigator.hardwareConcurrency ?? 4;
   return Math.max(1, Math.min(4, cpus - 1));
 }
 
-export function createCheckpointDecoderPool(
-  size: number,
-  options: CheckpointDecoderPoolOptions = {},
-): CheckpointDecoderPool {
-  const { balanceCoinTypes, useBinaryPreprocessing = false } = options;
-  const archiveMode = isNativeCheckpointDecoderAvailable() ? "binary" : "json";
-  const workerBalanceCoinTypes: string[] | null = balanceCoinTypes === undefined
-    ? null
-    : balanceCoinTypes === "*"
-      ? []
-      : balanceCoinTypes;
+export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool {
   const workerUrl = path.join(import.meta.dir, "checkpoint-decoder.ts");
-
   const workers: Worker[] = [];
-  const pending = new Map<number, PendingJob>();
+
+  interface StreamState {
+    queue: StreamDecodeResult[];
+    waiters: Array<(result: IteratorResult<StreamDecodeResult>) => void>;
+    doneWorkers: number;
+    closed: boolean;
+  }
+
   let activeStream: StreamState | null = null;
-  let activeDecodeAndWrite: DecodeAndWriteState | null = null;
-  let nextId = 0;
-  const MAX_ID = 2_000_000_000;
 
   function closeStream(state: StreamState): void {
     if (state.closed) return;
@@ -139,9 +50,7 @@ export function createCheckpointDecoderPool(
       const resolve = state.waiters.shift()!;
       resolve({ value: undefined, done: true });
     }
-    if (activeStream === state) {
-      activeStream = null;
-    }
+    if (activeStream === state) activeStream = null;
   }
 
   function pushStreamResult(result: StreamDecodeResult): void {
@@ -157,24 +66,18 @@ export function createCheckpointDecoderPool(
 
   function splitRange(from: bigint, to: bigint, parts: number): Array<{ from: bigint; to: bigint }> {
     if (from > to) return Array.from({ length: parts }, () => ({ from: 1n, to: 0n }));
-
     const total = to - from + 1n;
     const base = total / BigInt(parts);
     const remainder = total % BigInt(parts);
     const ranges: Array<{ from: bigint; to: bigint }> = [];
-
     let next = from;
     for (let i = 0; i < parts; i++) {
       const chunk = base + (BigInt(i) < remainder ? 1n : 0n);
-      if (chunk === 0n) {
-        ranges.push({ from: 1n, to: 0n });
-        continue;
-      }
+      if (chunk === 0n) { ranges.push({ from: 1n, to: 0n }); continue; }
       const end = next + chunk - 1n;
       ranges.push({ from: next, to: end });
       next = end + 1n;
     }
-
     return ranges;
   }
 
@@ -184,70 +87,18 @@ export function createCheckpointDecoderPool(
     worker.onmessage = (event: MessageEvent) => {
       const msg = event.data;
 
-      if (activeStream && (msg instanceof Uint8Array || msg instanceof ArrayBuffer)) {
-        const bytes = msg instanceof Uint8Array ? msg : new Uint8Array(msg);
-        if (archiveMode === "binary") {
-          if (bytes.byteLength < 8) return;
-          const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-          const seq = view.getBigUint64(0, true);
-          pushStreamResult({ seq, binary: bytes.subarray(8) });
-          return;
-        }
-      }
-
+      // Binary result: Uint8Array with 8-byte seq prefix
       if (msg instanceof Uint8Array || msg instanceof ArrayBuffer) {
         const bytes = msg instanceof Uint8Array ? msg : new Uint8Array(msg);
-        if (bytes.byteLength < 4) return;
-
+        if (bytes.byteLength < 8) return;
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        const id = view.getUint32(0, true);
-        const job = pending.get(id);
-        if (!job) return;
-        pending.delete(id);
-        job.resolve({ binary: bytes.subarray(4) });
-      } else if (typeof msg === "string") {
-        if (activeStream) {
-          const newlineIdx = msg.indexOf("\n");
-          const seq = BigInt(msg.slice(0, newlineIdx));
-          try {
-            const payload = JSON.parse(msg.slice(newlineIdx + 1)) as SerializedDecodedCheckpoint;
-            pushStreamResult({ seq, payload });
-          } catch (e) {
-            console.error("[checkpoint-decoder-pool] failed to parse streamed JSON payload", e);
-          }
-          return;
-        }
+        const seq = view.getBigUint64(0, true);
+        pushStreamResult({ seq, binary: bytes.subarray(8) });
+        return;
+      }
 
-        const newlineIdx = msg.indexOf("\n");
-        const id = parseInt(msg.slice(0, newlineIdx), 10);
-        const job = pending.get(id);
-        if (!job) return;
-        pending.delete(id);
-
-        try {
-          const payload = JSON.parse(msg.slice(newlineIdx + 1)) as SerializedDecodedCheckpoint;
-          job.resolve({ payload });
-        } catch (e) {
-          job.reject(e instanceof Error ? e : new Error(String(e)));
-        }
-      } else if (msg && typeof msg === "object") {
-        if (msg.type === "done" && activeDecodeAndWrite) {
-          activeDecodeAndWrite.doneWorkers += 1;
-          if (activeDecodeAndWrite.doneWorkers >= workers.length) {
-            const task = activeDecodeAndWrite;
-            activeDecodeAndWrite = null;
-            task.resolve(task.shardPaths);
-          }
-          return;
-        }
-
-        if (msg.type === "error" && activeDecodeAndWrite) {
-          console.error(
-            `[checkpoint-decoder-pool] shard worker checkpoint ${msg.seq ?? "unknown"} failed: ${msg.error ?? "worker error"}`,
-          );
-          return;
-        }
-
+      // Control messages
+      if (msg && typeof msg === "object") {
         if (msg.type === "done" && activeStream) {
           activeStream.doneWorkers += 1;
           if (activeStream.doneWorkers >= workers.length) {
@@ -255,41 +106,19 @@ export function createCheckpointDecoderPool(
           }
           return;
         }
-
         if (msg.type === "error" && activeStream) {
-          console.error(
-            `[checkpoint-decoder-pool] streamed checkpoint ${msg.seq ?? "unknown"} failed: ${msg.error ?? "worker error"}`,
-          );
+          console.error(`[decoder-pool] worker ${i} error: ${msg.error ?? "unknown"}`);
           return;
         }
-
-        const id = msg.id as number;
-        const job = pending.get(id);
-        if (!job) return;
-        pending.delete(id);
-        job.reject(new Error(msg.error ?? "Worker error"));
       }
     };
 
     worker.onerror = (event) => {
-      if (activeDecodeAndWrite) {
-        const task = activeDecodeAndWrite;
-        activeDecodeAndWrite = null;
-        task.reject(new Error(`Worker ${i} crashed: ${event.message}`));
-      }
-
       if (activeStream) {
-        console.error(`[checkpoint-decoder-pool] worker ${i} crashed during archive stream: ${event.message}`);
+        console.error(`[decoder-pool] worker ${i} crashed: ${event.message}`);
         activeStream.doneWorkers += 1;
         if (activeStream.doneWorkers >= workers.length) {
           closeStream(activeStream);
-        }
-      }
-
-      for (const [id, job] of pending) {
-        if (id % size === i) {
-          job.reject(new Error(`Worker ${i} crashed: ${event.message}`));
-          pending.delete(id);
         }
       }
     };
@@ -300,57 +129,9 @@ export function createCheckpointDecoderPool(
   return {
     get size() { return size; },
 
-    decode(seq: bigint, compressed: Uint8Array): Promise<DecodeResult> {
-      if (activeStream || activeDecodeAndWrite) {
-        return Promise.reject(new Error("checkpoint decoder pool is handling a range task"));
-      }
-
-      return new Promise((resolve, reject) => {
-        const id = nextId;
-        nextId = nextId >= MAX_ID ? 0 : nextId + 1;
-        pending.set(id, { resolve, reject });
-
-        const worker = workers[id % size]!;
-        worker.postMessage(
-          {
-            id,
-            seq: seq.toString(),
-            compressed,
-            balanceCoinTypes: workerBalanceCoinTypes,
-            useBinary: useBinaryPreprocessing,
-          },
-          [compressed.buffer], // transfer compressed bytes (zero-copy to worker)
-        );
-      });
-    },
-
-    decodeCached(seq: bigint, cachePath: string): Promise<DecodeResult> {
-      if (activeStream || activeDecodeAndWrite) {
-        return Promise.reject(new Error("checkpoint decoder pool is handling a range task"));
-      }
-
-      return new Promise((resolve, reject) => {
-        const id = nextId;
-        nextId = nextId >= MAX_ID ? 0 : nextId + 1;
-        pending.set(id, { resolve, reject });
-
-        const worker = workers[id % size]!;
-        // Simple object fast path — all primitives, no ArrayBuffer transfer needed
-        worker.postMessage({
-          type: "decode-cached",
-          id,
-          seq: seq.toString(),
-          cachePath,
-        });
-      });
-    },
-
     decodeCachedRange(from: bigint, to: bigint, cacheDir: string, extractMask?: number): AsyncIterable<StreamDecodeResult> {
-      if (pending.size > 0) {
-        throw new Error("checkpoint decoder pool has outstanding decode jobs");
-      }
-      if (activeStream || activeDecodeAndWrite) {
-        throw new Error("checkpoint decoder pool is already streaming");
+      if (activeStream) {
+        throw new Error("decoder pool is already streaming");
       }
 
       const streamState: StreamState = {
@@ -363,12 +144,10 @@ export function createCheckpointDecoderPool(
 
       const ranges = splitRange(from, to, workers.length);
       for (let i = 0; i < workers.length; i++) {
-        const worker = workers[i]!;
-        const range = ranges[i]!;
-        worker.postMessage({
+        workers[i]!.postMessage({
           type: "decode-cached-range",
-          from: range.from.toString(),
-          to: range.to.toString(),
+          from: ranges[i]!.from.toString(),
+          to: ranges[i]!.to.toString(),
           cacheDir,
           workerIndex: i,
           extractMask,
@@ -385,9 +164,7 @@ export function createCheckpointDecoderPool(
               if (streamState.closed) {
                 return Promise.resolve({ value: undefined, done: true });
               }
-              return new Promise(resolve => {
-                streamState.waiters.push(resolve);
-              });
+              return new Promise(resolve => { streamState.waiters.push(resolve); });
             },
             return(): Promise<IteratorResult<StreamDecodeResult>> {
               closeStream(streamState);
@@ -396,119 +173,12 @@ export function createCheckpointDecoderPool(
           };
         },
       };
-    },
-
-    decodeAndWriteRange(from, to, cacheDir, shardDir, enabledProcessors): Promise<string[]> {
-      if (pending.size > 0) {
-        return Promise.reject(new Error("checkpoint decoder pool has outstanding decode jobs"));
-      }
-      if (activeStream || activeDecodeAndWrite) {
-        return Promise.reject(new Error("checkpoint decoder pool is already handling a range task"));
-      }
-
-      const ranges = splitRange(from, to, workers.length);
-      const shardPaths = workers.map((_, i) => path.join(shardDir, `shard-${i}.db`));
-
-      return new Promise((resolve, reject) => {
-        activeDecodeAndWrite = {
-          doneWorkers: 0,
-          shardPaths,
-          resolve,
-          reject,
-        };
-
-        for (let i = 0; i < workers.length; i++) {
-          const worker = workers[i]!;
-          const range = ranges[i]!;
-          worker.postMessage({
-            type: "decode-and-write-range",
-            from: range.from.toString(),
-            to: range.to.toString(),
-            cacheDir,
-            workerIndex: i,
-            sqlitePath: shardPaths[i],
-            enabledProcessors,
-          });
-        }
-      });
-    },
-
-    stream(from: bigint, to: bigint, archiveUrl: string, concurrency: number): AsyncIterable<StreamDecodeResult> {
-      if (pending.size > 0) {
-        throw new Error("checkpoint decoder pool has outstanding decode jobs");
-      }
-      if (activeStream || activeDecodeAndWrite) {
-        throw new Error("checkpoint decoder pool is already streaming an archive range");
-      }
-
-      const streamState: StreamState = {
-        queue: [],
-        waiters: [],
-        doneWorkers: 0,
-        closed: false,
-      };
-      activeStream = streamState;
-
-      const ranges = splitRange(from, to, workers.length);
-      const concurrencyPerWorker = Math.max(1, concurrency);
-
-      for (let i = 0; i < workers.length; i++) {
-        const worker = workers[i]!;
-        const range = ranges[i]!;
-        worker.postMessage({
-          type: "assign",
-          workerIndex: i,
-          from: range.from.toString(),
-          to: range.to.toString(),
-          archiveUrl,
-          concurrency: concurrencyPerWorker,
-          mode: archiveMode,
-          balanceCoinTypes: workerBalanceCoinTypes,
-        });
-      }
-
-      const iterable: AsyncIterable<StreamDecodeResult> = {
-        [Symbol.asyncIterator](): AsyncIterator<StreamDecodeResult> {
-          return {
-            next(): Promise<IteratorResult<StreamDecodeResult>> {
-              if (streamState.queue.length > 0) {
-                return Promise.resolve({ value: streamState.queue.shift()!, done: false });
-              }
-              if (streamState.closed) {
-                return Promise.resolve({ value: undefined, done: true });
-              }
-              return new Promise(resolve => {
-                streamState.waiters.push(resolve);
-              });
-            },
-            return(): Promise<IteratorResult<StreamDecodeResult>> {
-              closeStream(streamState);
-              return Promise.resolve({ value: undefined, done: true });
-            },
-          };
-        },
-      };
-
-      return iterable;
     },
 
     shutdown(): void {
-      if (activeDecodeAndWrite) {
-        const task = activeDecodeAndWrite;
-        activeDecodeAndWrite = null;
-        task.reject(new Error("Worker pool shut down"));
-      }
-      if (activeStream) {
-        closeStream(activeStream);
-      }
-      for (const worker of workers) {
-        worker.terminate();
-      }
+      if (activeStream) closeStream(activeStream);
+      for (const worker of workers) worker.terminate();
       workers.length = 0;
-      for (const [, job] of pending) {
-        job.reject(new Error("Worker pool shut down"));
-      }
-      pending.clear();
     },
   };
 }

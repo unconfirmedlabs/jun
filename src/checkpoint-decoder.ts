@@ -1,128 +1,25 @@
 /**
- * Archive checkpoint worker.
+ * Checkpoint decode worker — Rust FFI binary decode from cached files.
  *
- * Archive range mode:
- *   fetch -> Rust binary FFI -> Uint8Array -> postMessage(buffer, [buffer.buffer])
- *
- * Per-checkpoint decode mode is retained for non-archive callers that still
- * post compressed checkpoint bytes directly to the worker.
+ * Each worker processes a range of checkpoints: readFileSync → Rust FFI → postMessage(binary).
+ * Supports selective extraction via extractMask.
  */
 /// <reference lib="webworker" />
-import { computeBalanceChangesFromArchive } from "./archive-balance.ts";
-import { decodeCheckpointFromProto, getCheckpointType } from "./archive.ts";
-import type { BalanceChange } from "./balance-processor.ts";
 import {
   decodeArchiveCheckpointBinary,
   decodeArchiveCheckpointBinarySelective,
-  decodeArchiveCheckpointCompressedNative,
   isNativeCheckpointDecoderAvailable,
 } from "./checkpoint-native-decoder.ts";
-import type { SerializedBalanceChange } from "./checkpoint-response.ts";
-import type { GrpcCheckpointResponse } from "./grpc.ts";
-import { parseTimestamp } from "./timestamp.ts";
-import { zstdDecompressSync } from "zlib";
 
 declare var self: Worker;
 
-type WorkerArchiveMode = "binary" | "json";
-
-interface DecodeRequestMessage {
-  id: number;
-  seq: string;
-  compressed: Uint8Array;
-  balanceCoinTypes: string[] | null;
-  useBinary: boolean;
-}
-
-interface DecodeFromCacheMessage {
-  type: "decode-cached";
-  id: number;
-  seq: string;
-  cachePath: string;
-}
-
-interface AssignRangeMessage {
-  type: "assign";
-  workerIndex: number;
+interface DecodeCachedRangeMessage {
+  type: "decode-cached-range";
   from: string;
   to: string;
-  archiveUrl: string;
-  concurrency: number;
-  mode: WorkerArchiveMode;
-  balanceCoinTypes: string[] | null;
-}
-
-function serializeBalanceChanges(changes: BalanceChange[]): SerializedBalanceChange[] {
-  return changes.map(change => ({
-    txDigest: change.txDigest,
-    checkpointSeq: change.checkpointSeq.toString(),
-    address: change.address,
-    coinType: change.coinType,
-    amount: change.amount,
-    timestamp: change.timestamp.toISOString(),
-  }));
-}
-
-async function fetchArchiveCheckpoint(seq: bigint, archiveUrl: string): Promise<Uint8Array> {
-  const response = await fetch(`${archiveUrl}/${seq}.binpb.zst`);
-  if (!response.ok) {
-    throw new Error(`Archive fetch failed: ${response.status} for checkpoint ${seq}`);
-  }
-  return new Uint8Array(await response.arrayBuffer());
-}
-
-async function decodeCheckpointJson(
-  compressedBytes: Uint8Array,
-  sequenceNumber: bigint,
-  balanceCoinTypes: string[] | null,
-): Promise<{ decoded: GrpcCheckpointResponse; precomputedBalanceChanges?: SerializedBalanceChange[] }> {
-  let decoded: GrpcCheckpointResponse | null = null;
-  if (isNativeCheckpointDecoderAvailable()) {
-    decoded = decodeArchiveCheckpointCompressedNative(compressedBytes);
-  }
-
-  let checkpointProto: any | null = null;
-  if (!decoded || balanceCoinTypes !== null) {
-    const decompressed = zstdDecompressSync(Buffer.from(compressedBytes));
-    const Checkpoint = await getCheckpointType();
-    const protoDecoded = Checkpoint.decode(decompressed);
-    checkpointProto = Checkpoint.toObject(protoDecoded, { longs: String, enums: String, defaults: false });
-
-    if (!decoded) {
-      decoded = await decodeCheckpointFromProto(sequenceNumber, checkpointProto);
-    }
-  }
-
-  if (!decoded) {
-    throw new Error(`Checkpoint ${sequenceNumber} could not be decoded`);
-  }
-
-  let precomputedBalanceChanges: SerializedBalanceChange[] | undefined;
-  if (balanceCoinTypes !== null) {
-    if (!checkpointProto) {
-      throw new Error("Archive balance computation requires decoded checkpoint proto");
-    }
-
-    const summary = decoded.checkpoint.summary;
-    const timestamp = parseTimestamp(summary?.timestamp);
-    const coinTypeFilter = balanceCoinTypes.length === 0 ? null : new Set(balanceCoinTypes);
-    const archiveBalances = computeBalanceChangesFromArchive(
-      checkpointProto,
-      sequenceNumber,
-      timestamp,
-      coinTypeFilter,
-    );
-    precomputedBalanceChanges = serializeBalanceChanges(archiveBalances);
-  }
-
-  return { decoded, precomputedBalanceChanges };
-}
-
-function postBinaryById(id: number, binary: Uint8Array): void {
-  const result = new Uint8Array(4 + binary.length);
-  new DataView(result.buffer).setUint32(0, id, true);
-  result.set(binary, 4);
-  postMessage(result, [result.buffer]);
+  cacheDir: string;
+  workerIndex: number;
+  extractMask?: number;
 }
 
 function postBinaryBySeq(seq: bigint, binary: Uint8Array): void {
@@ -133,157 +30,40 @@ function postBinaryBySeq(seq: bigint, binary: Uint8Array): void {
   postMessage(result, [result.buffer]);
 }
 
-async function handleDecodeRequest(message: DecodeRequestMessage): Promise<void> {
-  const { id, seq, compressed, balanceCoinTypes, useBinary } = message;
-
-  try {
-    const compressedBytes = new Uint8Array(compressed);
-    const sequenceNumber = BigInt(seq);
-
-    if (useBinary && isNativeCheckpointDecoderAvailable()) {
-      const binary = decodeArchiveCheckpointBinary(compressedBytes);
-      if (binary) {
-        postBinaryById(id, binary);
-        return;
-      }
-    }
-
-    const payload = await decodeCheckpointJson(compressedBytes, sequenceNumber, balanceCoinTypes);
-    postMessage(`${id}\n${JSON.stringify(payload)}`);
-  } catch (err) {
-    postMessage({ id, error: err instanceof Error ? err.message : String(err) });
-  }
-}
-
-async function handleRangeAssignment(message: AssignRangeMessage): Promise<void> {
-  const from = BigInt(message.from);
-  const to = BigInt(message.to);
-  let next = from;
-
-  const startedAt = performance.now();
-  let processed = 0;
-  let fetchMs = 0;
-  let decodeMs = 0;
-
-  async function processOne(): Promise<void> {
-    while (next <= to) {
-      const seq = next;
-      next += 1n;
-
-      try {
-        const fetchStart = performance.now();
-        const compressed = await fetchArchiveCheckpoint(seq, message.archiveUrl);
-        const afterFetch = performance.now();
-
-        if (message.mode === "binary") {
-          const binary = decodeArchiveCheckpointBinary(compressed);
-          if (!binary) {
-            throw new Error(`Native binary decode failed for checkpoint ${seq}`);
-          }
-          postBinaryBySeq(seq, binary);
-        } else {
-          const payload = await decodeCheckpointJson(compressed, seq, message.balanceCoinTypes);
-          postMessage(`${seq}\n${JSON.stringify(payload)}`);
-        }
-
-        const afterDecode = performance.now();
-        processed += 1;
-        fetchMs += afterFetch - fetchStart;
-        decodeMs += afterDecode - afterFetch;
-
-        if (processed > 0 && processed % 5000 === 0) {
-          const elapsed = (performance.now() - startedAt) / 1000;
-          const rate = Math.round(processed / Math.max(elapsed, 0.001));
-          const avgFetch = (fetchMs / processed).toFixed(2);
-          const avgDecode = (decodeMs / processed).toFixed(2);
-          console.error(
-            `[checkpoint-worker ${message.workerIndex}] ${processed} cp ${rate} cp/s avg_fetch=${avgFetch}ms avg_decode=${avgDecode}ms`,
-          );
-        }
-      } catch (err) {
-        postMessage({
-          type: "error",
-          seq: seq.toString(),
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.max(1, message.concurrency) }, () => processOne()),
-  );
-
-  postMessage({ type: "done" });
-}
-
-interface DecodeCachedRangeMessage {
-  type: "decode-cached-range";
-  from: string;
-  to: string;
-  cacheDir: string;
-  workerIndex: number;
-  /** Extraction mask bitfield — controls which record types Rust decodes. 0x7FF = all. */
-  extractMask?: number;
-}
-
-interface DecodeAndWriteRangeMessage {
-  type: "decode-and-write-range";
-  from: string;
-  to: string;
-  cacheDir: string;
-  workerIndex: number;
-  sqlitePath: string;
-  enabledProcessors: {
-    balances: boolean;
-    transactions: boolean;
-    objectChanges: boolean;
-    dependencies: boolean;
-    inputs: boolean;
-    commands: boolean;
-    systemTransactions: boolean;
-    unchangedConsensusObjects: boolean;
-    events: boolean;
-    checkpoints: boolean;
-  };
-}
-
 async function handleDecodeCachedRange(msg: DecodeCachedRangeMessage): Promise<void> {
   const { readFileSync } = await import("fs");
   const { join } = await import("path");
 
   const from = BigInt(msg.from);
   const to = BigInt(msg.to);
-  const useBinary = isNativeCheckpointDecoderAvailable();
+  const useSelective = msg.extractMask !== undefined && msg.extractMask !== 0x7FF;
   let processed = 0;
   const startedAt = performance.now();
+
+  if (!isNativeCheckpointDecoderAvailable()) {
+    postMessage({ type: "error", error: "Native checkpoint decoder not available" });
+    postMessage({ type: "done" });
+    return;
+  }
 
   for (let seq = from; seq <= to; seq++) {
     const cachePath = join(msg.cacheDir, `${seq}.binpb.zst`);
     try {
       const compressed = new Uint8Array(readFileSync(cachePath));
+      const binary = useSelective
+        ? decodeArchiveCheckpointBinarySelective(compressed, msg.extractMask!)
+        : decodeArchiveCheckpointBinary(compressed);
 
-      if (useBinary) {
-        const binary = msg.extractMask !== undefined && msg.extractMask !== 0x7FF
-          ? decodeArchiveCheckpointBinarySelective(compressed, msg.extractMask)
-          : decodeArchiveCheckpointBinary(compressed);
-        if (binary) {
-          postBinaryBySeq(seq, binary);
-          processed++;
-          if (processed % 5000 === 0) {
-            const elapsed = (performance.now() - startedAt) / 1000;
-            console.error(
-              `[decode-worker ${msg.workerIndex}] ${processed} cp ${Math.round(processed / elapsed)} cp/s`,
-            );
-          }
-          continue;
+      if (binary) {
+        postBinaryBySeq(seq, binary);
+        processed++;
+        if (processed % 5000 === 0) {
+          const elapsed = (performance.now() - startedAt) / 1000;
+          console.error(
+            `[decode-worker ${msg.workerIndex}] ${processed} cp ${Math.round(processed / elapsed)} cp/s`,
+          );
         }
       }
-
-      // JS fallback
-      const payload = await decodeCheckpointJson(compressed, seq, null);
-      postMessage(`${seq}\n${JSON.stringify(payload)}`);
-      processed++;
     } catch (err) {
       postMessage({
         type: "error",
@@ -296,123 +76,9 @@ async function handleDecodeCachedRange(msg: DecodeCachedRangeMessage): Promise<v
   postMessage({ type: "done" });
 }
 
-async function handleDecodeAndWriteRange(msg: DecodeAndWriteRangeMessage): Promise<void> {
-  const { Database } = await import("bun:sqlite");
-  const { readFileSync } = await import("fs");
-  const { join } = await import("path");
-  const { parseBinaryCheckpoint } = await import("./binary-parser.ts");
-  const {
-    configureSnapshotShardDatabase,
-    createSnapshotShardTables,
-    insertParsedCheckpointToSnapshotShard,
-    prepareSnapshotShardStatements,
-  } = await import("./pipeline/destinations/sql-ddl.ts");
-
-  const db = new Database(msg.sqlitePath);
-  configureSnapshotShardDatabase(db);
-  createSnapshotShardTables(db, msg.enabledProcessors);
-  const statements = prepareSnapshotShardStatements(db, msg.enabledProcessors);
-
-  const from = BigInt(msg.from);
-  const to = BigInt(msg.to);
-  const startedAt = performance.now();
-  let processed = 0;
-  let batchCount = 0;
-  const batchSize = 1000;
-
-  try {
-    db.exec("BEGIN");
-
-    for (let seq = from; seq <= to; seq++) {
-      const cachePath = join(msg.cacheDir, `${seq}.binpb.zst`);
-      try {
-        const compressed = new Uint8Array(readFileSync(cachePath));
-        const binary = decodeArchiveCheckpointBinary(compressed);
-        if (!binary) {
-          throw new Error(`Native binary decode failed for checkpoint ${seq}`);
-        }
-
-        const parsed = parseBinaryCheckpoint(binary);
-        insertParsedCheckpointToSnapshotShard(statements, parsed);
-
-        processed++;
-        batchCount++;
-
-        if (batchCount >= batchSize) {
-          db.exec("COMMIT");
-          db.exec("BEGIN");
-          batchCount = 0;
-        }
-
-        if (processed > 0 && processed % 5000 === 0) {
-          const elapsed = (performance.now() - startedAt) / 1000;
-          console.error(
-            `[write-worker ${msg.workerIndex}] ${processed} cp ${Math.round(processed / Math.max(elapsed, 0.001))} cp/s`,
-          );
-        }
-      } catch (err) {
-        console.error(
-          `[write-worker ${msg.workerIndex}] checkpoint ${seq} failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-
-    if (batchCount > 0) {
-      db.exec("COMMIT");
-    } else {
-      db.exec("ROLLBACK");
-    }
-  } finally {
-    db.close();
-  }
-
-  postMessage({ type: "done" });
-}
-
-async function handleDecodeCached(msg: DecodeFromCacheMessage): Promise<void> {
-  const { id, seq, cachePath } = msg;
-  try {
-    const { readFileSync } = await import("fs");
-    const compressed = new Uint8Array(readFileSync(cachePath));
-
-    if (isNativeCheckpointDecoderAvailable()) {
-      const binary = decodeArchiveCheckpointBinary(compressed);
-      if (binary) {
-        postBinaryById(id, binary);
-        return;
-      }
-    }
-
-    // JS fallback
-    const sequenceNumber = BigInt(seq);
-    const payload = await decodeCheckpointJson(compressed, sequenceNumber, null);
-    postMessage(`${id}\n${JSON.stringify(payload)}`);
-  } catch (err) {
-    postMessage({ id, error: err instanceof Error ? err.message : String(err) });
-  }
-}
-
 self.onmessage = async (event: MessageEvent) => {
   const msg = event.data;
-
-  if (msg && typeof msg === "object" && "type" in msg) {
-    if (msg.type === "assign") {
-      await handleRangeAssignment(msg as AssignRangeMessage);
-      return;
-    }
-    if (msg.type === "decode-cached") {
-      await handleDecodeCached(msg as DecodeFromCacheMessage);
-      return;
-    }
-    if (msg.type === "decode-cached-range") {
-      await handleDecodeCachedRange(msg as DecodeCachedRangeMessage);
-      return;
-    }
-    if (msg.type === "decode-and-write-range") {
-      await handleDecodeAndWriteRange(msg as DecodeAndWriteRangeMessage);
-      return;
-    }
+  if (msg && typeof msg === "object" && msg.type === "decode-cached-range") {
+    await handleDecodeCachedRange(msg as DecodeCachedRangeMessage);
   }
-
-  await handleDecodeRequest(msg as DecodeRequestMessage);
 };
