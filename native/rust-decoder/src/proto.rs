@@ -28,7 +28,7 @@ pub struct ProtoTransaction<'a> {
 /// Parsed checkpoint proto — just the BCS byte slices we need.
 pub struct ProtoCheckpoint<'a> {
     pub sequence_number: Option<String>,
-    pub digest: Option<&'a str>,
+    pub digest: Option<String>,
     pub summary_bcs: Option<&'a [u8]>,
     pub transactions: Vec<ProtoTransaction<'a>>,
     pub objects: Vec<ProtoObject<'a>>,
@@ -61,11 +61,15 @@ pub fn parse_checkpoint(buf: &[u8]) -> Result<ProtoCheckpoint<'_>, &'static str>
                 pos = new_pos;
                 result.sequence_number = Some(value.to_string());
             }
-            // field 2: digest
+            // field 2: digest (raw bytes → base58 string)
             (2, 2) => {
                 let (data, new_pos) = read_length_delimited(buf, pos)?;
                 pos = new_pos;
-                result.digest = std::str::from_utf8(data).ok();
+                // Try as UTF-8 first (gRPC format), then encode as base58 (proto format)
+                result.digest = std::str::from_utf8(data)
+                    .ok()
+                    .map(|s| s.to_string())
+                    .or_else(|| Some(bs58::encode(data).into_string()));
             }
             // field 3: summary (length-delimited message)
             (3, 2) => {

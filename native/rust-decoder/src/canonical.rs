@@ -425,8 +425,9 @@ fn build_checkpoint(
             epoch: summary.epoch,
             digest: parsed
                 .digest
-                .map(|digest| digest.to_string())
-                .filter(|digest| !digest.is_empty()),
+                .as_ref()
+                .filter(|d| !d.is_empty())
+                .cloned(),
             previous_digest: summary.previous_digest,
             content_digest: summary.content_digest,
             total_network_transactions: summary.total_network_transactions,

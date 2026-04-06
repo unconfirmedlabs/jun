@@ -159,7 +159,7 @@ pub(crate) fn extract_and_write_binary_with_fast_path(
         w.write_u64_dec(s.sequence_number);
         w.write_u64_dec(s.epoch);
         write_iso_timestamp(&mut w, s.timestamp_ms);
-        w.write_empty_str(); // digest placeholder
+        w.write_str(parsed.digest.as_deref().unwrap_or("")); // checkpoint digest from proto
         match &s.previous_digest {
             Some(d) => w.write_hex(d.inner()),
             None => w.write_null(),
@@ -270,6 +270,7 @@ pub(crate) fn extract_and_write_binary_with_fast_path(
                         ExecutionErrorKind::MoveAbort(location, code) => {
                             w.write_u64_dec(*code);
                             let len_pos = w.begin_string();
+                            w.write_raw_str("0x");
                             write_canonical_address_contents_no_prefix(
                                 &mut w,
                                 location.module.address().into_bytes().as_ref(),

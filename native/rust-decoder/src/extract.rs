@@ -431,7 +431,7 @@ pub fn extract_checkpoint_data(
             timestamp: summary.timestamp,
             source: "backfill".to_string(),
             epoch: summary.epoch,
-            digest: String::new(),
+            digest: parsed.digest.unwrap_or_default(),
             previous_digest: summary.previous_digest,
             content_digest: summary.content_digest,
             total_network_transactions: summary.total_network_transactions,
@@ -499,7 +499,7 @@ fn build_transaction_record(
                 let abort = match &failure.error {
                     ExecutionErrorKind::MoveAbort(location, code) => (
                         Some(code.to_string()),
-                        Some(location.module.to_string()),
+                        Some(location.module.to_canonical_display(true).to_string()),
                         location.function_name.clone(),
                     ),
                     _ => (None, None, None),

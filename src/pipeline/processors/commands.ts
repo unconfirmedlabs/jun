@@ -69,7 +69,7 @@ export function createCommandTracker(): Processor {
             package: mc?.package ?? null,
             module: mc?.module ?? null,
             function: mc?.function ?? null,
-            typeArguments: mc?.typeArguments ? safeStringify(mc.typeArguments) : null,
+            typeArguments: mc ? safeStringify(mc.typeArguments ?? []) : null,
             args,
             checkpointSeq: checkpoint.sequenceNumber,
             timestamp: checkpoint.timestamp,
