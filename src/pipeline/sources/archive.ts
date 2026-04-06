@@ -199,23 +199,50 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
 
       try {
         const pool = decoderPool!;
-        const maxInFlight = fetchConcurrency * 2;
-        let inFlight = 0;
-        let nextToFetch = config.from;
+        const totalCheckpoints = Number(endSeq - config.from + 1n);
 
-        // Backpressure signaling
-        let backpressureResolve: (() => void) | null = null;
-        function signalBackpressure() {
-          if (backpressureResolve && inFlight < maxInFlight) {
-            const resolve = backpressureResolve;
-            backpressureResolve = null;
-            resolve();
+        // ─── Phase 1: Fetch all compressed checkpoints to disk ─────────
+        // Single connection pool on main thread, maximum CDN throughput.
+        // Writes to a temp directory to avoid memory pressure on small machines.
+        const { mkdirSync, readFileSync, unlinkSync, rmdirSync } = await import("fs");
+        const { join } = await import("path");
+        const tmpDir = join(import.meta.dir, "..", "..", ".jun-fetch-cache");
+        mkdirSync(tmpDir, { recursive: true });
+
+        log.info({ concurrency: fetchConcurrency, total: totalCheckpoints }, "phase 1: fetching checkpoints to disk");
+        const fetchStart = performance.now();
+        let fetchNext = config.from;
+        let fetchDone = 0;
+
+        async function fetchWorker() {
+          while (fetchNext <= endSeq && !stopped) {
+            const seq = fetchNext++;
+            try {
+              const url = `${config.archiveUrl}/${seq}.binpb.zst`;
+              const resp = await fetch(url);
+              if (resp.ok) {
+                await Bun.write(join(tmpDir, `${seq}.zst`), await resp.arrayBuffer());
+                fetchDone++;
+                if (fetchDone % 10000 === 0) {
+                  const elapsed = (performance.now() - fetchStart) / 1000;
+                  console.error(`[fetch] ${fetchDone}/${totalCheckpoints} (${Math.round(fetchDone / elapsed)} req/s)`);
+                }
+              }
+            } catch {}
           }
         }
-        function waitForBackpressure(): Promise<void> {
-          if (inFlight < maxInFlight) return Promise.resolve();
-          return new Promise(resolve => { backpressureResolve = resolve; });
-        }
+
+        await Promise.all(Array.from({ length: fetchConcurrency }, () => fetchWorker()));
+        const fetchElapsed = (performance.now() - fetchStart) / 1000;
+        log.info(
+          { fetched: fetchDone, elapsed: `${fetchElapsed.toFixed(1)}s`, rate: Math.round(fetchDone / fetchElapsed) },
+          "phase 1 complete",
+        );
+
+        // ─── Phase 2: Decode from disk via worker pool ─────────────────
+        // No network. Workers do Rust FFI decode from cached compressed bytes.
+        log.info({ workers: workerCount }, "phase 2: decoding checkpoints");
+        const decodeStart = performance.now();
 
         // Drain signaling
         let drainResolve: (() => void) | null = null;
@@ -230,18 +257,19 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           return new Promise(resolve => { drainResolve = resolve; });
         }
 
-        // Main-thread fetch → worker decode → push to pending
-        async function processCheckpoint(seq: bigint): Promise<void> {
+        let allDecodesDone = false;
+        const decodePromises: Promise<void>[] = [];
+
+        for (let seq = config.from; seq <= endSeq && !stopped; seq++) {
+          const filePath = join(tmpDir, `${seq}.zst`);
+          let compressed: Uint8Array;
           try {
-            const url = `${config.archiveUrl}/${seq}.binpb.zst`;
-            const resp = await fetch(url);
-            if (!resp.ok) throw new Error(`HTTP ${resp.status} for checkpoint ${seq}`);
-            const compressed = new Uint8Array(await resp.arrayBuffer());
-            if (stopped) return;
+            compressed = new Uint8Array(readFileSync(filePath));
+          } catch {
+            continue; // Skip failed fetches
+          }
 
-            const result = await pool.decode(seq, compressed);
-            if (stopped) return;
-
+          const p = pool.decode(seq, compressed).then(result => {
             let checkpoint: Checkpoint;
             if (result.binary) {
               checkpoint = checkpointFromBinaryResult(
@@ -256,68 +284,60 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
                 result.payload.precomputedBalanceChanges,
               );
             } else {
-              throw new Error(`Checkpoint ${seq} decode returned no payload`);
+              return;
             }
-
             pending.set(seq, checkpoint);
-            totalProcessed += 1;
-
-            if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
-              const elapsed = (performance.now() - profilingStart) / 1000;
-              const rate = Math.round(totalProcessed / Math.max(elapsed, 0.001));
-              console.error(
-                `[archive-main] ${totalProcessed} checkpoints ${rate} checkpoint/s pending=${pending.size}`,
-              );
-            }
-          } catch (error) {
-            log.error({ checkpoint: seq.toString(), error }, "failed to fetch/decode checkpoint");
-          } finally {
-            inFlight--;
+            totalProcessed++;
             signalDrain();
-            signalBackpressure();
-          }
+
+            // Clean up cached file
+            try { unlinkSync(filePath); } catch {}
+          });
+          decodePromises.push(p);
         }
 
-        // Fetcher: fire-and-forget, backpressure when too many in-flight
-        let fetcherDone = false;
-        const fetcherPromise = (async () => {
-          while (nextToFetch <= endSeq && !stopped) {
-            await waitForBackpressure();
-            if (stopped) break;
-            const seq = nextToFetch++;
-            inFlight++;
-            processCheckpoint(seq);
-          }
-          fetcherDone = true;
+        Promise.all(decodePromises).then(() => {
+          allDecodesDone = true;
           signalDrain();
-        })();
+        });
 
-        // Drain: yield checkpoints as they arrive
+        // Drain results as they arrive
         while (!stopped) {
           if (config.unorderedDrain) {
-            // Yield any available checkpoint from pending
             let yielded = false;
             for (const [seq, cp] of pending) {
               pending.delete(seq);
               yield cp;
               yielded = true;
             }
-            if (!yielded && fetcherDone && inFlight === 0) break;
+            if (!yielded && allDecodesDone) break;
             if (!yielded) await waitForDrain();
           } else {
-            // Ordered: yield contiguous from watermark
             while (pending.has(watermark + 1n)) {
               watermark += 1n;
-              const ready = pending.get(watermark)!;
+              yield pending.get(watermark)!;
               pending.delete(watermark);
-              yield ready;
             }
-            if (fetcherDone && inFlight === 0 && !pending.has(watermark + 1n)) break;
+            if (allDecodesDone && !pending.has(watermark + 1n)) break;
             await waitForDrain();
+          }
+
+          if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
+            const elapsed = (performance.now() - decodeStart) / 1000;
+            const rate = Math.round(totalProcessed / Math.max(elapsed, 0.001));
+            console.error(`[decode] ${totalProcessed}/${totalCheckpoints} (${rate} cp/s)`);
           }
         }
 
-        await fetcherPromise;
+        await Promise.all(decodePromises);
+        const decodeElapsed = (performance.now() - decodeStart) / 1000;
+        log.info(
+          { decoded: totalProcessed, elapsed: `${decodeElapsed.toFixed(1)}s`, rate: Math.round(totalProcessed / decodeElapsed) },
+          "phase 2 complete",
+        );
+
+        // Cleanup temp dir
+        try { rmdirSync(tmpDir, { recursive: true }); } catch {}
       } finally {
         if (decoderPool) {
           decoderPool.shutdown();
