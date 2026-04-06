@@ -1985,87 +1985,107 @@ moveCmd
 // pipeline — composable Source → Processor → Destination
 // ---------------------------------------------------------------------------
 
-const pipelineCmd = program
-  .command("pipeline")
-  .description("Composable data pipeline (Source → Processor → Destination)");
+const indexCmd = program
+  .command("index")
+  .description("Sui chain data extraction");
 
 // ---------------------------------------------------------------------------
-// index-chain — extract all structural chain data
+// Shared helpers
 // ---------------------------------------------------------------------------
 
-pipelineCmd
-  .command("index-chain")
-  .description("Extract all structural chain data to per-table SQLite files")
+function buildExtractMask(opts: any, ExtractMask: any): number {
+  const hasAnyFlag = opts.transactions || opts.balanceChanges || opts.objectChanges
+    || opts.events || opts.dependencies || opts.inputs || opts.commands
+    || opts.systemTransactions || opts.unchangedConsensusObjects || opts.checkpoints;
+
+  let mask = 0;
+  if (!hasAnyFlag || opts.all) {
+    mask = ExtractMask.ALL;
+  } else {
+    if (opts.transactions)                mask |= ExtractMask.TRANSACTIONS | ExtractMask.MOVE_CALLS;
+    if (opts.balanceChanges)              mask |= ExtractMask.BALANCE_CHANGES;
+    if (opts.objectChanges)               mask |= ExtractMask.OBJECT_CHANGES;
+    if (opts.events)                      mask |= ExtractMask.EVENTS;
+    if (opts.dependencies)                mask |= ExtractMask.DEPENDENCIES;
+    if (opts.inputs)                      mask |= ExtractMask.INPUTS;
+    if (opts.commands)                    mask |= ExtractMask.COMMANDS;
+    if (opts.systemTransactions)          mask |= ExtractMask.SYSTEM_TRANSACTIONS;
+    if (opts.unchangedConsensusObjects)   mask |= ExtractMask.UNCHANGED_CONSENSUS;
+    if (opts.checkpoints)                 mask |= ExtractMask.CHECKPOINTS;
+  }
+  mask |= ExtractMask.CHECKPOINTS; // always needed for progress
+  return mask;
+}
+
+function addTableFlags(cmd: any) {
+  return cmd
+    .option("--transactions", "index transactions + move calls")
+    .option("--balance-changes", "index balance changes")
+    .option("--object-changes", "index object changes")
+    .option("--events", "index raw events")
+    .option("--dependencies", "index transaction dependencies")
+    .option("--inputs", "index transaction inputs")
+    .option("--commands", "index all PTB commands")
+    .option("--system-transactions", "index system transactions")
+    .option("--unchanged-consensus-objects", "index unchanged consensus objects")
+    .option("--checkpoints", "index checkpoint summaries")
+    .option("--all", "index all tables (default)");
+}
+
+function maskToTableNames(mask: number, ExtractMask: any): string[] {
+  const names: string[] = [];
+  if (mask & ExtractMask.TRANSACTIONS) names.push("transactions");
+  if (mask & ExtractMask.MOVE_CALLS) names.push("move_calls");
+  if (mask & ExtractMask.BALANCE_CHANGES) names.push("balance_changes");
+  if (mask & ExtractMask.OBJECT_CHANGES) names.push("object_changes");
+  if (mask & ExtractMask.DEPENDENCIES) names.push("dependencies");
+  if (mask & ExtractMask.INPUTS) names.push("inputs");
+  if (mask & ExtractMask.COMMANDS) names.push("commands");
+  if (mask & ExtractMask.SYSTEM_TRANSACTIONS) names.push("system_transactions");
+  if (mask & ExtractMask.UNCHANGED_CONSENSUS) names.push("unchanged_consensus");
+  if (mask & ExtractMask.CHECKPOINTS) names.push("checkpoints");
+  if (mask & ExtractMask.EVENTS) names.push("events");
+  return names;
+}
+
+// ---------------------------------------------------------------------------
+// replay-chain — historical backfill from archive, disk only
+// ---------------------------------------------------------------------------
+
+addTableFlags(indexCmd
+  .command("replay-chain")
+  .description("Backfill structural chain data from archive to per-table SQLite files")
   .option("--output <dir>", "output directory for per-table SQLite files")
   .option("--epoch <number>", "backfill a completed epoch")
   .option("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
-  .option("--live", "continuous mode via gRPC subscription")
-  .option("--transactions", "index transactions + move calls")
-  .option("--balance-changes", "index balance changes")
-  .option("--object-changes", "index object changes")
-  .option("--events", "index raw events")
-  .option("--dependencies", "index transaction dependencies")
-  .option("--inputs", "index transaction inputs")
-  .option("--commands", "index all PTB commands")
-  .option("--system-transactions", "index system transactions")
-  .option("--unchanged-consensus-objects", "index unchanged consensus objects")
-  .option("--checkpoints", "index checkpoint summaries")
-  .option("--all", "index all tables (default)")
-  .option("--grpc-url <url>", "gRPC endpoint")
+  .option("--grpc-url <url>", "gRPC endpoint (for epoch resolution)")
   .option("--archive-url <url>", "archive base URL")
   .option("--network <name>", "network name", "mainnet")
   .option("--concurrency <n>", "archive fetch concurrency", "200")
   .option("--workers <n>", "decoder worker threads")
   .option("--quiet", "suppress human output")
   .option("--yes", "skip confirmation prompt")
-  .option("--log [level]", "enable logging to stderr")
-  .option("--stdout", "broadcast JSONL to stdout")
-  .option("--sse <port>", "broadcast via SSE on port")
-  .option("--nats <url>", "broadcast to NATS")
+  .option("--log [level]", "enable logging to stderr"))
   .action(async (opts: any) => {
     const { createPerTableSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
     const { createPipeline } = await import("./pipeline/pipeline.ts");
+    const { createArchiveSource } = await import("./pipeline/sources/archive.ts");
     const { ExtractMask } = await import("./checkpoint-native-decoder.ts");
 
-    const isLive = !!opts.live;
-
-    if (!opts.epoch && !opts.from && !isLive) {
-      console.error("[jun] error: provide --epoch, --from/--to, or --live");
+    if (!opts.epoch && !opts.from) {
+      console.error("[jun] error: provide --epoch or --from/--to");
       process.exit(1);
     }
 
-    // Build extraction mask from flags
-    const hasAnyTableFlag = opts.transactions || opts.balanceChanges || opts.objectChanges
-      || opts.events || opts.dependencies || opts.inputs || opts.commands
-      || opts.systemTransactions || opts.unchangedConsensusObjects || opts.checkpoints;
+    const mask = buildExtractMask(opts, ExtractMask);
 
-    let mask = 0;
-    if (!hasAnyTableFlag || opts.all) {
-      mask = ExtractMask.ALL;
-    } else {
-      if (opts.transactions)                mask |= ExtractMask.TRANSACTIONS | ExtractMask.MOVE_CALLS;
-      if (opts.balanceChanges)              mask |= ExtractMask.BALANCE_CHANGES;
-      if (opts.objectChanges)               mask |= ExtractMask.OBJECT_CHANGES;
-      if (opts.events)                      mask |= ExtractMask.EVENTS;
-      if (opts.dependencies)                mask |= ExtractMask.DEPENDENCIES;
-      if (opts.inputs)                      mask |= ExtractMask.INPUTS;
-      if (opts.commands)                    mask |= ExtractMask.COMMANDS;
-      if (opts.systemTransactions)          mask |= ExtractMask.SYSTEM_TRANSACTIONS;
-      if (opts.unchangedConsensusObjects)   mask |= ExtractMask.UNCHANGED_CONSENSUS;
-      if (opts.checkpoints)                 mask |= ExtractMask.CHECKPOINTS;
-    }
-    // Always include checkpoints for progress tracking
-    mask |= ExtractMask.CHECKPOINTS;
-
-    // Log level
     if (opts.log) {
       process.env.LOG_LEVEL = typeof opts.log === "string" ? opts.log : "info";
     } else {
       process.env.LOG_LEVEL = "silent";
     }
 
-    // Network defaults
     const networkDefaults: Record<string, string> = {
       mainnet: "https://checkpoints.mainnet.sui.io",
       testnet: "https://checkpoints.testnet.sui.io",
@@ -2075,7 +2095,6 @@ pipelineCmd
     const grpcUrl = opts.grpcUrl ?? "hayabusa.mainnet.unconfirmed.cloud:443";
     const archiveUrl = opts.archiveUrl ?? networkDefaults[net];
 
-    // Resolve checkpoint range
     let from: bigint;
     let to: bigint | undefined;
 
@@ -2090,54 +2109,105 @@ pipelineCmd
         console.error(`[jun] error: could not resolve epoch ${opts.epoch}`);
         process.exit(1);
       }
-    } else if (opts.from) {
+    } else {
       from = BigInt(opts.from);
       to = opts.to ? BigInt(opts.to) : undefined;
     }
-    // Live-only mode: from/to stay undefined, no archive source created
 
-    // Create storage — only enabled tables
-    const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./index-chain");
+    const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./replay-chain");
     const storage = createPerTableSqliteStorage(outputDir, mask);
 
-    // Build pipeline
     const pipeline = createPipeline();
     pipeline.storage(storage);
+    pipeline.source(createArchiveSource({
+      archiveUrl,
+      from,
+      to,
+      concurrency: parseInt(opts.concurrency ?? "200"),
+      workers: opts.workers ? parseInt(opts.workers) : undefined,
+      enabledProcessors: {
+        balances: true, transactions: true, objectChanges: true,
+        dependencies: true, inputs: true, commands: true,
+        systemTransactions: true, unchangedConsensusObjects: true,
+        events: true, checkpoints: true,
+      },
+      unorderedDrain: true,
+      grpcUrl: to ? undefined : grpcUrl,
+      extractMask: mask,
+    }));
 
-    // Archive source (backfill)
-    if (from !== undefined) {
-      const { createArchiveSource } = await import("./pipeline/sources/archive.ts");
-      pipeline.source(createArchiveSource({
-        archiveUrl,
-        from,
-        to,
-        concurrency: parseInt(opts.concurrency ?? "200"),
-        workers: opts.workers ? parseInt(opts.workers) : undefined,
-        enabledProcessors: {
-          balances: true,
-          transactions: true,
-          objectChanges: true,
-          dependencies: true,
-          inputs: true,
-          commands: true,
-          systemTransactions: true,
-          unchangedConsensusObjects: true,
-          events: true,
-          checkpoints: true,
-        },
-        unorderedDrain: !isLive,
-        grpcUrl: to ? undefined : grpcUrl,
-        extractMask: mask,
-      }));
+    const totalCheckpoints = to !== undefined ? to - from + 1n : undefined;
+    pipeline.configure({
+      quiet: opts.quiet ?? false,
+      log: opts.log ?? false,
+      totalCheckpoints,
+      buffer: { maxBatchSize: 1000 },
+    });
+
+    if (!opts.quiet) {
+      console.error("");
+      console.error("  replay-chain");
+      console.error("  ────────────");
+      if (opts.epoch) console.error(`  epoch           ${opts.epoch}`);
+      if (to) console.error(`  checkpoints     ${from} → ${to} (${(to - from + 1n).toLocaleString()})`);
+      console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
+      console.error(`  output          ${outputDir}`);
+      console.error(`  concurrency     ${opts.concurrency ?? 200}`);
+      if (opts.workers) console.error(`  workers         ${opts.workers}`);
+      console.error("");
     }
 
-    // Live gRPC source
-    if (isLive) {
-      const { createGrpcLiveSource } = await import("./pipeline/sources/grpc.ts");
-      pipeline.source(createGrpcLiveSource({ url: grpcUrl }));
-      // No JS processors needed — live source now uses the same Rust binary
-      // decoder as archive, yielding _rawBinary/_preProcessed checkpoints.
+    if (!opts.yes && !opts.quiet) {
+      const readline = await import("readline");
+      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      const answer = await new Promise<string>(resolve => rl.question("  Proceed? [Y/n] ", resolve));
+      rl.close();
+      if (answer.toLowerCase() === "n") { process.exit(0); }
     }
+
+    await pipeline.run();
+    process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// stream-chain — live gRPC subscription with broadcast
+// ---------------------------------------------------------------------------
+
+addTableFlags(indexCmd
+  .command("stream-chain")
+  .description("Stream live chain data via gRPC with broadcast (SSE/NATS/stdout)")
+  .option("--output <dir>", "optional: also write to per-table SQLite files")
+  .option("--grpc-url <url>", "gRPC endpoint", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .option("--network <name>", "network name", "mainnet")
+  .option("--stdout", "broadcast JSONL to stdout")
+  .option("--sse <port>", "broadcast via SSE on port")
+  .option("--nats <url>", "broadcast to NATS")
+  .option("--quiet", "suppress human output")
+  .option("--log [level]", "enable logging to stderr"))
+  .action(async (opts: any) => {
+    const { createPipeline } = await import("./pipeline/pipeline.ts");
+    const { createGrpcLiveSource } = await import("./pipeline/sources/grpc.ts");
+    const { ExtractMask } = await import("./checkpoint-native-decoder.ts");
+
+    const mask = buildExtractMask(opts, ExtractMask);
+    const grpcUrl = opts.grpcUrl ?? "hayabusa.mainnet.unconfirmed.cloud:443";
+
+    if (opts.log) {
+      process.env.LOG_LEVEL = typeof opts.log === "string" ? opts.log : "info";
+    } else {
+      process.env.LOG_LEVEL = "silent";
+    }
+
+    const pipeline = createPipeline();
+
+    // Optional disk storage
+    if (opts.output) {
+      const { createPerTableSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
+      pipeline.storage(createPerTableSqliteStorage(opts.output, mask));
+    }
+
+    // Live gRPC source (Rust binary decoder)
+    pipeline.source(createGrpcLiveSource({ url: grpcUrl }));
 
     // Broadcasts
     if (opts.stdout) {
@@ -2153,53 +2223,31 @@ pipelineCmd
       pipeline.broadcast(createNatsBroadcast({ url: opts.nats }));
     }
 
-    const totalCheckpoints = from !== undefined && to !== undefined ? to - from + 1n : undefined;
+    if (!opts.output && !opts.stdout && !opts.sse && !opts.nats) {
+      console.error("[jun] error: provide at least one output (--output, --stdout, --sse, --nats)");
+      process.exit(1);
+    }
+
     pipeline.configure({
       quiet: opts.quiet ?? false,
       log: opts.log ?? false,
-      totalCheckpoints,
-      buffer: { maxBatchSize: isLive ? 50 : 1000 },
+      buffer: { maxBatchSize: 50 },
     });
 
-    // Print summary
     if (!opts.quiet) {
-      const outputLabel = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./index-chain");
       console.error("");
-      console.error("  index-chain");
-      console.error("  ───────────");
-      console.error(`  mode            ${isLive ? "live (gRPC streaming)" : "snapshot"}`);
-      if (opts.epoch) console.error(`  epoch           ${opts.epoch}`);
-      if (from !== undefined && to !== undefined) console.error(`  checkpoints     ${from} → ${to} (${(to - from + 1n).toLocaleString()})`);
-      const tableNames: string[] = [];
-      if (mask & ExtractMask.TRANSACTIONS) tableNames.push("transactions");
-      if (mask & ExtractMask.MOVE_CALLS) tableNames.push("move_calls");
-      if (mask & ExtractMask.BALANCE_CHANGES) tableNames.push("balance_changes");
-      if (mask & ExtractMask.OBJECT_CHANGES) tableNames.push("object_changes");
-      if (mask & ExtractMask.DEPENDENCIES) tableNames.push("dependencies");
-      if (mask & ExtractMask.INPUTS) tableNames.push("inputs");
-      if (mask & ExtractMask.COMMANDS) tableNames.push("commands");
-      if (mask & ExtractMask.SYSTEM_TRANSACTIONS) tableNames.push("system_transactions");
-      if (mask & ExtractMask.UNCHANGED_CONSENSUS) tableNames.push("unchanged_consensus");
-      if (mask & ExtractMask.CHECKPOINTS) tableNames.push("checkpoints");
-      if (mask & ExtractMask.EVENTS) tableNames.push("events");
-      console.error(`  tables          ${tableNames.join(", ")}`);
-      console.error(`  output          ${outputLabel}`);
-      if (!isLive) console.error(`  concurrency     ${opts.concurrency ?? 200}`);
-      if (opts.workers) console.error(`  workers         ${opts.workers}`);
+      console.error("  stream-chain");
+      console.error("  ────────────");
+      console.error(`  grpc            ${grpcUrl}`);
+      console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
+      if (opts.output) console.error(`  output          ${opts.output}`);
+      if (opts.stdout) console.error(`  broadcast       stdout`);
+      if (opts.sse) console.error(`  broadcast       SSE :${opts.sse}`);
+      if (opts.nats) console.error(`  broadcast       NATS ${opts.nats}`);
       console.error("");
-    }
-
-    // Confirm
-    if (!opts.yes && !opts.quiet) {
-      const readline = await import("readline");
-      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-      const answer = await new Promise<string>(resolve => rl.question("  Proceed? [Y/n] ", resolve));
-      rl.close();
-      if (answer.toLowerCase() === "n") { process.exit(0); }
     }
 
     await pipeline.run();
-    if (!isLive) process.exit(0);
   });
 
 program.parse();
