@@ -51,6 +51,25 @@ export interface CheckpointDecoderPool {
     to: bigint,
     cacheDir: string,
   ): AsyncIterable<StreamDecodeResult>;
+  /** Assign cached file ranges to workers — workers decode, parse, and write SQLite shards. */
+  decodeAndWriteRange(
+    from: bigint,
+    to: bigint,
+    cacheDir: string,
+    shardDir: string,
+    enabledProcessors: {
+      balances: boolean;
+      transactions: boolean;
+      objectChanges: boolean;
+      dependencies: boolean;
+      inputs: boolean;
+      commands: boolean;
+      systemTransactions: boolean;
+      unchangedConsensusObjects: boolean;
+      events: boolean;
+      checkpoints: boolean;
+    },
+  ): Promise<string[]>;
   /** Assign checkpoint ranges to workers and stream decoded archive results. */
   stream(
     from: bigint,
@@ -74,6 +93,13 @@ interface StreamState {
   waiters: Array<(result: IteratorResult<StreamDecodeResult>) => void>;
   doneWorkers: number;
   closed: boolean;
+}
+
+interface DecodeAndWriteState {
+  doneWorkers: number;
+  shardPaths: string[];
+  resolve: (paths: string[]) => void;
+  reject: (error: Error) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +127,7 @@ export function createCheckpointDecoderPool(
   const workers: Worker[] = [];
   const pending = new Map<number, PendingJob>();
   let activeStream: StreamState | null = null;
+  let activeDecodeAndWrite: DecodeAndWriteState | null = null;
   let nextId = 0;
   const MAX_ID = 2_000_000_000;
 
@@ -203,6 +230,23 @@ export function createCheckpointDecoderPool(
           job.reject(e instanceof Error ? e : new Error(String(e)));
         }
       } else if (msg && typeof msg === "object") {
+        if (msg.type === "done" && activeDecodeAndWrite) {
+          activeDecodeAndWrite.doneWorkers += 1;
+          if (activeDecodeAndWrite.doneWorkers >= workers.length) {
+            const task = activeDecodeAndWrite;
+            activeDecodeAndWrite = null;
+            task.resolve(task.shardPaths);
+          }
+          return;
+        }
+
+        if (msg.type === "error" && activeDecodeAndWrite) {
+          console.error(
+            `[checkpoint-decoder-pool] shard worker checkpoint ${msg.seq ?? "unknown"} failed: ${msg.error ?? "worker error"}`,
+          );
+          return;
+        }
+
         if (msg.type === "done" && activeStream) {
           activeStream.doneWorkers += 1;
           if (activeStream.doneWorkers >= workers.length) {
@@ -227,6 +271,12 @@ export function createCheckpointDecoderPool(
     };
 
     worker.onerror = (event) => {
+      if (activeDecodeAndWrite) {
+        const task = activeDecodeAndWrite;
+        activeDecodeAndWrite = null;
+        task.reject(new Error(`Worker ${i} crashed: ${event.message}`));
+      }
+
       if (activeStream) {
         console.error(`[checkpoint-decoder-pool] worker ${i} crashed during archive stream: ${event.message}`);
         activeStream.doneWorkers += 1;
@@ -250,8 +300,8 @@ export function createCheckpointDecoderPool(
     get size() { return size; },
 
     decode(seq: bigint, compressed: Uint8Array): Promise<DecodeResult> {
-      if (activeStream) {
-        return Promise.reject(new Error("checkpoint decoder pool is streaming an archive range"));
+      if (activeStream || activeDecodeAndWrite) {
+        return Promise.reject(new Error("checkpoint decoder pool is handling a range task"));
       }
 
       return new Promise((resolve, reject) => {
@@ -274,6 +324,10 @@ export function createCheckpointDecoderPool(
     },
 
     decodeCached(seq: bigint, cachePath: string): Promise<DecodeResult> {
+      if (activeStream || activeDecodeAndWrite) {
+        return Promise.reject(new Error("checkpoint decoder pool is handling a range task"));
+      }
+
       return new Promise((resolve, reject) => {
         const id = nextId;
         nextId = nextId >= MAX_ID ? 0 : nextId + 1;
@@ -294,7 +348,7 @@ export function createCheckpointDecoderPool(
       if (pending.size > 0) {
         throw new Error("checkpoint decoder pool has outstanding decode jobs");
       }
-      if (activeStream) {
+      if (activeStream || activeDecodeAndWrite) {
         throw new Error("checkpoint decoder pool is already streaming");
       }
 
@@ -342,11 +396,46 @@ export function createCheckpointDecoderPool(
       };
     },
 
+    decodeAndWriteRange(from, to, cacheDir, shardDir, enabledProcessors): Promise<string[]> {
+      if (pending.size > 0) {
+        return Promise.reject(new Error("checkpoint decoder pool has outstanding decode jobs"));
+      }
+      if (activeStream || activeDecodeAndWrite) {
+        return Promise.reject(new Error("checkpoint decoder pool is already handling a range task"));
+      }
+
+      const ranges = splitRange(from, to, workers.length);
+      const shardPaths = workers.map((_, i) => path.join(shardDir, `shard-${i}.db`));
+
+      return new Promise((resolve, reject) => {
+        activeDecodeAndWrite = {
+          doneWorkers: 0,
+          shardPaths,
+          resolve,
+          reject,
+        };
+
+        for (let i = 0; i < workers.length; i++) {
+          const worker = workers[i]!;
+          const range = ranges[i]!;
+          worker.postMessage({
+            type: "decode-and-write-range",
+            from: range.from.toString(),
+            to: range.to.toString(),
+            cacheDir,
+            workerIndex: i,
+            sqlitePath: shardPaths[i],
+            enabledProcessors,
+          });
+        }
+      });
+    },
+
     stream(from: bigint, to: bigint, archiveUrl: string, concurrency: number): AsyncIterable<StreamDecodeResult> {
       if (pending.size > 0) {
         throw new Error("checkpoint decoder pool has outstanding decode jobs");
       }
-      if (activeStream) {
+      if (activeStream || activeDecodeAndWrite) {
         throw new Error("checkpoint decoder pool is already streaming an archive range");
       }
 
@@ -402,6 +491,11 @@ export function createCheckpointDecoderPool(
     },
 
     shutdown(): void {
+      if (activeDecodeAndWrite) {
+        const task = activeDecodeAndWrite;
+        activeDecodeAndWrite = null;
+        task.reject(new Error("Worker pool shut down"));
+      }
       if (activeStream) {
         closeStream(activeStream);
       }

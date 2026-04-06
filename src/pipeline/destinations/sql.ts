@@ -28,6 +28,8 @@ import type { Logger } from "../../logger.ts";
 import { createLogger } from "../../logger.ts";
 import { createPostgresConnection, createSqliteConnection } from "../../db.ts";
 import { fieldTypeToSqlite, generateSqliteDDL } from "../../sql-helpers.ts";
+import { getSnapshotShardTableColumns, getSnapshotShardTableNames, type EnabledSqlProcessors } from "./sql-ddl.ts";
+import { rmSync } from "fs";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -750,6 +752,47 @@ async function createDeferredIndexes(
   }
 }
 
+function escapeSqliteStringLiteral(value: string): string {
+  return value.replaceAll("'", "''");
+}
+
+async function mergeSqliteShards(
+  driver: SqlDriver,
+  enabled: EnabledSqlProcessors,
+  shardPaths: string[],
+  shardSessionDir?: string,
+): Promise<void> {
+  if (driver.dialect !== "sqlite") {
+    throw new Error("SQLite shard merge requires a SQLite destination");
+  }
+
+  const tableNames = getSnapshotShardTableNames(enabled);
+
+  for (let i = 0; i < shardPaths.length; i++) {
+    const shardPath = shardPaths[i]!;
+    const alias = `shard${i}`;
+    const escapedPath = escapeSqliteStringLiteral(shardPath);
+    await driver.exec(`ATTACH DATABASE '${escapedPath}' AS ${alias}`);
+    try {
+      for (const tableName of tableNames) {
+        const columns = getSnapshotShardTableColumns(tableName);
+        await driver.exec(
+          `INSERT INTO ${tableName} (${columns.join(", ")}) SELECT ${columns.join(", ")} FROM ${alias}.${tableName}`,
+        );
+      }
+    } finally {
+      await driver.exec(`DETACH DATABASE ${alias}`);
+      rmSync(shardPath, { force: true });
+      rmSync(`${shardPath}-wal`, { force: true });
+      rmSync(`${shardPath}-shm`, { force: true });
+    }
+  }
+
+  if (shardSessionDir) {
+    rmSync(shardSessionDir, { recursive: true, force: true });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
@@ -1417,6 +1460,36 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       if (!driver) return;
       const d = driver; // capture for closure
       const dialect = d.dialect;
+      const shardPaths = batch.flatMap(processed => {
+        const paths = (processed as any)._shardPaths;
+        return Array.isArray(paths) ? paths as string[] : [];
+      });
+      if (shardPaths.length > 0) {
+        if (dialect !== "sqlite") {
+          throw new Error("received SQLite shard merge marker for a non-SQLite destination");
+        }
+        if (batch.some(processed => !(processed as any)._shardPaths)) {
+          throw new Error("cannot mix SQLite shard merge markers with regular processed checkpoints");
+        }
+        await mergeSqliteShards(
+          d,
+          {
+            balances: !!config.balances,
+            transactions: !!config.transactions,
+            objectChanges: !!config.objectChanges,
+            dependencies: !!config.dependencies,
+            inputs: !!config.inputs,
+            commands: !!config.commands,
+            systemTransactions: !!config.systemTransactions,
+            unchangedConsensusObjects: !!config.unchangedConsensusObjects,
+            events: false,
+            checkpoints: !!config.checkpoints,
+          },
+          shardPaths,
+          (batch[0] as any)?._shardSessionDir,
+        );
+        return;
+      }
 
       // Collect every record type from the batch
       const groupedEvents = new Map<string, DecodedEvent[]>();

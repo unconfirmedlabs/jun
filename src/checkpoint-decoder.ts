@@ -224,6 +224,27 @@ interface DecodeCachedRangeMessage {
   workerIndex: number;
 }
 
+interface DecodeAndWriteRangeMessage {
+  type: "decode-and-write-range";
+  from: string;
+  to: string;
+  cacheDir: string;
+  workerIndex: number;
+  sqlitePath: string;
+  enabledProcessors: {
+    balances: boolean;
+    transactions: boolean;
+    objectChanges: boolean;
+    dependencies: boolean;
+    inputs: boolean;
+    commands: boolean;
+    systemTransactions: boolean;
+    unchangedConsensusObjects: boolean;
+    events: boolean;
+    checkpoints: boolean;
+  };
+}
+
 async function handleDecodeCachedRange(msg: DecodeCachedRangeMessage): Promise<void> {
   const { readFileSync } = await import("fs");
   const { join } = await import("path");
@@ -270,6 +291,79 @@ async function handleDecodeCachedRange(msg: DecodeCachedRangeMessage): Promise<v
   postMessage({ type: "done" });
 }
 
+async function handleDecodeAndWriteRange(msg: DecodeAndWriteRangeMessage): Promise<void> {
+  const { Database } = await import("bun:sqlite");
+  const { readFileSync } = await import("fs");
+  const { join } = await import("path");
+  const { parseBinaryCheckpoint } = await import("./binary-parser.ts");
+  const {
+    configureSnapshotShardDatabase,
+    createSnapshotShardTables,
+    insertParsedCheckpointToSnapshotShard,
+    prepareSnapshotShardStatements,
+  } = await import("./pipeline/destinations/sql-ddl.ts");
+
+  const db = new Database(msg.sqlitePath);
+  configureSnapshotShardDatabase(db);
+  createSnapshotShardTables(db, msg.enabledProcessors);
+  const statements = prepareSnapshotShardStatements(db, msg.enabledProcessors);
+
+  const from = BigInt(msg.from);
+  const to = BigInt(msg.to);
+  const startedAt = performance.now();
+  let processed = 0;
+  let batchCount = 0;
+  const batchSize = 1000;
+
+  try {
+    db.exec("BEGIN");
+
+    for (let seq = from; seq <= to; seq++) {
+      const cachePath = join(msg.cacheDir, `${seq}.binpb.zst`);
+      try {
+        const compressed = new Uint8Array(readFileSync(cachePath));
+        const binary = decodeArchiveCheckpointBinary(compressed);
+        if (!binary) {
+          throw new Error(`Native binary decode failed for checkpoint ${seq}`);
+        }
+
+        const parsed = parseBinaryCheckpoint(binary);
+        insertParsedCheckpointToSnapshotShard(statements, parsed);
+
+        processed++;
+        batchCount++;
+
+        if (batchCount >= batchSize) {
+          db.exec("COMMIT");
+          db.exec("BEGIN");
+          batchCount = 0;
+        }
+
+        if (processed > 0 && processed % 5000 === 0) {
+          const elapsed = (performance.now() - startedAt) / 1000;
+          console.error(
+            `[write-worker ${msg.workerIndex}] ${processed} cp ${Math.round(processed / Math.max(elapsed, 0.001))} cp/s`,
+          );
+        }
+      } catch (err) {
+        console.error(
+          `[write-worker ${msg.workerIndex}] checkpoint ${seq} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    if (batchCount > 0) {
+      db.exec("COMMIT");
+    } else {
+      db.exec("ROLLBACK");
+    }
+  } finally {
+    db.close();
+  }
+
+  postMessage({ type: "done" });
+}
+
 async function handleDecodeCached(msg: DecodeFromCacheMessage): Promise<void> {
   const { id, seq, cachePath } = msg;
   try {
@@ -307,6 +401,10 @@ self.onmessage = async (event: MessageEvent) => {
     }
     if (msg.type === "decode-cached-range") {
       await handleDecodeCachedRange(msg as DecodeCachedRangeMessage);
+      return;
+    }
+    if (msg.type === "decode-and-write-range") {
+      await handleDecodeAndWriteRange(msg as DecodeAndWriteRangeMessage);
       return;
     }
   }

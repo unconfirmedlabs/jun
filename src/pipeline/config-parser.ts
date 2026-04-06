@@ -405,7 +405,13 @@ export async function parsePipelineConfigFromObject(rawConfig: any): Promise<Par
         systemTransactions: !!processorConfig?.systemTransactions,
         unchangedConsensusObjects: !!processorConfig?.unchangedConsensusObjects,
         events: !!processorConfig?.events,
+        checkpoints: !!processorConfig?.checkpoints,
       },
+      sqliteShardingPath: config.storage?.sqlite
+        && !!config.storage?.deferIndexes
+        && !processorConfig?.events
+        ? String(config.storage.sqlite)
+        : undefined,
     }));
   }
 

@@ -186,20 +186,24 @@ impl<'a> BinaryWriter<'a> {
     /// Write Display impl as a length-prefixed string.
     #[inline]
     pub fn write_display<T: std::fmt::Display>(&mut self, v: &T) {
-        use std::fmt::Write;
-        // Reserve 2 bytes for length prefix, write directly after
         let len_pos = self.pos;
         self.pos += 2;
         let start = self.pos;
-        // Write into a wrapper that writes directly to the buffer
+        self.write_raw_display(v);
+        let len = self.pos - start;
+        self.buf[len_pos..len_pos + 2].copy_from_slice(&(len as u16).to_le_bytes());
+    }
+
+    /// Write Display impl into the current string without adding a length prefix.
+    #[inline]
+    pub fn write_raw_display<T: std::fmt::Display>(&mut self, v: &T) {
+        use std::fmt::Write;
         let mut writer = BufWriter {
             buf: self.buf,
             pos: self.pos,
         };
         let _ = write!(writer, "{}", v);
         self.pos = writer.pos;
-        let len = self.pos - start;
-        self.buf[len_pos..len_pos + 2].copy_from_slice(&(len as u16).to_le_bytes());
     }
 
     /// Write an empty string (length 0).

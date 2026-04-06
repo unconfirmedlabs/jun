@@ -67,6 +67,14 @@ pub fn extract_and_write_binary(
     decompressed: &[u8],
     output: &mut [u8],
 ) -> Result<(usize, ExtractProfile), Box<dyn std::error::Error>> {
+    extract_and_write_binary_with_fast_path(decompressed, output, use_bcs_fast_path())
+}
+
+pub(crate) fn extract_and_write_binary_with_fast_path(
+    decompressed: &[u8],
+    output: &mut [u8],
+    use_fast_path: bool,
+) -> Result<(usize, ExtractProfile), Box<dyn std::error::Error>> {
     use std::time::Instant;
     let mut profile = ExtractProfile::default();
 
@@ -86,7 +94,7 @@ pub fn extract_and_write_binary(
     for ptx in &parsed.transactions {
         let t1 = Instant::now();
         let effects = ptx.effects_bcs.and_then(|bytes| {
-            if use_bcs_fast_path() {
+            if use_fast_path {
                 bcs_reader::parse_effects(bytes)
                     .map(ParsedEffects::Fast)
                     .or_else(|_| {
@@ -105,7 +113,7 @@ pub fn extract_and_write_binary(
 
         let t2 = Instant::now();
         let tx_data = ptx.transaction_bcs.and_then(|bytes| {
-            if use_bcs_fast_path() {
+            if use_fast_path {
                 bcs_reader::parse_tx_data(bytes)
                     .map(ParsedTxData::Fast)
                     .or_else(|_| {
@@ -115,8 +123,7 @@ pub fn extract_and_write_binary(
                     })
                     .ok()
             } else {
-                crate::extract::decode_transaction_data_pub(bytes)
-                    .map(ParsedTxData::Full)
+                crate::extract::decode_transaction_data_pub(bytes).map(ParsedTxData::Full)
             }
         });
         profile.bcs_tx_data_ns += t2.elapsed().as_nanos() as u64;
@@ -432,7 +439,7 @@ pub fn extract_and_write_binary(
                                     }
                                     w.write_raw_byte(b'"');
                                     let display = ty.to_canonical_display(true);
-                                    w.write_display(&display);
+                                    w.write_raw_display(&display);
                                     w.write_raw_byte(b'"');
                                 }
                                 w.write_raw_byte(b']');
@@ -1179,7 +1186,7 @@ fn write_event(
     w.write_raw_str(event.transaction_module.as_str());
     w.write_raw_str("\",\"eventType\":\"");
     let display = event_type.to_canonical_display(true);
-    w.write_display(&display);
+    w.write_raw_display(&display);
     w.write_raw_str("\",\"contents\":\"");
     w.write_raw_str("0x");
     w.write_raw_hex_contents(&event.contents);

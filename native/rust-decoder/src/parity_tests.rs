@@ -116,6 +116,477 @@ fn output_diff_message(left: &[u8], right: &[u8]) -> String {
     )
 }
 
+fn read_header_counts(bytes: &[u8]) -> [u32; 10] {
+    let mut counts = [0u32; 10];
+    for (index, chunk) in bytes[..40].chunks_exact(4).enumerate() {
+        counts[index] = u32::from_le_bytes(chunk.try_into().unwrap());
+    }
+    counts
+}
+
+struct BinaryCursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> BinaryCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    fn read_u8(&mut self) -> u8 {
+        let value = self.bytes[self.pos];
+        self.pos += 1;
+        value
+    }
+
+    fn read_u16(&mut self) -> u16 {
+        let value = u16::from_le_bytes(self.bytes[self.pos..self.pos + 2].try_into().unwrap());
+        self.pos += 2;
+        value
+    }
+
+    fn read_u32(&mut self) -> u32 {
+        let value = u32::from_le_bytes(self.bytes[self.pos..self.pos + 4].try_into().unwrap());
+        self.pos += 4;
+        value
+    }
+
+    fn read_string(&mut self) -> Option<String> {
+        let len = self.read_u16();
+        if len == 0xFFFF {
+            return None;
+        }
+        let len = len as usize;
+        let value = String::from_utf8_lossy(&self.bytes[self.pos..self.pos + len]).into_owned();
+        self.pos += len;
+        Some(value)
+    }
+}
+
+fn first_binary_field_mismatch(left: &[u8], right: &[u8]) -> Option<String> {
+    fn cmp_str(
+        left: &mut BinaryCursor<'_>,
+        right: &mut BinaryCursor<'_>,
+        label: &str,
+    ) -> Option<String> {
+        let lhs = left.read_string();
+        let rhs = right.read_string();
+        (lhs != rhs).then(|| format!("{label}: left={lhs:?} right={rhs:?}"))
+    }
+
+    fn cmp_u32(
+        left: &mut BinaryCursor<'_>,
+        right: &mut BinaryCursor<'_>,
+        label: &str,
+    ) -> Option<String> {
+        let lhs = left.read_u32();
+        let rhs = right.read_u32();
+        (lhs != rhs).then(|| format!("{label}: left={lhs} right={rhs}"))
+    }
+
+    fn cmp_u8(
+        left: &mut BinaryCursor<'_>,
+        right: &mut BinaryCursor<'_>,
+        label: &str,
+    ) -> Option<String> {
+        let lhs = left.read_u8();
+        let rhs = right.read_u8();
+        (lhs != rhs).then(|| format!("{label}: left={lhs} right={rhs}"))
+    }
+
+    let header = read_header_counts(left);
+    if header != read_header_counts(right) {
+        return Some(format!(
+            "header mismatch: left={:?} right={:?}",
+            header,
+            read_header_counts(right)
+        ));
+    }
+
+    let mut left = BinaryCursor::new(left);
+    let mut right = BinaryCursor::new(right);
+    left.pos = 40;
+    right.pos = 40;
+
+    for field in [
+        "checkpoint.sequence_number",
+        "checkpoint.epoch",
+        "checkpoint.timestamp",
+        "checkpoint.digest",
+        "checkpoint.previous_digest",
+        "checkpoint.content_digest",
+        "checkpoint.total_network_transactions",
+        "checkpoint.gas.computation_cost",
+        "checkpoint.gas.storage_cost",
+        "checkpoint.gas.storage_rebate",
+        "checkpoint.gas.non_refundable_storage_fee",
+    ] {
+        if let Some(mismatch) = cmp_str(&mut left, &mut right, field) {
+            return Some(mismatch);
+        }
+    }
+
+    for index in 0..header[0] {
+        if let Some(mismatch) = cmp_str(
+            &mut left,
+            &mut right,
+            &format!("transactions[{index}].digest"),
+        ) {
+            return Some(mismatch);
+        }
+        if let Some(mismatch) = cmp_str(
+            &mut left,
+            &mut right,
+            &format!("transactions[{index}].sender"),
+        ) {
+            return Some(mismatch);
+        }
+        if let Some(mismatch) = cmp_u8(
+            &mut left,
+            &mut right,
+            &format!("transactions[{index}].success"),
+        ) {
+            return Some(mismatch);
+        }
+        for field in [
+            "computation_cost",
+            "storage_cost",
+            "storage_rebate",
+            "non_refundable_storage_fee",
+            "checkpoint_seq",
+            "timestamp",
+        ] {
+            if let Some(mismatch) = cmp_str(
+                &mut left,
+                &mut right,
+                &format!("transactions[{index}].{field}"),
+            ) {
+                return Some(mismatch);
+            }
+        }
+        if let Some(mismatch) = cmp_u32(
+            &mut left,
+            &mut right,
+            &format!("transactions[{index}].move_call_count"),
+        ) {
+            return Some(mismatch);
+        }
+        for field in ["epoch", "error_kind", "error_description"] {
+            if let Some(mismatch) = cmp_str(
+                &mut left,
+                &mut right,
+                &format!("transactions[{index}].{field}"),
+            ) {
+                return Some(mismatch);
+            }
+        }
+        if let Some(mismatch) = cmp_u8(
+            &mut left,
+            &mut right,
+            &format!("transactions[{index}].error_command_index"),
+        ) {
+            return Some(mismatch);
+        }
+        for field in [
+            "error_abort_code",
+            "error_module",
+            "error_function",
+            "events_digest",
+            "lamport_version",
+        ] {
+            if let Some(mismatch) = cmp_str(
+                &mut left,
+                &mut right,
+                &format!("transactions[{index}].{field}"),
+            ) {
+                return Some(mismatch);
+            }
+        }
+        if let Some(mismatch) = cmp_u32(
+            &mut left,
+            &mut right,
+            &format!("transactions[{index}].dependency_count"),
+        ) {
+            return Some(mismatch);
+        }
+    }
+
+    for index in 0..header[1] {
+        for field in [
+            "tx_digest",
+            "object_id",
+            "change_type",
+            "object_type",
+            "input_version",
+            "input_digest",
+            "input_owner",
+            "input_owner_kind",
+            "output_version",
+            "output_digest",
+            "output_owner",
+            "output_owner_kind",
+            "checkpoint_seq",
+            "timestamp",
+        ] {
+            if field == "tx_digest" {
+                if let Some(mismatch) = cmp_str(
+                    &mut left,
+                    &mut right,
+                    &format!("object_changes[{index}].tx_digest"),
+                ) {
+                    return Some(mismatch);
+                }
+                continue;
+            }
+            if let Some(mismatch) = cmp_str(
+                &mut left,
+                &mut right,
+                &format!("object_changes[{index}].{field}"),
+            ) {
+                return Some(mismatch);
+            }
+            if field == "output_owner_kind" {
+                if let Some(mismatch) = cmp_u8(
+                    &mut left,
+                    &mut right,
+                    &format!("object_changes[{index}].is_gas_object"),
+                ) {
+                    return Some(mismatch);
+                }
+            }
+        }
+    }
+
+    for index in 0..header[2] {
+        for field in [
+            "tx_digest",
+            "depends_on_digest",
+            "checkpoint_seq",
+            "timestamp",
+        ] {
+            if let Some(mismatch) = cmp_str(
+                &mut left,
+                &mut right,
+                &format!("dependencies[{index}].{field}"),
+            ) {
+                return Some(mismatch);
+            }
+        }
+    }
+
+    for index in 0..header[3] {
+        if let Some(mismatch) = cmp_str(
+            &mut left,
+            &mut right,
+            &format!("commands[{index}].tx_digest"),
+        ) {
+            return Some(mismatch);
+        }
+        if let Some(mismatch) = cmp_u32(
+            &mut left,
+            &mut right,
+            &format!("commands[{index}].command_index"),
+        ) {
+            return Some(mismatch);
+        }
+        for field in [
+            "kind",
+            "package",
+            "module",
+            "function",
+            "type_arguments",
+            "args",
+            "checkpoint_seq",
+            "timestamp",
+        ] {
+            if let Some(mismatch) =
+                cmp_str(&mut left, &mut right, &format!("commands[{index}].{field}"))
+            {
+                return Some(mismatch);
+            }
+        }
+    }
+
+    for index in 0..header[4] {
+        for field in ["tx_digest", "kind", "data", "checkpoint_seq", "timestamp"] {
+            if let Some(mismatch) = cmp_str(
+                &mut left,
+                &mut right,
+                &format!("system_transactions[{index}].{field}"),
+            ) {
+                return Some(mismatch);
+            }
+        }
+    }
+
+    for index in 0..header[5] {
+        if let Some(mismatch) = cmp_str(
+            &mut left,
+            &mut right,
+            &format!("move_calls[{index}].tx_digest"),
+        ) {
+            return Some(mismatch);
+        }
+        if let Some(mismatch) = cmp_u32(
+            &mut left,
+            &mut right,
+            &format!("move_calls[{index}].call_index"),
+        ) {
+            return Some(mismatch);
+        }
+        for field in [
+            "package",
+            "module",
+            "function",
+            "checkpoint_seq",
+            "timestamp",
+        ] {
+            if let Some(mismatch) = cmp_str(
+                &mut left,
+                &mut right,
+                &format!("move_calls[{index}].{field}"),
+            ) {
+                return Some(mismatch);
+            }
+        }
+    }
+
+    for index in 0..header[6] {
+        if let Some(mismatch) =
+            cmp_str(&mut left, &mut right, &format!("inputs[{index}].tx_digest"))
+        {
+            return Some(mismatch);
+        }
+        if let Some(mismatch) = cmp_u32(
+            &mut left,
+            &mut right,
+            &format!("inputs[{index}].input_index"),
+        ) {
+            return Some(mismatch);
+        }
+        for field in [
+            "kind",
+            "object_id",
+            "version",
+            "digest",
+            "mutability",
+            "initial_shared_version",
+            "pure_bytes",
+            "amount",
+            "coin_type",
+            "source",
+            "checkpoint_seq",
+            "timestamp",
+        ] {
+            if let Some(mismatch) =
+                cmp_str(&mut left, &mut right, &format!("inputs[{index}].{field}"))
+            {
+                return Some(mismatch);
+            }
+        }
+    }
+
+    for index in 0..header[7] {
+        for field in [
+            "tx_digest",
+            "object_id",
+            "kind",
+            "version",
+            "digest",
+            "object_type",
+            "checkpoint_seq",
+            "timestamp",
+        ] {
+            if let Some(mismatch) = cmp_str(
+                &mut left,
+                &mut right,
+                &format!("unchanged_consensus_objects[{index}].{field}"),
+            ) {
+                return Some(mismatch);
+            }
+        }
+    }
+
+    for index in 0..header[8] {
+        for field in [
+            "handler_name",
+            "checkpoint_seq",
+            "tx_digest",
+            "sender",
+            "timestamp",
+            "data",
+        ] {
+            if field == "handler_name" {
+                if let Some(mismatch) = cmp_str(
+                    &mut left,
+                    &mut right,
+                    &format!("events[{index}].handler_name"),
+                ) {
+                    return Some(mismatch);
+                }
+                if let Some(mismatch) = cmp_str(
+                    &mut left,
+                    &mut right,
+                    &format!("events[{index}].checkpoint_seq"),
+                ) {
+                    return Some(mismatch);
+                }
+                if let Some(mismatch) =
+                    cmp_str(&mut left, &mut right, &format!("events[{index}].tx_digest"))
+                {
+                    return Some(mismatch);
+                }
+                if let Some(mismatch) =
+                    cmp_u32(&mut left, &mut right, &format!("events[{index}].event_seq"))
+                {
+                    return Some(mismatch);
+                }
+                continue;
+            }
+            if field == "checkpoint_seq" || field == "tx_digest" {
+                continue;
+            }
+            if let Some(mismatch) =
+                cmp_str(&mut left, &mut right, &format!("events[{index}].{field}"))
+            {
+                return Some(mismatch);
+            }
+        }
+    }
+
+    for index in 0..header[9] {
+        for field in [
+            "tx_digest",
+            "checkpoint_seq",
+            "address",
+            "coin_type",
+            "amount",
+            "timestamp",
+        ] {
+            if let Some(mismatch) = cmp_str(
+                &mut left,
+                &mut right,
+                &format!("balance_changes[{index}].{field}"),
+            ) {
+                return Some(mismatch);
+            }
+        }
+    }
+
+    if left.pos != left.bytes.len() || right.pos != right.bytes.len() {
+        return Some(format!(
+            "cursor mismatch: left_pos={} left_len={} right_pos={} right_len={}",
+            left.pos,
+            left.bytes.len(),
+            right.pos,
+            right.bytes.len()
+        ));
+    }
+
+    None
+}
+
 fn execution_error_kind_name(error: &ExecutionErrorKind) -> String {
     let debug = format!("{error:?}");
     debug
@@ -406,7 +877,7 @@ fn test_failed_transactions_match_full_decode() {
                     assert_eq!(
                         format!(
                             "{}::{}",
-                            format_hex_address(&details.module_address),
+                            format_hex_address(&details.module_address).trim_start_matches("0x"),
                             details.module_name
                         ),
                         location.module.to_string(),
@@ -478,8 +949,13 @@ fn test_system_transactions_fall_back_cleanly() {
                 .unwrap();
 
         assert_eq!(
-            full_len, fast_len,
-            "binary length mismatch for checkpoint {sequence}"
+            full_len,
+            fast_len,
+            "binary length mismatch for checkpoint {sequence}; full_header={:?}; fast_header={:?}; field_mismatch={:?}; {}",
+            read_header_counts(&full_output[..full_len]),
+            read_header_counts(&fast_output[..fast_len]),
+            first_binary_field_mismatch(&full_output[..full_len], &fast_output[..fast_len]),
+            output_diff_message(&full_output[..full_len.min(fast_len)], &fast_output[..fast_len.min(full_len)])
         );
         assert_eq!(
             &fast_output[..fast_len],
@@ -509,8 +985,16 @@ fn test_binary_output_parity_on_real_checkpoint() {
     )
     .unwrap();
     assert_eq!(
-        extract_len, direct_full_len,
-        "baseline fused-writer length mismatch for checkpoint {sequence}"
+        extract_len,
+        direct_full_len,
+        "baseline fused-writer length mismatch for checkpoint {sequence}; extract_header={:?}; direct_header={:?}; field_mismatch={:?}; {}",
+        read_header_counts(&extract_output[..extract_len]),
+        read_header_counts(&direct_full_output[..direct_full_len]),
+        first_binary_field_mismatch(&extract_output[..extract_len], &direct_full_output[..direct_full_len]),
+        output_diff_message(
+            &extract_output[..extract_len.min(direct_full_len)],
+            &direct_full_output[..direct_full_len.min(extract_len)]
+        )
     );
     assert_eq!(
         &direct_full_output[..direct_full_len],
@@ -528,8 +1012,16 @@ fn test_binary_output_parity_on_real_checkpoint() {
             .unwrap();
 
     assert_eq!(
-        extract_len, fast_len,
-        "fast-path length mismatch for checkpoint {sequence}"
+        extract_len,
+        fast_len,
+        "fast-path length mismatch for checkpoint {sequence}; extract_header={:?}; fast_header={:?}; field_mismatch={:?}; {}",
+        read_header_counts(&extract_output[..extract_len]),
+        read_header_counts(&fast_output[..fast_len]),
+        first_binary_field_mismatch(&extract_output[..extract_len], &fast_output[..fast_len]),
+        output_diff_message(
+            &extract_output[..extract_len.min(fast_len)],
+            &fast_output[..fast_len.min(extract_len)]
+        )
     );
     assert_eq!(
         &fast_output[..fast_len],

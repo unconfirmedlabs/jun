@@ -124,6 +124,22 @@ impl<'a> BcsReader<'a> {
         self.read_bytes(n).map(|_| ())
     }
 
+    pub fn read_digest32(&mut self) -> Result<[u8; 32]> {
+        let len = self.read_vec_len()?;
+        if len != 32 {
+            return Err("invalid digest length");
+        }
+        self.read_fixed::<32>()
+    }
+
+    pub fn skip_digest32(&mut self) -> Result<()> {
+        let len = self.read_vec_len()?;
+        if len != 32 {
+            return Err("invalid digest length");
+        }
+        self.skip_bytes(32)
+    }
+
     pub fn skip_vec_of_fixed(&mut self, elem_size: usize) -> Result<()> {
         let len = self.read_vec_len()?;
         self.skip_bytes(len.checked_mul(elem_size).ok_or("overflow")?)
@@ -334,7 +350,7 @@ pub fn parse_effects<'a>(bcs: &'a [u8]) -> Result<EffectsExtract<'a>> {
             .read_u64()
             .map_err(|_| "effects.gas.non_refundable")?,
     };
-    let digest = reader.read_fixed::<32>().map_err(|_| "effects.digest")?;
+    let digest = reader.read_digest32().map_err(|_| "effects.digest")?;
     let gas_object_index = if reader
         .read_option_tag()
         .map_err(|_| "effects.gas_object_index.tag")?
@@ -348,11 +364,7 @@ pub fn parse_effects<'a>(bcs: &'a [u8]) -> Result<EffectsExtract<'a>> {
         None
     };
     let events_digest = if reader.read_option_tag().map_err(|_| "effects.events.tag")? {
-        Some(
-            reader
-                .read_fixed::<32>()
-                .map_err(|_| "effects.events.value")?,
-        )
+        Some(reader.read_digest32().map_err(|_| "effects.events.value")?)
     } else {
         None
     };
@@ -364,7 +376,7 @@ pub fn parse_effects<'a>(bcs: &'a [u8]) -> Result<EffectsExtract<'a>> {
     for _ in 0..dependency_count {
         dependencies.push(
             reader
-                .read_fixed::<32>()
+                .read_digest32()
                 .map_err(|_| "effects.dependencies.entry")?,
         );
     }
@@ -400,7 +412,7 @@ pub fn parse_effects<'a>(bcs: &'a [u8]) -> Result<EffectsExtract<'a>> {
         .map_err(|_| "effects.aux_data.tag")?
     {
         reader
-            .skip_bytes(32)
+            .skip_digest32()
             .map_err(|_| "effects.aux_data.value")?;
     }
     reader.finish().map_err(|_| "effects.trailing_bytes")?;
@@ -500,7 +512,7 @@ pub fn parse_unchanged_consensus_object(bcs: &[u8]) -> Result<UnchangedConsensus
     let kind = match reader.read_uleb128()? {
         0 => UnchangedConsensusKindSummary::ReadOnlyRoot {
             version: reader.read_u64()?,
-            digest: reader.read_fixed::<32>()?,
+            digest: reader.read_digest32()?,
         },
         1 => UnchangedConsensusKindSummary::MutateConsensusStreamEnded(reader.read_u64()?),
         2 => UnchangedConsensusKindSummary::ReadConsensusStreamEnded(reader.read_u64()?),
@@ -534,7 +546,7 @@ pub fn write_input_fields_from_bcs(bcs: &[u8], w: &mut BinaryWriter) -> Result<(
                 0 => {
                     let id = reader.read_fixed::<32>()?;
                     let version = reader.read_u64()?;
-                    let digest = reader.read_fixed::<32>()?;
+                    let digest = reader.read_digest32()?;
                     w.write_str("IMMUTABLE_OR_OWNED");
                     w.write_0x_hex(&id);
                     w.write_u64_dec(version);
@@ -556,7 +568,7 @@ pub fn write_input_fields_from_bcs(bcs: &[u8], w: &mut BinaryWriter) -> Result<(
                 2 => {
                     let id = reader.read_fixed::<32>()?;
                     let version = reader.read_u64()?;
-                    let digest = reader.read_fixed::<32>()?;
+                    let digest = reader.read_digest32()?;
                     w.write_str("RECEIVING");
                     w.write_0x_hex(&id);
                     w.write_u64_dec(version);
@@ -872,7 +884,7 @@ fn parse_object_in<'a>(reader: &mut BcsReader<'a>) -> Result<ObjectInSummary> {
         0 => Ok(ObjectInSummary::NotExist),
         1 => Ok(ObjectInSummary::Exist {
             version: reader.read_u64()?,
-            digest: reader.read_fixed::<32>()?,
+            digest: reader.read_digest32()?,
             owner: parse_owner(reader)?,
         }),
         _ => Err("unsupported object input"),
@@ -883,12 +895,12 @@ fn parse_object_out<'a>(reader: &mut BcsReader<'a>) -> Result<ObjectOutSummary<'
     match reader.read_uleb128()? {
         0 => Ok(ObjectOutSummary::NotExist),
         1 => Ok(ObjectOutSummary::ObjectWrite {
-            digest: reader.read_fixed::<32>()?,
+            digest: reader.read_digest32()?,
             owner: parse_owner(reader)?,
         }),
         2 => Ok(ObjectOutSummary::PackageWrite {
             version: reader.read_u64()?,
-            digest: reader.read_fixed::<32>()?,
+            digest: reader.read_digest32()?,
         }),
         3 => Ok(ObjectOutSummary::AccumulatorWrite(parse_accumulator_write(
             reader,
@@ -933,7 +945,7 @@ fn parse_accumulator_write<'a>(reader: &mut BcsReader<'a>) -> Result<Accumulator
             let len = reader.read_vec_len()?;
             for _ in 0..len {
                 reader.read_u64()?;
-                reader.skip_bytes(32)?;
+                reader.skip_digest32()?;
             }
             AccumulatorValueSummary::EventDigest
         }
@@ -1095,7 +1107,7 @@ fn skip_unchanged_consensus_object_entry(reader: &mut BcsReader<'_>) -> Result<(
     match reader.read_uleb128()? {
         0 => {
             reader.skip_bytes(8)?;
-            reader.skip_bytes(32)?;
+            reader.skip_digest32()?;
         }
         1..=3 => {
             reader.skip_bytes(8)?;
@@ -1111,7 +1123,7 @@ fn skip_object_in(reader: &mut BcsReader<'_>) -> Result<()> {
         0 => Ok(()),
         1 => {
             reader.skip_bytes(8)?;
-            reader.skip_bytes(32)?;
+            reader.skip_digest32()?;
             skip_owner(reader)
         }
         _ => Err("unsupported object input"),
@@ -1122,12 +1134,12 @@ fn skip_object_out(reader: &mut BcsReader<'_>) -> Result<()> {
     match reader.read_uleb128()? {
         0 => Ok(()),
         1 => {
-            reader.skip_bytes(32)?;
+            reader.skip_digest32()?;
             skip_owner(reader)
         }
         2 => {
             reader.skip_bytes(8)?;
-            reader.skip_bytes(32)
+            reader.skip_digest32()
         }
         3 => skip_accumulator_write(reader),
         _ => Err("unsupported object output"),
@@ -1164,7 +1176,7 @@ fn skip_accumulator_write(reader: &mut BcsReader<'_>) -> Result<()> {
             let len = reader.read_vec_len()?;
             for _ in 0..len {
                 reader.skip_bytes(8)?;
-                reader.skip_bytes(32)?;
+                reader.skip_digest32()?;
             }
         }
         _ => return Err("unsupported accumulator value"),
@@ -1196,7 +1208,7 @@ fn skip_object_arg(reader: &mut BcsReader<'_>) -> Result<()> {
         0 | 2 => {
             reader.skip_bytes(32)?;
             reader.skip_bytes(8)?;
-            reader.skip_bytes(32)
+            reader.skip_digest32()
         }
         1 => {
             reader.skip_bytes(32)?;
@@ -1305,7 +1317,7 @@ fn skip_gas_data(reader: &mut BcsReader<'_>) -> Result<()> {
     for _ in 0..payment {
         reader.skip_bytes(32)?;
         reader.skip_bytes(8)?;
-        reader.skip_bytes(32)?;
+        reader.skip_digest32()?;
     }
     reader.skip_bytes(32)?;
     reader.skip_bytes(8)?;

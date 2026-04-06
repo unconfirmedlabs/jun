@@ -14,6 +14,9 @@ mod direct;
 mod extract;
 mod proto;
 
+#[cfg(test)]
+mod parity_tests;
+
 /// FFI entry point: decode a compressed checkpoint and return JSON.
 ///
 /// # Arguments

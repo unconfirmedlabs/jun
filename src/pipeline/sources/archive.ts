@@ -7,9 +7,10 @@
 import { checkpointFromGrpcResponse } from "../../checkpoint-response.ts";
 import { parseBinaryCheckpoint } from "../../binary-parser.ts";
 import { createCheckpointDecoderPool, type CheckpointDecoderPool } from "../../checkpoint-decoder-pool.ts";
+import { isNativeCheckpointDecoderAvailable } from "../../checkpoint-native-decoder.ts";
 import { createLogger } from "../../logger.ts";
 import type { Logger } from "../../logger.ts";
-import type { Source, Checkpoint } from "../types.ts";
+import { emptyProcessed, type Source, type Checkpoint } from "../types.ts";
 import type { BalanceChange, ProcessedCheckpoint } from "../types.ts";
 
 const textDecoder = new TextDecoder();
@@ -38,7 +39,10 @@ export interface ArchiveSourceConfig {
     systemTransactions: boolean;
     unchangedConsensusObjects: boolean;
     events: boolean;
+    checkpoints: boolean;
   };
+  /** Snapshot-only optimization: workers own SQLite shard writes, main DB merges later. */
+  sqliteShardingPath?: string;
   /** gRPC URL for fetching latest checkpoint */
   grpcUrl?: string;
   /** Skip ordered drain — yield checkpoints as they arrive from workers.
@@ -232,6 +236,83 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           { fetched: fetchDone, skipped: fetchSkipped, elapsed: `${fetchElapsed.toFixed(1)}s`, rate: Math.round(fetchDone / fetchElapsed) },
           "phase 1 complete",
         );
+
+        const shardingRequested = !!config.sqliteShardingPath;
+        const canUseSqliteSharding = shardingRequested && isNativeCheckpointDecoderAvailable();
+        if (shardingRequested && !canUseSqliteSharding) {
+          log.warn("sqlite sharding requested but native checkpoint decoder is unavailable; falling back to main-thread write path");
+        }
+
+        if (canUseSqliteSharding) {
+          const { createHash } = await import("crypto");
+          const { mkdirSync, rmSync } = await import("fs");
+          const { homedir } = await import("os");
+          const { join } = await import("path");
+
+          const shardHash = createHash("sha256")
+            .update(`${config.from}-${endSeq}-${config.sqliteShardingPath}`)
+            .digest("hex")
+            .slice(0, 12);
+          const shardDir = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".jun"), "shards", shardHash);
+
+          rmSync(shardDir, { recursive: true, force: true });
+          mkdirSync(shardDir, { recursive: true });
+
+          log.info({ workers: workerCount, shardDir }, "phase 2: decode + write SQLite shards");
+          const shardStart = performance.now();
+          const shardPaths = await pool.decodeAndWriteRange(
+            config.from,
+            endSeq,
+            cacheDir,
+            shardDir,
+            {
+              balances: !!config.enabledProcessors?.balances,
+              transactions: !!config.enabledProcessors?.transactions,
+              objectChanges: !!config.enabledProcessors?.objectChanges,
+              dependencies: !!config.enabledProcessors?.dependencies,
+              inputs: !!config.enabledProcessors?.inputs,
+              commands: !!config.enabledProcessors?.commands,
+              systemTransactions: !!config.enabledProcessors?.systemTransactions,
+              unchangedConsensusObjects: !!config.enabledProcessors?.unchangedConsensusObjects,
+              events: !!config.enabledProcessors?.events,
+              checkpoints: !!config.enabledProcessors?.checkpoints,
+            },
+          );
+
+          const shardElapsed = (performance.now() - shardStart) / 1000;
+          log.info(
+            { workers: workerCount, elapsed: `${shardElapsed.toFixed(1)}s`, shardCount: shardPaths.length },
+            "phase 2 complete",
+          );
+
+          if (stopped) {
+            return;
+          }
+
+          const markerCheckpoint: Checkpoint = {
+            sequenceNumber: endSeq,
+            timestamp: new Date(0),
+            transactions: [],
+            source: "backfill",
+            epoch: 0n,
+            digest: "",
+            previousDigest: null,
+            contentDigest: null,
+            totalNetworkTransactions: 0n,
+            epochRollingGasCostSummary: {
+              computationCost: "0",
+              storageCost: "0",
+              storageRebate: "0",
+              nonRefundableStorageFee: "0",
+            },
+          };
+          const markerProcessed = emptyProcessed(markerCheckpoint);
+          (markerProcessed as any)._shardPaths = shardPaths;
+          (markerProcessed as any)._shardSessionDir = shardDir;
+          (markerCheckpoint as Checkpoint & { _preProcessed?: ProcessedCheckpoint })._preProcessed = markerProcessed;
+          yield markerCheckpoint;
+          return;
+        }
 
         // ─── Phase 2: Decode from disk cache via worker pool ───────────
         // No network latency. Workers do Rust FFI decode.
