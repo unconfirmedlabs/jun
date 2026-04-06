@@ -393,6 +393,33 @@ async function runSource(
   const startTime = performance.now();
 
   for await (const checkpoint of source.stream()) {
+    // Deferred binary parsing: raw binary flows through to the write buffer.
+    // The SQL writer will parse at flush time.
+    const rawBinary = (checkpoint as any)._rawBinary as Uint8Array | undefined;
+    if (rawBinary) {
+      // Minimal ProcessedCheckpoint wrapper — write buffer will parse the binary
+      const processed = emptyProcessed(checkpoint);
+      (processed as any)._rawBinary = rawBinary;
+      (processed as any)._enabledProcessors = (checkpoint as any)._enabledProcessors;
+      (processed as any)._balanceCoinTypes = (checkpoint as any)._balanceCoinTypes;
+      await buffer.push(processed);
+      checkpointCount++;
+      if (checkpointCount % 100 === 0) {
+        const elapsedSecs = (performance.now() - startTime) / 1000;
+        const rate = Math.round(checkpointCount / (elapsedSecs || 1));
+        const isBackfill = source.name !== "live";
+        const total = (config.totalCheckpoints && isBackfill) ? Number(config.totalCheckpoints) : undefined;
+        if (total) {
+          const pct = Math.round((checkpointCount / total) * 100);
+          const remaining = Math.round((total - checkpointCount) / (rate || 1));
+          const bar = progressBar(pct);
+          process.stderr.write(`\r[${source.name}] ${bar} ${pct}% | ${checkpointCount.toLocaleString()}/${total.toLocaleString()} | ${rate}/s | ETA ${remaining}s  `);
+        }
+        log.info({ source: source.name, checkpoints: checkpointCount, rate: `${rate}/s` }, "progress");
+      }
+      continue;
+    }
+
     // If workers already ran processors (archive backfill), skip the loop.
     // Live (gRPC) checkpoints still run processors on the main thread.
     let processed: ProcessedCheckpoint;

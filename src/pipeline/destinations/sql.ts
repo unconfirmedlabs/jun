@@ -1391,7 +1391,30 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       const allSystemTransactions: SystemTransactionRecord[] = [];
       const allUnchangedConsensusObjects: UnchangedConsensusObjectRecord[] = [];
 
-      for (const processed of batch) {
+      for (let processed of batch) {
+        // Deferred binary parsing: parse the raw binary now at write time
+        const rawBinary = (processed as any)._rawBinary as Uint8Array | undefined;
+        if (rawBinary) {
+          const { parseBinaryCheckpoint } = await import("../../binary-parser.ts");
+          const parsed = parseBinaryCheckpoint(rawBinary);
+          // Apply processor filter
+          const enabledProcessors = (processed as any)._enabledProcessors;
+          processed = {
+            ...parsed.processed,
+            checkpoint: parsed.checkpoint,
+            events: enabledProcessors?.events ? parsed.processed.events : [],
+            balanceChanges: enabledProcessors?.balances ? parsed.processed.balanceChanges : [],
+            transactions: enabledProcessors?.transactions ? parsed.processed.transactions : [],
+            moveCalls: enabledProcessors?.transactions ? parsed.processed.moveCalls : [],
+            objectChanges: enabledProcessors?.objectChanges ? parsed.processed.objectChanges : [],
+            dependencies: enabledProcessors?.dependencies ? parsed.processed.dependencies : [],
+            inputs: enabledProcessors?.inputs ? parsed.processed.inputs : [],
+            commands: enabledProcessors?.commands ? parsed.processed.commands : [],
+            systemTransactions: enabledProcessors?.systemTransactions ? parsed.processed.systemTransactions : [],
+            unchangedConsensusObjects: enabledProcessors?.unchangedConsensusObjects ? parsed.processed.unchangedConsensusObjects : [],
+          };
+        }
+
         for (const event of processed.events ?? []) {
           const list = groupedEvents.get(event.handlerName);
           if (list) list.push(event);

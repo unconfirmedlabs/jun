@@ -12,6 +12,8 @@ import type { Logger } from "../../logger.ts";
 import type { Source, Checkpoint } from "../types.ts";
 import type { BalanceChange, ProcessedCheckpoint } from "../types.ts";
 
+const textDecoder = new TextDecoder();
+
 export interface ArchiveSourceConfig {
   /** Archive base URL */
   archiveUrl: string;
@@ -130,16 +132,35 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           const parseStart = performance.now();
 
           let checkpoint: Checkpoint;
-          if (result.binary) {
-            const parsed = parseBinaryCheckpoint(result.binary);
-            const processed = filterPreProcessedCheckpoint(
-              parsed.processed,
-              config.enabledProcessors,
-              balanceCoinTypes,
-            );
-            checkpoint = parsed.checkpoint;
-            (checkpoint as Checkpoint & { _preProcessed?: ProcessedCheckpoint })._preProcessed = processed;
-          } else if (result.payload) {
+          const deferParsing = process.env.DEFER_BINARY_PARSING === "1";
+          if (result.binary && deferParsing) {
+            // Deferred parsing: read only checkpoint summary from binary header,
+            // stash raw binary for SQL writer to parse at flush time.
+            const view = new DataView(result.binary.buffer, result.binary.byteOffset, result.binary.byteLength);
+            // Skip 10 u32 header (40 bytes), then read sequenceNumber string
+            let pos = 40;
+            const seqLen = view.getUint16(pos, true); pos += 2;
+            const seqStr = textDecoder.decode(result.binary.subarray(pos, pos + seqLen)); pos += seqLen;
+            const epochLen = view.getUint16(pos, true); pos += 2;
+            const epochStr = textDecoder.decode(result.binary.subarray(pos, pos + epochLen));
+
+            checkpoint = {
+              sequenceNumber: BigInt(seqStr),
+              timestamp: new Date(),
+              transactions: [],
+              source: "backfill",
+              epoch: BigInt(epochStr),
+              digest: "",
+              previousDigest: null,
+              contentDigest: null,
+              totalNetworkTransactions: 0n,
+              epochRollingGasCostSummary: { computationCost: "0", storageCost: "0", storageRebate: "0", nonRefundableStorageFee: "0" },
+            };
+            // Stash raw binary — pipeline and SQL writer will parse at write time
+            (checkpoint as any)._rawBinary = result.binary;
+            (checkpoint as any)._enabledProcessors = config.enabledProcessors;
+            (checkpoint as any)._balanceCoinTypes = balanceCoinTypes;
+          } else if (result.binary) {
             checkpoint = checkpointFromGrpcResponse(
               result.payload.decoded,
               "backfill",
