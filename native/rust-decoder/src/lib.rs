@@ -109,6 +109,11 @@ pub extern "C" fn decode_checkpoint_binary(
     }
 }
 
+/// Download, decompress, and decode a range of archive checkpoints.
+///
+/// Spawns a background thread with a tokio runtime. Results stream back via
+/// `output_callback`. Completion signaled by calling callback with `seq = u64::MAX`.
+/// Returns 0 immediately on success (thread spawned), negative on error.
 #[no_mangle]
 pub extern "C" fn download_and_decode_archive_checkpoint_range(
     archive_url_ptr: *const u8,
@@ -116,11 +121,9 @@ pub extern "C" fn download_and_decode_archive_checkpoint_range(
     from_checkpoint: u64,
     to_checkpoint: u64,
     concurrency: u32,
-    output_ptr: *mut u8,
-    output_capacity: u32,
     output_callback: fetch::OutputCallback,
 ) -> i32 {
-    if archive_url_ptr.is_null() || output_ptr.is_null() || output_capacity == 0 {
+    if archive_url_ptr.is_null() {
         return -1;
     }
     if from_checkpoint > to_checkpoint {
@@ -139,8 +142,6 @@ pub extern "C" fn download_and_decode_archive_checkpoint_range(
         from_checkpoint,
         to_checkpoint,
         concurrency,
-        output_ptr,
-        output_capacity,
         output_callback,
     ) {
         Ok(()) => 0,

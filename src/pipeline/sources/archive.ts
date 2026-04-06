@@ -249,11 +249,13 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           while ((!rangeDone || queue.length > 0) && !stopped) {
             if (rangeError) throw rangeError;
             if (queue.length === 0) {
+              if (rangeDone) break; // No more results coming
               await waitForDrain();
               continue;
             }
 
             const result = queue.shift()!;
+            if (totalProcessed < 5) console.error(`[archive-drain] processing seq=${result.seq} queue=${queue.length} rangeDone=${rangeDone}`);
             const parseStart = performance.now();
             const checkpoint = checkpointFromBinaryResult(
               result.binary,

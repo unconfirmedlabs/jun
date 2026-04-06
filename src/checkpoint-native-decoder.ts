@@ -16,8 +16,6 @@ type NativeRangeDecodeFn = (
   fromCheckpoint: bigint,
   toCheckpoint: bigint,
   concurrency: number,
-  outputPtr: number,
-  outputCapacity: number,
   outputCallback: number,
 ) => number;
 
@@ -71,7 +69,7 @@ const baseSymbols = {
 const extendedSymbols = {
   ...baseSymbols,
   download_and_decode_archive_checkpoint_range: {
-    args: [FFIType.ptr, FFIType.u32, FFIType.u64, FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.function],
+    args: [FFIType.ptr, FFIType.u32, FFIType.u64, FFIType.u64, FFIType.u32, FFIType.function],
     returns: FFIType.i32,
   },
 } as const;
@@ -200,7 +198,6 @@ export function downloadAndDecodeRange(
   }
 
   const urlBuf = new TextEncoder().encode(archiveUrl);
-  const outBuf = new Uint8Array(RANGE_OUTPUT_CAPACITY);
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -254,8 +251,6 @@ export function downloadAndDecodeRange(
         from,
         to,
         concurrency,
-        ptr(outBuf),
-        outBuf.length,
         callbackPtr as unknown as number,
       );
 
