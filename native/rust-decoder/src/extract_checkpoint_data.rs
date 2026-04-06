@@ -287,6 +287,57 @@ struct DecodedSummary {
 // Extraction
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Extraction mask — controls which record types to extract
+// ---------------------------------------------------------------------------
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug)]
+    pub struct ExtractMask: u32 {
+        const TRANSACTIONS              = 1 << 0;
+        const MOVE_CALLS                = 1 << 1;
+        const BALANCE_CHANGES           = 1 << 2;
+        const OBJECT_CHANGES            = 1 << 3;
+        const DEPENDENCIES              = 1 << 4;
+        const INPUTS                    = 1 << 5;
+        const COMMANDS                  = 1 << 6;
+        const SYSTEM_TRANSACTIONS       = 1 << 7;
+        const UNCHANGED_CONSENSUS       = 1 << 8;
+        const CHECKPOINTS               = 1 << 9;
+        const EVENTS                    = 1 << 10;
+
+        const ALL = 0x7FF; // all 11 bits
+    }
+}
+
+impl ExtractMask {
+    /// Does this mask need effects BCS deserialization?
+    pub fn needs_effects(&self) -> bool {
+        self.intersects(
+            Self::TRANSACTIONS | Self::BALANCE_CHANGES | Self::OBJECT_CHANGES
+            | Self::DEPENDENCIES | Self::UNCHANGED_CONSENSUS
+        )
+    }
+
+    /// Does this mask need TransactionData BCS deserialization?
+    pub fn needs_tx_data(&self) -> bool {
+        self.intersects(
+            Self::TRANSACTIONS | Self::MOVE_CALLS | Self::INPUTS
+            | Self::COMMANDS | Self::SYSTEM_TRANSACTIONS
+        )
+    }
+
+    /// Does this mask need events BCS deserialization?
+    pub fn needs_events(&self) -> bool {
+        self.contains(Self::EVENTS)
+    }
+
+    /// Does this mask need the ObjectSet (for balance changes + object type lookups)?
+    pub fn needs_objects(&self) -> bool {
+        self.intersects(Self::BALANCE_CHANGES | Self::OBJECT_CHANGES)
+    }
+}
+
 /// Profiling counters for a single checkpoint extraction.
 #[derive(Default)]
 pub struct ExtractProfile {
@@ -299,9 +350,18 @@ pub struct ExtractProfile {
     pub tx_count: usize,
 }
 
-/// Extract checkpoint into the struct (shared by JSON and binary output paths).
+/// Extract checkpoint with all record types.
 pub fn extract_checkpoint_data(
     decompressed: &[u8],
+) -> Result<(ExtractedCheckpoint, ExtractProfile), Box<dyn std::error::Error>> {
+    extract_checkpoint_data_selective(decompressed, ExtractMask::ALL)
+}
+
+/// Extract checkpoint with only the requested record types.
+/// Skips BCS deserialization and record building for disabled types.
+pub fn extract_checkpoint_data_selective(
+    decompressed: &[u8],
+    mask: ExtractMask,
 ) -> Result<(ExtractedCheckpoint, ExtractProfile), Box<dyn std::error::Error>> {
     use std::time::Instant;
     let mut profile = ExtractProfile::default();
@@ -328,45 +388,58 @@ pub fn extract_checkpoint_data(
     let mut unchanged_consensus_objects = Vec::new();
     let mut balance_changes = Vec::new();
 
-    // Build ObjectSet from proto objects (shared by balance changes + object type lookups)
+    // Build ObjectSet only if needed (balance changes + object type lookups)
     let mut object_set = ObjectSet::default();
-    for obj in &parsed.objects {
-        if let Ok(decoded) = bcs::from_bytes::<Object>(obj.bcs) {
-            object_set.insert(decoded);
+    if mask.needs_objects() {
+        for obj in &parsed.objects {
+            if let Ok(decoded) = bcs::from_bytes::<Object>(obj.bcs) {
+                object_set.insert(decoded);
+            }
         }
     }
 
     profile.tx_count = parsed.transactions.len();
 
     for ptx in &parsed.transactions {
-        let t1 = Instant::now();
-        let effects = ptx
-            .effects_bcs
-            .and_then(|bytes| bcs::from_bytes::<TransactionEffects>(bytes).ok());
-        profile.bcs_effects_ns += t1.elapsed().as_nanos() as u64;
+        // BCS deserialization — only what the mask requires
+        let effects = if mask.needs_effects() {
+            let t1 = Instant::now();
+            let fx = ptx.effects_bcs
+                .and_then(|bytes| bcs::from_bytes::<TransactionEffects>(bytes).ok());
+            profile.bcs_effects_ns += t1.elapsed().as_nanos() as u64;
+            fx
+        } else {
+            None
+        };
 
-        let t2 = Instant::now();
-        let tx_data = ptx.transaction_bcs.and_then(decode_transaction_data);
-        profile.bcs_tx_data_ns += t2.elapsed().as_nanos() as u64;
+        let tx_data = if mask.needs_tx_data() {
+            let t2 = Instant::now();
+            let td = ptx.transaction_bcs.and_then(decode_transaction_data);
+            profile.bcs_tx_data_ns += t2.elapsed().as_nanos() as u64;
+            td
+        } else {
+            None
+        };
 
-        let t3 = Instant::now();
-        let tx_events = ptx
-            .events_bcs
-            .and_then(|bytes| bcs::from_bytes::<TransactionEvents>(bytes).ok());
-        profile.bcs_events_ns += t3.elapsed().as_nanos() as u64;
+        let tx_events = if mask.needs_events() {
+            let t3 = Instant::now();
+            let ev = ptx.events_bcs
+                .and_then(|bytes| bcs::from_bytes::<TransactionEvents>(bytes).ok());
+            profile.bcs_events_ns += t3.elapsed().as_nanos() as u64;
+            ev
+        } else {
+            None
+        };
 
         let t4 = Instant::now();
 
+        // Digest and sender are needed by most record types
         let digest = effects
             .as_ref()
             .map(|fx| fx.transaction_digest().to_string())
             .filter(|value| !value.is_empty())
             .or_else(|| {
-                if ptx.digest.is_empty() {
-                    None
-                } else {
-                    Some(ptx.digest.to_string())
-                }
+                if ptx.digest.is_empty() { None } else { Some(ptx.digest.to_string()) }
             })
             .unwrap_or_default();
 
@@ -381,43 +454,64 @@ pub fn extract_checkpoint_data(
             checkpoint_timestamp: &checkpoint_timestamp,
         };
 
-        if let Some(record) =
-            build_transaction_record(&tx_context, tx_data.as_ref(), effects.as_ref(), &sender)
-        {
-            transactions.push(record);
+        // Extract only requested record types
+        if mask.contains(ExtractMask::TRANSACTIONS) {
+            if let Some(record) =
+                build_transaction_record(&tx_context, tx_data.as_ref(), effects.as_ref(), &sender)
+            {
+                transactions.push(record);
+            }
         }
 
         if let Some(tx) = tx_data.as_ref() {
-            let command_bundle = extract_commands_and_move_calls(&tx_context, tx.kind());
-            move_calls.extend(command_bundle.move_calls);
-            commands.extend(command_bundle.commands);
-            inputs.extend(extract_inputs(&tx_context, tx));
-            if let Some(system_record) = extract_system_transaction(&tx_context, tx.kind()) {
-                system_transactions.push(system_record);
+            if mask.intersects(ExtractMask::MOVE_CALLS | ExtractMask::COMMANDS) {
+                let command_bundle = extract_commands_and_move_calls(&tx_context, tx.kind());
+                if mask.contains(ExtractMask::MOVE_CALLS) {
+                    move_calls.extend(command_bundle.move_calls);
+                }
+                if mask.contains(ExtractMask::COMMANDS) {
+                    commands.extend(command_bundle.commands);
+                }
+            }
+            if mask.contains(ExtractMask::INPUTS) {
+                inputs.extend(extract_inputs(&tx_context, tx));
+            }
+            if mask.contains(ExtractMask::SYSTEM_TRANSACTIONS) {
+                if let Some(system_record) = extract_system_transaction(&tx_context, tx.kind()) {
+                    system_transactions.push(system_record);
+                }
             }
         }
 
         if let Some(fx) = effects.as_ref() {
-            object_changes.extend(extract_object_changes(&tx_context, fx, &object_set));
-            dependencies.extend(extract_dependencies(&tx_context, fx));
-            unchanged_consensus_objects
-                .extend(extract_unchanged_consensus_objects(&tx_context, fx));
-
-            // Derive balance changes using Mysten's official implementation
-            for bc in derive_balance_changes_2(fx, &object_set) {
-                balance_changes.push(BalanceChangeRecord {
-                    tx_digest: tx_context.digest.to_string(),
-                    checkpoint_seq: tx_context.checkpoint_seq.to_string(),
-                    address: bc.address.to_string(),
-                    coin_type: bc.coin_type.to_canonical_string(true),
-                    amount: bc.amount.to_string(),
-                    timestamp: tx_context.checkpoint_timestamp.to_string(),
-                });
+            if mask.contains(ExtractMask::OBJECT_CHANGES) {
+                object_changes.extend(extract_object_changes(&tx_context, fx, &object_set));
+            }
+            if mask.contains(ExtractMask::DEPENDENCIES) {
+                dependencies.extend(extract_dependencies(&tx_context, fx));
+            }
+            if mask.contains(ExtractMask::UNCHANGED_CONSENSUS) {
+                unchanged_consensus_objects
+                    .extend(extract_unchanged_consensus_objects(&tx_context, fx));
+            }
+            if mask.contains(ExtractMask::BALANCE_CHANGES) {
+                for bc in derive_balance_changes_2(fx, &object_set) {
+                    balance_changes.push(BalanceChangeRecord {
+                        tx_digest: tx_context.digest.to_string(),
+                        checkpoint_seq: tx_context.checkpoint_seq.to_string(),
+                        address: bc.address.to_string(),
+                        coin_type: bc.coin_type.to_canonical_string(true),
+                        amount: bc.amount.to_string(),
+                        timestamp: tx_context.checkpoint_timestamp.to_string(),
+                    });
+                }
             }
         }
 
-        if let Some(tx_events) = tx_events.as_ref() {
-            events.extend(extract_events(&tx_context, tx_events));
+        if mask.contains(ExtractMask::EVENTS) {
+            if let Some(tx_events) = tx_events.as_ref() {
+                events.extend(extract_events(&tx_context, tx_events));
+            }
         }
 
         profile.extract_records_ns += t4.elapsed().as_nanos() as u64;
@@ -458,13 +552,21 @@ pub fn extract_checkpoint(decompressed: &[u8]) -> Result<String, Box<dyn std::er
     Ok(serde_json::to_string(&result)?)
 }
 
-/// Extract checkpoint and serialize to flat binary format.
-/// Returns the number of bytes written and profiling data.
+/// Extract checkpoint and serialize to flat binary format (all record types).
 pub fn extract_checkpoint_binary(
     decompressed: &[u8],
     output: &mut [u8],
 ) -> Result<(usize, ExtractProfile), Box<dyn std::error::Error>> {
-    let (result, profile) = extract_checkpoint_data(decompressed)?;
+    extract_checkpoint_binary_selective(decompressed, output, ExtractMask::ALL)
+}
+
+/// Extract checkpoint and serialize to flat binary format (selective).
+pub fn extract_checkpoint_binary_selective(
+    decompressed: &[u8],
+    output: &mut [u8],
+    mask: ExtractMask,
+) -> Result<(usize, ExtractProfile), Box<dyn std::error::Error>> {
+    let (result, profile) = extract_checkpoint_data_selective(decompressed, mask)?;
     let written = crate::binary::write_binary(&result, output);
     Ok((written, profile))
 }

@@ -76,7 +76,7 @@ pub extern "C" fn decode_get_checkpoint_response(
 // FFI: Binary output (used by index-chain for both archive and live)
 // ---------------------------------------------------------------------------
 
-/// Decode zstd-compressed archive checkpoint to flat binary format.
+/// Decode zstd-compressed archive checkpoint to flat binary format (all record types).
 #[no_mangle]
 pub extern "C" fn decode_checkpoint_binary(
     input_ptr: *const u8, input_len: u32,
@@ -84,7 +84,24 @@ pub extern "C" fn decode_checkpoint_binary(
 ) -> u32 {
     let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
     let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, output_capacity as usize) };
-    match decode_compressed_binary(input, output) {
+    match decode_compressed_binary(input, output, extract::ExtractMask::ALL) {
+        Ok(n) => n as u32,
+        Err(_) => 0,
+    }
+}
+
+/// Decode zstd-compressed archive checkpoint with selective extraction.
+/// Only extracts record types enabled in the mask bitfield.
+#[no_mangle]
+pub extern "C" fn decode_checkpoint_binary_selective(
+    input_ptr: *const u8, input_len: u32,
+    output_ptr: *mut u8, output_capacity: u32,
+    enabled_mask: u32,
+) -> u32 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, output_capacity as usize) };
+    let mask = extract::ExtractMask::from_bits_truncate(enabled_mask);
+    match decode_compressed_binary(input, output, mask) {
         Ok(n) => n as u32,
         Err(_) => 0,
     }
@@ -122,9 +139,9 @@ fn decode_compressed_json(compressed: &[u8]) -> Result<String, Box<dyn std::erro
     extract::extract_checkpoint(&decompressed)
 }
 
-fn decode_compressed_binary(compressed: &[u8], output: &mut [u8]) -> Result<usize, Box<dyn std::error::Error>> {
+fn decode_compressed_binary(compressed: &[u8], output: &mut [u8], mask: extract::ExtractMask) -> Result<usize, Box<dyn std::error::Error>> {
     let decompressed = decompress(compressed)?;
-    let (written, _) = extract::extract_checkpoint_binary(&decompressed, output)?;
+    let (written, _) = extract::extract_checkpoint_binary_selective(&decompressed, output, mask)?;
     Ok(written)
 }
 

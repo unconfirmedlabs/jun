@@ -13,6 +13,7 @@ sui-types = { git = "https://github.com/MystenLabs/sui.git", branch = "mainnet" 
 bcs = "0.1"
 bs58 = "0.5"
 blake2 = "0.10"
+bitflags = "2"
 # zstd decompression
 zstd = "0.13"
 # JSON output for FFI boundary

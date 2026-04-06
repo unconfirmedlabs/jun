@@ -2703,6 +2703,7 @@ name = "jun-checkpoint-decoder"
 version = "0.1.0"
 dependencies = [
  "bcs",
+ "bitflags",
  "blake2",
  "bs58 0.5.1",
  "serde",

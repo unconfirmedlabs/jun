@@ -10,6 +10,14 @@ type NativeDecodeFn = (
   outputCapacity: number,
 ) => number;
 
+type NativeSelectiveDecodeFn = (
+  inputPtr: number,
+  inputLen: number,
+  outputPtr: number,
+  outputCapacity: number,
+  enabledMask: number,
+) => number;
+
 type NativeCheckpointDecoder = {
   decode_archive_checkpoint: NativeDecodeFn;
   decode_checkpoint_proto: NativeDecodeFn;
@@ -17,7 +25,24 @@ type NativeCheckpointDecoder = {
   decode_get_checkpoint_response: NativeDecodeFn;
   decode_checkpoint_binary: NativeDecodeFn;
   decode_subscribe_response_binary: NativeDecodeFn;
+  decode_checkpoint_binary_selective: NativeSelectiveDecodeFn;
 };
+
+/** Extraction mask bits — controls which record types the Rust decoder extracts. */
+export const ExtractMask = {
+  TRANSACTIONS:         1 << 0,
+  MOVE_CALLS:           1 << 1,
+  BALANCE_CHANGES:      1 << 2,
+  OBJECT_CHANGES:       1 << 3,
+  DEPENDENCIES:         1 << 4,
+  INPUTS:               1 << 5,
+  COMMANDS:             1 << 6,
+  SYSTEM_TRANSACTIONS:  1 << 7,
+  UNCHANGED_CONSENSUS:  1 << 8,
+  CHECKPOINTS:          1 << 9,
+  EVENTS:               1 << 10,
+  ALL:                  0x7FF,
+} as const;
 
 const LIB_NAME = `libjun_checkpoint_decoder.${suffix}`;
 const LIB_PATHS = [
@@ -53,6 +78,10 @@ for (const libPath of LIB_PATHS) {
       },
       decode_subscribe_response_binary: {
         args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32],
+        returns: FFIType.u32,
+      },
+      decode_checkpoint_binary_selective: {
+        args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.u32],
         returns: FFIType.u32,
       },
     });
@@ -167,6 +196,26 @@ export function decodeSubscribeCheckpointsResponseNative(
  *  Same binary format as decodeArchiveCheckpointBinary. */
 export function decodeSubscribeResponseBinary(input: Uint8Array): Uint8Array | null {
   return decodeBinary("decode_subscribe_response_binary", input);
+}
+
+/** Decode compressed checkpoint with selective extraction.
+ *  Only extracts record types enabled in the mask (see ExtractMask). */
+export function decodeArchiveCheckpointBinarySelective(input: Uint8Array, mask: number): Uint8Array | null {
+  if (!nativeDecoder) return null;
+
+  let capacity = BINARY_DEFAULT_CAPACITY;
+  while (capacity <= BINARY_MAX_CAPACITY) {
+    const outBuf = new Uint8Array(capacity);
+    const bytesWritten = (nativeDecoder.decode_checkpoint_binary_selective as NativeSelectiveDecodeFn)(
+      ptr(input), input.length, ptr(outBuf), outBuf.length, mask,
+    );
+    if (bytesWritten > 0) {
+      return outBuf.subarray(0, bytesWritten);
+    }
+    capacity *= 2;
+  }
+
+  throw new Error("Native checkpoint decoder failed for selective binary decode");
 }
 
 export function decodeGetCheckpointResponseNative(
