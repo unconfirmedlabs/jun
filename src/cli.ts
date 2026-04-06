@@ -2496,10 +2496,11 @@ pipelineCmd
         console.error(`[jun] error: could not resolve epoch ${opts.epoch}`);
         process.exit(1);
       }
-    } else {
+    } else if (opts.from) {
       from = BigInt(opts.from);
       to = opts.to ? BigInt(opts.to) : undefined;
     }
+    // Live-only mode: from/to stay undefined, no archive source created
 
     // Create storage
     let storage: any;
@@ -2555,9 +2556,26 @@ pipelineCmd
       const { createGrpcLiveSource } = await import("./pipeline/sources/grpc.ts");
       pipeline.source(createGrpcLiveSource({ url: grpcUrl }));
 
-      // Live mode needs processors to extract structural data from gRPC checkpoints.
-      // Archive mode gets this from the Rust binary decoder.
+      // Live mode needs JS processors to extract structural data from gRPC checkpoints.
+      // Archive mode gets all this from the Rust binary decoder — no processors needed.
+      const { createTransactionTracker } = await import("./pipeline/processors/transactionBlocks.ts");
+      const { createBalanceTracker } = await import("./pipeline/processors/balanceChanges.ts");
+      const { createObjectChangeTracker } = await import("./pipeline/processors/objectChanges.ts");
+      const { createDependencyTracker } = await import("./pipeline/processors/dependencies.ts");
+      const { createInputTracker } = await import("./pipeline/processors/transactionInputs.ts");
+      const { createCommandTracker } = await import("./pipeline/processors/commands.ts");
+      const { createSystemTransactionTracker } = await import("./pipeline/processors/systemTransactions.ts");
+      const { createUnchangedConsensusObjectTracker } = await import("./pipeline/processors/unchangedConsensusObjects.ts");
       const { createRawEventsProcessor } = await import("./pipeline/processors/rawEvents.ts");
+
+      pipeline.processor(createTransactionTracker());
+      pipeline.processor(createBalanceTracker({ coinTypes: "*" }));
+      pipeline.processor(createObjectChangeTracker());
+      pipeline.processor(createDependencyTracker());
+      pipeline.processor(createInputTracker());
+      pipeline.processor(createCommandTracker());
+      pipeline.processor(createSystemTransactionTracker());
+      pipeline.processor(createUnchangedConsensusObjectTracker());
       pipeline.processor(createRawEventsProcessor());
     }
 

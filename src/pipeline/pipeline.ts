@@ -441,6 +441,7 @@ async function runSource(
         processed.commands.push(...result.commands);
         processed.systemTransactions.push(...result.systemTransactions);
         processed.unchangedConsensusObjects.push(...result.unchangedConsensusObjects);
+        processed.rawEvents.push(...result.rawEvents);
       }
     }
 
