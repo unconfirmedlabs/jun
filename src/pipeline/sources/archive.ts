@@ -25,8 +25,6 @@ export interface ArchiveSourceConfig {
   workers?: number;
   /** Coin types for archive balance computation (null = disabled) */
   balanceCoinTypes?: string[] | "*";
-  /** Legacy no-op: archive worker mode is now chosen from native decoder availability. */
-  useBinaryPreprocessing?: boolean;
   /** Enabled processor set used to filter worker-preprocessed rows. */
   enabledProcessors?: {
     balances: boolean;
