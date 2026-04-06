@@ -97,10 +97,15 @@ function checkpointFromBinaryResult(
     const epochLen = view.getUint16(pos, true);
     pos += 2;
     const epochStr = textDecoder.decode(binary.subarray(pos, pos + epochLen));
+    pos += epochLen;
+
+    const tsLen = view.getUint16(pos, true);
+    pos += 2;
+    const tsStr = textDecoder.decode(binary.subarray(pos, pos + tsLen));
 
     const checkpoint: Checkpoint = {
       sequenceNumber: BigInt(seqStr),
-      timestamp: new Date(),
+      timestamp: new Date(tsStr),
       transactions: [],
       source: "backfill",
       epoch: BigInt(epochStr),

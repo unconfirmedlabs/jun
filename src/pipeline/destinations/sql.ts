@@ -1391,6 +1391,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       const allSystemTransactions: SystemTransactionRecord[] = [];
       const allUnchangedConsensusObjects: UnchangedConsensusObjectRecord[] = [];
 
+      const parsedBatch: ProcessedCheckpoint[] = [];
       for (let processed of batch) {
         // Deferred binary parsing: parse the raw binary now at write time
         const rawBinary = (processed as any)._rawBinary as Uint8Array | undefined;
@@ -1414,6 +1415,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
             unchangedConsensusObjects: enabledProcessors?.unchangedConsensusObjects ? parsed.processed.unchangedConsensusObjects : [],
           };
         }
+        parsedBatch.push(processed);
 
         for (const event of processed.events ?? []) {
           const list = groupedEvents.get(event.handlerName);
@@ -1468,7 +1470,7 @@ export function createSqlStorage(config: SqlStorageConfig): Storage {
       if (config.checkpoints) {
         const seen = new Set<string>();
         const uniqueCheckpoints: Checkpoint[] = [];
-        for (const processed of batch) {
+        for (const processed of parsedBatch) {
           const seq = processed.checkpoint.sequenceNumber.toString();
           if (seen.has(seq)) continue;
           seen.add(seq);
