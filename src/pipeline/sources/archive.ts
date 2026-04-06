@@ -1,28 +1,16 @@
 /**
- * Archive checkpoint source — fetches historical checkpoints with worker pool decoding.
+ * Archive checkpoint source — historical backfill with worker-owned fetch/decode.
  *
  * Streaming pipeline architecture:
- *   Fetcher (N concurrent) → Decoder pool (M workers) → Ordered drain → yield
- *
- * All three stages run concurrently. The fetcher races ahead filling a bounded
- * queue, workers decode in parallel, and the ordered drain yields checkpoints
- * as soon as the next sequential one is ready — no window boundaries.
+ *   Worker fetch+decode (N workers) → Ordered drain → yield
  */
 import { checkpointFromGrpcResponse } from "../../checkpoint-response.ts";
 import { parseBinaryCheckpoint } from "../../binary-parser.ts";
-import type { BalanceChange, ProcessedCheckpoint } from "../types.ts";
-
-/** Direct fetch from archive — no cache read or write. */
-async function fetchDirect(seq: bigint, archiveUrl: string, signal?: AbortSignal): Promise<Uint8Array> {
-  const url = `${archiveUrl}/${seq}.binpb.zst`;
-  const resp = await fetch(url, signal ? { signal } : undefined);
-  if (!resp.ok) throw new Error(`Archive fetch failed: ${resp.status} for checkpoint ${seq}`);
-  return new Uint8Array(await resp.arrayBuffer());
-}
 import { createCheckpointDecoderPool, type CheckpointDecoderPool } from "../../checkpoint-decoder-pool.ts";
-import type { Source, Checkpoint } from "../types.ts";
 import { createLogger } from "../../logger.ts";
 import type { Logger } from "../../logger.ts";
+import type { Source, Checkpoint } from "../types.ts";
+import type { BalanceChange, ProcessedCheckpoint } from "../types.ts";
 
 export interface ArchiveSourceConfig {
   /** Archive base URL */
@@ -37,7 +25,7 @@ export interface ArchiveSourceConfig {
   workers?: number;
   /** Coin types for archive balance computation (null = disabled) */
   balanceCoinTypes?: string[] | "*";
-  /** When true, workers may return preprocessed Rust binary rows instead of checkpoint JSON. */
+  /** Legacy no-op: archive worker mode is now chosen from native decoder availability. */
   useBinaryPreprocessing?: boolean;
   /** Enabled processor set used to filter worker-preprocessed rows. */
   enabledProcessors?: {
@@ -100,11 +88,9 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
       const fetchConcurrency = config.concurrency ?? 50;
       const workerCount = config.workers ?? Math.max(1, Math.min(4, (navigator.hardwareConcurrency ?? 4) - 1));
       const balanceCoinTypes = config.balanceCoinTypes;
-      const useBinaryPreprocessing = !!config.useBinaryPreprocessing;
 
       decoderPool = createCheckpointDecoderPool(workerCount, {
         balanceCoinTypes,
-        useBinaryPreprocessing,
       });
       log.info({ workers: workerCount, fetchConcurrency, from: config.from.toString() }, "archive source starting");
 
@@ -127,59 +113,20 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
 
       log.info({ from: config.from.toString(), to: to.toString(), total: (to - config.from + 1n).toString() }, "backfill range");
 
-      // -----------------------------------------------------------------------
-      // Streaming pipeline: fetch + decode concurrently, yield in order
-      // -----------------------------------------------------------------------
-
       const pool = decoderPool;
+      const concurrencyPerWorker = Math.max(1, Math.ceil(fetchConcurrency / workerCount));
       const pending = new Map<bigint, Checkpoint>();
-      let watermark = config.from - 1n; // last yielded checkpoint
-      let nextToFetch = config.from;
+      let watermark = config.from - 1n;
       const endSeq = to;
 
-      // Bounded in-flight limit: don't let pending grow unbounded
-      const maxInFlight = fetchConcurrency * 2;
-      let inFlight = 0;
+      let parseTime = 0;
+      let totalProcessed = 0;
+      const profilingStart = performance.now();
 
-      // Promise-based signaling for the drain loop
-      let drainResolve: (() => void) | null = null;
-
-      function signalDrain() {
-        if (drainResolve) {
-          const resolve = drainResolve;
-          drainResolve = null;
-          resolve();
-        }
-      }
-
-      function waitForDrain(): Promise<void> {
-        return new Promise(resolve => { drainResolve = resolve; });
-      }
-
-      // Backpressure: wait until in-flight drops below limit
-      let backpressureResolve: (() => void) | null = null;
-
-      function signalBackpressure() {
-        if (backpressureResolve && inFlight < maxInFlight) {
-          const resolve = backpressureResolve;
-          backpressureResolve = null;
-          resolve();
-        }
-      }
-
-      function waitForBackpressure(): Promise<void> {
-        if (inFlight < maxInFlight) return Promise.resolve();
-        return new Promise(resolve => { backpressureResolve = resolve; });
-      }
-
-      // Launch a single fetch+decode+process job
-      async function processCheckpoint(seq: bigint): Promise<void> {
-        try {
-          const compressed = await fetchDirect(seq, config.archiveUrl);
-          if (stopped) return;
-
-          const result = await pool.decode(seq, compressed);
-          if (stopped) return;
+      try {
+        for await (const result of pool.stream(config.from, endSeq, config.archiveUrl, concurrencyPerWorker)) {
+          if (stopped) break;
+          const parseStart = performance.now();
 
           let checkpoint: Checkpoint;
           if (result.binary) {
@@ -198,55 +145,46 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
               result.payload.precomputedBalanceChanges,
             );
           } else {
-            throw new Error(`Checkpoint ${seq} decode returned no payload`);
+            throw new Error(`Checkpoint ${result.seq} decode returned no payload`);
           }
-          pending.set(seq, checkpoint);
-        } catch (error) {
-          log.error({ checkpoint: seq.toString(), error }, "failed to fetch/decode checkpoint");
-        } finally {
-          inFlight--;
-          signalDrain();
-          signalBackpressure();
+
+          parseTime += performance.now() - parseStart;
+          totalProcessed += 1;
+
+          if (totalProcessed > 0 && totalProcessed % 5000 === 0) {
+            const elapsed = (performance.now() - profilingStart) / 1000;
+            const rate = Math.round(totalProcessed / Math.max(elapsed, 0.001));
+            const avgParse = (parseTime / totalProcessed).toFixed(2);
+            console.error(
+              `[archive-main] ${totalProcessed} checkpoints ${rate} checkpoint/s avg_parse=${avgParse}ms pending=${pending.size}`,
+            );
+          }
+
+          pending.set(result.seq, checkpoint);
+          while (pending.has(watermark + 1n)) {
+            watermark += 1n;
+            const ready = pending.get(watermark)!;
+            pending.delete(watermark);
+            yield ready;
+          }
+        }
+      } finally {
+        if (decoderPool) {
+          decoderPool.shutdown();
+          decoderPool = null;
         }
       }
 
-      // Fetcher: continuously dispatch fetch+decode jobs with concurrency control
-      let fetcherDone = false;
-      const fetcherPromise = (async () => {
-        while (nextToFetch <= endSeq && !stopped) {
-          await waitForBackpressure();
-          if (stopped) break;
-
-          const seq = nextToFetch++;
-          inFlight++;
-          // Fire and forget — result lands in pending map
-          processCheckpoint(seq);
-        }
-        fetcherDone = true;
-        signalDrain(); // Wake drain loop in case it's waiting
-      })();
-
-      // Drain: yield checkpoints in strict sequential order
-      while (watermark < endSeq && !stopped) {
-        // Yield all contiguous checkpoints from the pending map
-        while (pending.has(watermark + 1n)) {
-          watermark++;
-          const checkpoint = pending.get(watermark)!;
-          pending.delete(watermark);
-          yield checkpoint;
-        }
-
-        // If fetcher is done and nothing pending, we're finished
-        if (fetcherDone && inFlight === 0 && !pending.has(watermark + 1n)) {
-          break;
-        }
-
-        // Wait for the next decoded checkpoint to arrive
-        await waitForDrain();
+      if (!stopped && watermark < endSeq) {
+        log.warn(
+          {
+            nextExpected: (watermark + 1n).toString(),
+            end: endSeq.toString(),
+            pending: pending.size,
+          },
+          "archive stream ended before yielding the full requested range",
+        );
       }
-
-      // Ensure fetcher completes
-      await fetcherPromise;
     },
 
     async stop(): Promise<void> {
