@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 use sui_types::balance_change::derive_balance_changes_2;
 use sui_types::base_types::{ObjectID, SequenceNumber, SuiAddress};
 use sui_types::full_checkpoint_content::ObjectSet;
+use sui_types::storage::ObjectKey;
 use sui_types::effects::{
     IDOperation, TransactionEffects,
     TransactionEffectsAPI, TransactionEvents,
@@ -326,7 +327,7 @@ pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<(ExtractedCheckpoi
     let mut unchanged_consensus_objects = Vec::new();
     let mut balance_changes = Vec::new();
 
-    // Build ObjectSet from proto objects for derive_balance_changes_2
+    // Build ObjectSet from proto objects (shared by balance changes + object type lookups)
     let mut object_set = ObjectSet::default();
     for obj in &parsed.objects {
         if let Ok(decoded) = bcs::from_bytes::<Object>(obj.bcs) {
@@ -396,7 +397,7 @@ pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<(ExtractedCheckpoi
         }
 
         if let Some(fx) = effects.as_ref() {
-            object_changes.extend(extract_object_changes(&tx_context, fx));
+            object_changes.extend(extract_object_changes(&tx_context, fx, &object_set));
             dependencies.extend(extract_dependencies(&tx_context, fx));
             unchanged_consensus_objects
                 .extend(extract_unchanged_consensus_objects(&tx_context, fx));
@@ -550,6 +551,7 @@ fn extract_dependencies(
 fn extract_object_changes(
     ctx: &TxContext<'_>,
     effects: &TransactionEffects,
+    object_set: &ObjectSet,
 ) -> Vec<ObjectChangeRecord> {
     let old_metadata: HashMap<ObjectID, Owner> = effects
         .old_object_metadata()
@@ -613,6 +615,11 @@ fn extract_object_changes(
             let (input_owner_value, input_owner_kind) = flatten_owner(input_owner);
             let (output_owner_value, output_owner_kind) = flatten_owner(output_owner);
 
+            let object_type = change.output_version
+                .and_then(|v| object_set.get(&ObjectKey(change.id, v)))
+                .or_else(|| change.input_version.and_then(|v| object_set.get(&ObjectKey(change.id, v))))
+                .and_then(|obj| obj.type_().map(|t| t.to_canonical_string(true)));
+
             ObjectChangeRecord {
                 tx_digest: ctx.digest.to_string(),
                 object_id: change.id.to_string(),
@@ -625,7 +632,7 @@ fn extract_object_changes(
                     &wrapped_ids,
                     &published_ids,
                 ),
-                object_type: None,
+                object_type,
                 input_version: change.input_version.map(sequence_number_to_string),
                 input_digest: change.input_digest.map(|digest| digest.to_string()),
                 input_owner: input_owner_value,

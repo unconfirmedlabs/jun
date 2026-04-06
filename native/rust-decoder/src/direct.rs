@@ -193,11 +193,19 @@ pub fn extract_and_write_binary(
         tx_count += 1;
     }
 
+    // Build ObjectSet from proto objects (shared by object_changes + balance_changes)
+    let mut object_set = sui_types::full_checkpoint_content::ObjectSet::default();
+    for obj in &parsed.objects {
+        if let Ok(decoded) = bcs::from_bytes::<Object>(obj.bcs) {
+            object_set.insert(decoded);
+        }
+    }
+
     // ── Object changes ──
     let mut oc_count = 0u32;
     for tx in &txs {
         let Some(effects) = &tx.effects else { continue };
-        write_object_changes(&mut w, &tx.digest, effects, &summary, &mut oc_count);
+        write_object_changes(&mut w, &tx.digest, effects, &summary, &object_set, &mut oc_count);
     }
 
     // ── Dependencies ──
@@ -379,15 +387,6 @@ pub fn extract_and_write_binary(
     profile.extract_records_ns = t_extract.elapsed().as_nanos() as u64;
 
     let t_balance = Instant::now();
-
-    // Build ObjectSet from proto objects
-    let mut object_set = sui_types::full_checkpoint_content::ObjectSet::default();
-    for obj in &parsed.objects {
-        if let Ok(decoded) = bcs::from_bytes::<Object>(obj.bcs) {
-            object_set.insert(decoded);
-        }
-    }
-
     let mut bal_count = 0u32;
     for tx in &txs {
         let Some(effects) = &tx.effects else { continue };
@@ -500,6 +499,7 @@ fn write_object_changes(
     digest: &str,
     effects: &TransactionEffects,
     summary: &Option<CheckpointSummary>,
+    object_set: &sui_types::full_checkpoint_content::ObjectSet,
     count: &mut u32,
 ) {
     let old_metadata: HashMap<ObjectID, Owner> = effects
@@ -532,7 +532,15 @@ fn write_object_changes(
         let ct = derive_change_type_str(&change, &created_ids, &mutated_ids, &unwrapped_ids, &deleted_ids, &wrapped_ids, &published_ids);
         w.write_str(ct);
 
-        w.write_null(); // object_type
+        // object_type: look up from ObjectSet (output version preferred, fall back to input)
+        let obj_type = change.output_version
+            .and_then(|v| object_set.get(&sui_types::storage::ObjectKey(change.id, v)))
+            .or_else(|| change.input_version.and_then(|v| object_set.get(&sui_types::storage::ObjectKey(change.id, v))))
+            .and_then(|obj| obj.type_().map(|t| t.to_canonical_string(true)));
+        match &obj_type {
+            Some(s) => w.write_str(s),
+            None => w.write_null(),
+        }
 
         // input_version, input_digest
         w.write_opt_u64_dec(change.input_version.map(|v| v.value()));
