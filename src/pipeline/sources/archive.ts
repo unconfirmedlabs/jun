@@ -132,7 +132,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           const parseStart = performance.now();
 
           let checkpoint: Checkpoint;
-          const deferParsing = process.env.DEFER_BINARY_PARSING === "1";
+          const deferParsing = process.env.DEFER_BINARY_PARSING !== "0";
           if (result.binary && deferParsing) {
             // Deferred parsing: read only checkpoint summary from binary header,
             // stash raw binary for SQL writer to parse at flush time.
