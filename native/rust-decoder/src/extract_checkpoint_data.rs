@@ -613,6 +613,9 @@ fn extract_object_changes(
     effects
         .object_changes()
         .into_iter()
+        // Skip entries with no input or output version (e.g. accumulator state changes
+        // that slip through the filter — see docs/checkpoint-data-model.md)
+        .filter(|change| change.input_version.is_some() || change.output_version.is_some())
         .map(|change| {
             let input_owner = old_metadata.get(&change.id);
             let output_owner = new_metadata.get(&change.id);
@@ -1117,11 +1120,6 @@ fn default_summary() -> DecodedSummary {
             non_refundable_storage_fee: "0".to_string(),
         },
     }
-}
-
-/// Public wrapper for direct.rs to call.
-pub fn decode_transaction_data_pub(tx_bcs: &[u8]) -> Option<TransactionData> {
-    decode_transaction_data(tx_bcs)
 }
 
 fn decode_transaction_data(tx_bcs: &[u8]) -> Option<TransactionData> {

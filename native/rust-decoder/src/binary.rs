@@ -1,6 +1,6 @@
-//! Binary output format — zero-allocation writes directly into the FFI output buffer.
+//! Binary output format for FFI — packed records with length-prefixed strings.
 //!
-//! Format: header with record counts, then packed records with length-prefixed strings.
+//! Format: 10 × u32 header (record counts), then packed records.
 //! All integers are little-endian. Strings are UTF-8 with u16 length prefix.
 //! Optional strings use u16::MAX (0xFFFF) as the "null" sentinel.
 
@@ -41,36 +41,6 @@ impl<'a> BinaryWriter<'a> {
     }
 
     #[inline]
-    pub fn begin_string(&mut self) -> usize {
-        let len_pos = self.pos;
-        self.pos += 2;
-        len_pos
-    }
-
-    #[inline]
-    pub fn finish_string(&mut self, len_pos: usize) {
-        let len = self.pos - len_pos - 2;
-        self.buf[len_pos..len_pos + 2].copy_from_slice(&(len as u16).to_le_bytes());
-    }
-
-    #[inline]
-    pub fn write_raw_byte(&mut self, b: u8) {
-        self.buf[self.pos] = b;
-        self.pos += 1;
-    }
-
-    #[inline]
-    pub fn write_raw_bytes(&mut self, bytes: &[u8]) {
-        self.buf[self.pos..self.pos + bytes.len()].copy_from_slice(bytes);
-        self.pos += bytes.len();
-    }
-
-    #[inline]
-    pub fn write_raw_str(&mut self, s: &str) {
-        self.write_raw_bytes(s.as_bytes());
-    }
-
-    #[inline]
     pub fn write_str(&mut self, s: &str) {
         let len = s.len().min(u16::MAX as usize - 1);
         self.write_u16(len as u16);
@@ -95,176 +65,6 @@ impl<'a> BinaryWriter<'a> {
     pub fn write_usize_as_u32(&mut self, v: usize) {
         self.write_u32(v as u32);
     }
-
-    /// Patch a u32 at a previously written position.
-    #[inline]
-    pub fn write_u32_at(&mut self, pos: usize, v: u32) {
-        self.buf[pos..pos + 4].copy_from_slice(&v.to_le_bytes());
-    }
-
-    /// Write null sentinel for an optional string.
-    #[inline]
-    pub fn write_null(&mut self) {
-        self.write_u16(NULL_STR);
-    }
-
-    /// Write a byte slice as "0x"-prefixed hex, length-prefixed.
-    #[inline]
-    pub fn write_hex(&mut self, bytes: &[u8]) {
-        let len = 2 + bytes.len() * 2;
-        self.write_u16(len as u16);
-        self.write_raw_byte(b'0');
-        self.write_raw_byte(b'x');
-        self.write_raw_hex_contents(bytes);
-    }
-
-    #[inline]
-    pub fn write_base58(&mut self, bytes: &[u8]) {
-        let len_pos = self.begin_string();
-        let written = bs58::encode(bytes)
-            .onto(&mut self.buf[self.pos..])
-            .expect("base58 output buffer too small");
-        self.pos += written;
-        self.finish_string(len_pos);
-    }
-
-    #[inline]
-    pub fn write_0x_hex(&mut self, bytes: &[u8]) {
-        let len = 2 + bytes.len() * 2;
-        self.write_u16(len as u16);
-        self.write_raw_byte(b'0');
-        self.write_raw_byte(b'x');
-        self.write_raw_hex_contents(bytes);
-    }
-
-    #[inline]
-    pub fn write_raw_hex_contents(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.buf[self.pos] = HEX_CHARS[(b >> 4) as usize];
-            self.buf[self.pos + 1] = HEX_CHARS[(b & 0x0f) as usize];
-            self.pos += 2;
-        }
-    }
-
-    /// Write an optional byte slice as hex, or null.
-    #[inline]
-    #[allow(dead_code)]
-    pub fn write_opt_hex(&mut self, bytes: Option<&[u8]>) {
-        match bytes {
-            Some(b) => self.write_hex(b),
-            None => self.write_null(),
-        }
-    }
-
-    /// Write u64 as decimal string, length-prefixed.
-    #[inline]
-    pub fn write_u64_dec(&mut self, v: u64) {
-        // Max u64 is 20 digits. Write to a small stack buffer.
-        let mut tmp = [0u8; 20];
-        let s = format_u64(v, &mut tmp);
-        self.write_str(s);
-    }
-
-    /// Write i128 as decimal string, length-prefixed.
-    #[inline]
-    #[allow(dead_code)]
-    pub fn write_i128_dec(&mut self, v: i128) {
-        let mut tmp = [0u8; 40];
-        let s = format_i128(v, &mut tmp);
-        self.write_str(s);
-    }
-
-    /// Write an optional u64 as decimal, or null.
-    #[inline]
-    pub fn write_opt_u64_dec(&mut self, v: Option<u64>) {
-        match v {
-            Some(n) => self.write_u64_dec(n),
-            None => self.write_null(),
-        }
-    }
-
-    /// Write Display impl as a length-prefixed string.
-    #[inline]
-    pub fn write_display<T: std::fmt::Display>(&mut self, v: &T) {
-        let len_pos = self.pos;
-        self.pos += 2;
-        let start = self.pos;
-        self.write_raw_display(v);
-        let len = self.pos - start;
-        self.buf[len_pos..len_pos + 2].copy_from_slice(&(len as u16).to_le_bytes());
-    }
-
-    /// Write Display impl into the current string without adding a length prefix.
-    #[inline]
-    pub fn write_raw_display<T: std::fmt::Display>(&mut self, v: &T) {
-        use std::fmt::Write;
-        let mut writer = BufWriter {
-            buf: self.buf,
-            pos: self.pos,
-        };
-        let _ = write!(writer, "{}", v);
-        self.pos = writer.pos;
-    }
-
-    /// Write an empty string (length 0).
-    #[inline]
-    pub fn write_empty_str(&mut self) {
-        self.write_u16(0);
-    }
-}
-
-static HEX_CHARS: [u8; 16] = *b"0123456789abcdef";
-
-struct BufWriter<'a> {
-    buf: &'a mut [u8],
-    pos: usize,
-}
-
-impl<'a> std::fmt::Write for BufWriter<'a> {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        let bytes = s.as_bytes();
-        self.buf[self.pos..self.pos + bytes.len()].copy_from_slice(bytes);
-        self.pos += bytes.len();
-        Ok(())
-    }
-}
-
-fn format_u64(v: u64, buf: &mut [u8; 20]) -> &str {
-    if v == 0 {
-        return "0";
-    }
-    let mut n = v;
-    let mut i = 20;
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    unsafe { std::str::from_utf8_unchecked(&buf[i..]) }
-}
-
-#[allow(dead_code)]
-fn format_i128(v: i128, buf: &mut [u8; 40]) -> &str {
-    if v == 0 {
-        return "0";
-    }
-    let negative = v < 0;
-    let mut n = if negative {
-        (v as i128).unsigned_abs()
-    } else {
-        v as u128
-    };
-    let mut i = 40;
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    if negative {
-        i -= 1;
-        buf[i] = b'-';
-    }
-    unsafe { std::str::from_utf8_unchecked(&buf[i..]) }
 }
 
 /// Serialize an ExtractedCheckpoint into the binary format.
@@ -421,19 +221,18 @@ pub fn write_binary(checkpoint: &ExtractedCheckpoint, output: &mut [u8]) -> usiz
         w.write_usize_as_u32(ev.event_seq);
         w.write_str(&ev.sender);
         w.write_str(&ev.timestamp);
-        // event data as JSON string (events have user-defined schemas)
         let data_json = serde_json::to_string(&ev.data).unwrap_or_default();
         w.write_str(&data_json);
     }
 
     // Balance changes
-    for balance_change in &checkpoint.balance_changes {
-        w.write_str(&balance_change.tx_digest);
-        w.write_str(&balance_change.checkpoint_seq);
-        w.write_str(&balance_change.address);
-        w.write_str(&balance_change.coin_type);
-        w.write_str(&balance_change.amount);
-        w.write_str(&balance_change.timestamp);
+    for bc in &checkpoint.balance_changes {
+        w.write_str(&bc.tx_digest);
+        w.write_str(&bc.checkpoint_seq);
+        w.write_str(&bc.address);
+        w.write_str(&bc.coin_type);
+        w.write_str(&bc.amount);
+        w.write_str(&bc.timestamp);
     }
 
     w.position()
