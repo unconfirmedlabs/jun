@@ -2703,11 +2703,10 @@ name = "jun-checkpoint-decoder"
 version = "0.1.0"
 dependencies = [
  "bcs",
- "reqwest",
+ "bs58 0.5.1",
  "serde",
  "serde_json",
  "sui-types",
- "tokio",
  "zstd",
 ]
 

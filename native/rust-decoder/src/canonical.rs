@@ -1229,7 +1229,6 @@ fn timestamp_from_millis(ms: u64) -> CanonicalTimestamp {
     }
 }
 
-
 fn hex_string(bytes: &[u8]) -> String {
     format!(
         "0x{}",

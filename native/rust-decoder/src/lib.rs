@@ -7,6 +7,7 @@
 
 use std::io::Read;
 
+mod bcs_reader;
 mod binary;
 mod canonical;
 mod direct;
@@ -180,8 +181,14 @@ struct ProfileAccumulator {
 
 impl ProfileAccumulator {
     fn print_and_reset(&mut self) {
-        let total = self.zstd_ns + self.proto_ns + self.bcs_effects_ns + self.bcs_tx_data_ns
-            + self.bcs_events_ns + self.extract_ns + self.balance_ns + self.binary_write_ns;
+        let total = self.zstd_ns
+            + self.proto_ns
+            + self.bcs_effects_ns
+            + self.bcs_tx_data_ns
+            + self.bcs_events_ns
+            + self.extract_ns
+            + self.balance_ns
+            + self.binary_write_ns;
         let pct = |v: u64| -> f64 { v as f64 / total as f64 * 100.0 };
         let avg_us = |v: u64| -> f64 { v as f64 / self.count as f64 / 1000.0 };
         eprintln!(

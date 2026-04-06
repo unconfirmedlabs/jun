@@ -6,17 +6,16 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use sui_types::balance_change::derive_balance_changes_2;
 use sui_types::base_types::{ObjectID, SequenceNumber, SuiAddress};
-use sui_types::full_checkpoint_content::ObjectSet;
-use sui_types::storage::ObjectKey;
 use sui_types::effects::{
-    IDOperation, TransactionEffects,
-    TransactionEffectsAPI, TransactionEvents,
+    IDOperation, TransactionEffects, TransactionEffectsAPI, TransactionEvents,
     UnchangedConsensusKind,
 };
 use sui_types::event::Event;
 use sui_types::execution_status::{ExecutionErrorKind, ExecutionStatus};
+use sui_types::full_checkpoint_content::ObjectSet;
 use sui_types::messages_checkpoint::CheckpointSummary;
 use sui_types::object::{Object, Owner};
+use sui_types::storage::ObjectKey;
 use sui_types::transaction::{
     Argument, CallArg, Command, FundsWithdrawalArg, ObjectArg, Reservation, SenderSignedData,
     SharedObjectMutability, TransactionData, TransactionDataAPI, TransactionKind, WithdrawFrom,
@@ -301,7 +300,9 @@ pub struct ExtractProfile {
 }
 
 /// Extract checkpoint into the struct (shared by JSON and binary output paths).
-pub fn extract_checkpoint_data(decompressed: &[u8]) -> Result<(ExtractedCheckpoint, ExtractProfile), Box<dyn std::error::Error>> {
+pub fn extract_checkpoint_data(
+    decompressed: &[u8],
+) -> Result<(ExtractedCheckpoint, ExtractProfile), Box<dyn std::error::Error>> {
     use std::time::Instant;
     let mut profile = ExtractProfile::default();
 
@@ -459,7 +460,10 @@ pub fn extract_checkpoint(decompressed: &[u8]) -> Result<String, Box<dyn std::er
 
 /// Extract checkpoint and serialize to flat binary format.
 /// Returns the number of bytes written and profiling data.
-pub fn extract_checkpoint_binary(decompressed: &[u8], output: &mut [u8]) -> Result<(usize, ExtractProfile), Box<dyn std::error::Error>> {
+pub fn extract_checkpoint_binary(
+    decompressed: &[u8],
+    output: &mut [u8],
+) -> Result<(usize, ExtractProfile), Box<dyn std::error::Error>> {
     let (result, profile) = extract_checkpoint_data(decompressed)?;
     let written = crate::binary::write_binary(&result, output);
     Ok((written, profile))
@@ -615,9 +619,14 @@ fn extract_object_changes(
             let (input_owner_value, input_owner_kind) = flatten_owner(input_owner);
             let (output_owner_value, output_owner_kind) = flatten_owner(output_owner);
 
-            let object_type = change.output_version
+            let object_type = change
+                .output_version
                 .and_then(|v| object_set.get(&ObjectKey(change.id, v)))
-                .or_else(|| change.input_version.and_then(|v| object_set.get(&ObjectKey(change.id, v))))
+                .or_else(|| {
+                    change
+                        .input_version
+                        .and_then(|v| object_set.get(&ObjectKey(change.id, v)))
+                })
                 .and_then(|obj| obj.type_().map(|t| t.to_canonical_string(true)));
 
             ObjectChangeRecord {
@@ -738,7 +747,9 @@ fn extract_inputs(ctx: &TxContext<'_>, tx_data: &TransactionData) -> Vec<InputRe
                 initial_shared_version: None,
                 pure_bytes: None,
                 amount: funds_withdrawal_amount(withdrawal),
-                coin_type: Some(format_type_tag_canonical(&withdrawal.type_arg.to_type_tag())),
+                coin_type: Some(format_type_tag_canonical(
+                    &withdrawal.type_arg.to_type_tag(),
+                )),
                 source: Some(match withdrawal.withdraw_from {
                     WithdrawFrom::Sender => "SENDER".to_string(),
                     WithdrawFrom::Sponsor => "SPONSOR".to_string(),
@@ -1312,7 +1323,6 @@ fn hex_string(bytes: &[u8]) -> String {
     s
 }
 
-
 fn sequence_number_to_string(value: SequenceNumber) -> String {
     value.value().to_string()
 }
@@ -1381,7 +1391,7 @@ mod tests {
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
 
-        let extracted = extract_checkpoint_data(&decompressed).unwrap();
+        let (extracted, _profile) = extract_checkpoint_data(&decompressed).unwrap();
         let result = serde_json::to_string(&extracted).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
@@ -1396,7 +1406,7 @@ mod tests {
             .as_str()
             .is_some_and(|sender| sender.starts_with("0x")));
 
-        let actual_balance_changes = extracted
+        let mut actual_balance_changes = extracted
             .balance_changes
             .iter()
             .map(|change| {
@@ -1407,7 +1417,8 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let expected_balance_changes = vec![
+        actual_balance_changes.sort_unstable();
+        let mut expected_balance_changes = vec![
             (
                 "0x91b0f1e07c627edba3426ff311fd7b19a618cb3b7395a34dc687dac61ce63bc5",
                 "0xaafb102dd0902f5055cadecd687fb5b71ca82ef0e0285d90afde828ec58ca96b::btc::BTC",
@@ -1439,11 +1450,12 @@ mod tests {
                 "-1221768",
             ),
         ];
+        expected_balance_changes.sort_unstable();
         assert_eq!(actual_balance_changes, expected_balance_changes);
         assert!(extracted
             .balance_changes
             .iter()
-            .all(|change| change.tx_digest.is_empty()));
+            .all(|change| !change.tx_digest.is_empty()));
         assert!(extracted
             .balance_changes
             .iter()

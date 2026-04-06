@@ -41,6 +41,36 @@ impl<'a> BinaryWriter<'a> {
     }
 
     #[inline]
+    pub fn begin_string(&mut self) -> usize {
+        let len_pos = self.pos;
+        self.pos += 2;
+        len_pos
+    }
+
+    #[inline]
+    pub fn finish_string(&mut self, len_pos: usize) {
+        let len = self.pos - len_pos - 2;
+        self.buf[len_pos..len_pos + 2].copy_from_slice(&(len as u16).to_le_bytes());
+    }
+
+    #[inline]
+    pub fn write_raw_byte(&mut self, b: u8) {
+        self.buf[self.pos] = b;
+        self.pos += 1;
+    }
+
+    #[inline]
+    pub fn write_raw_bytes(&mut self, bytes: &[u8]) {
+        self.buf[self.pos..self.pos + bytes.len()].copy_from_slice(bytes);
+        self.pos += bytes.len();
+    }
+
+    #[inline]
+    pub fn write_raw_str(&mut self, s: &str) {
+        self.write_raw_bytes(s.as_bytes());
+    }
+
+    #[inline]
     pub fn write_str(&mut self, s: &str) {
         let len = s.len().min(u16::MAX as usize - 1);
         self.write_u16(len as u16);
@@ -83,9 +113,32 @@ impl<'a> BinaryWriter<'a> {
     pub fn write_hex(&mut self, bytes: &[u8]) {
         let len = 2 + bytes.len() * 2;
         self.write_u16(len as u16);
-        self.buf[self.pos] = b'0';
-        self.buf[self.pos + 1] = b'x';
-        self.pos += 2;
+        self.write_raw_byte(b'0');
+        self.write_raw_byte(b'x');
+        self.write_raw_hex_contents(bytes);
+    }
+
+    #[inline]
+    pub fn write_base58(&mut self, bytes: &[u8]) {
+        let len_pos = self.begin_string();
+        let written = bs58::encode(bytes)
+            .onto(&mut self.buf[self.pos..])
+            .expect("base58 output buffer too small");
+        self.pos += written;
+        self.finish_string(len_pos);
+    }
+
+    #[inline]
+    pub fn write_0x_hex(&mut self, bytes: &[u8]) {
+        let len = 2 + bytes.len() * 2;
+        self.write_u16(len as u16);
+        self.write_raw_byte(b'0');
+        self.write_raw_byte(b'x');
+        self.write_raw_hex_contents(bytes);
+    }
+
+    #[inline]
+    pub fn write_raw_hex_contents(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.buf[self.pos] = HEX_CHARS[(b >> 4) as usize];
             self.buf[self.pos + 1] = HEX_CHARS[(b & 0x0f) as usize];
@@ -139,7 +192,10 @@ impl<'a> BinaryWriter<'a> {
         self.pos += 2;
         let start = self.pos;
         // Write into a wrapper that writes directly to the buffer
-        let mut writer = BufWriter { buf: self.buf, pos: self.pos };
+        let mut writer = BufWriter {
+            buf: self.buf,
+            pos: self.pos,
+        };
         let _ = write!(writer, "{}", v);
         self.pos = writer.pos;
         let len = self.pos - start;
@@ -189,7 +245,11 @@ fn format_i128(v: i128, buf: &mut [u8; 40]) -> &str {
         return "0";
     }
     let negative = v < 0;
-    let mut n = if negative { (v as i128).unsigned_abs() } else { v as u128 };
+    let mut n = if negative {
+        (v as i128).unsigned_abs()
+    } else {
+        v as u128
+    };
     let mut i = 40;
     while n > 0 {
         i -= 1;
