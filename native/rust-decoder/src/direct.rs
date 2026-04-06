@@ -34,6 +34,14 @@ use crate::binary::BinaryWriter;
 use crate::extract::ExtractProfile;
 use crate::proto;
 
+fn use_bcs_fast_path() -> bool {
+    BCS_FAST_PATH.with(|v| *v)
+}
+
+thread_local! {
+    static BCS_FAST_PATH: bool = std::env::var("JUN_BCS_FAST_PATH").map(|v| v != "0").unwrap_or(false);
+}
+
 /// Pre-parsed transaction data for a single executed transaction.
 enum ParsedEffects<'a> {
     Fast(EffectsExtract<'a>),
@@ -78,27 +86,38 @@ pub fn extract_and_write_binary(
     for ptx in &parsed.transactions {
         let t1 = Instant::now();
         let effects = ptx.effects_bcs.and_then(|bytes| {
-            bcs_reader::parse_effects(bytes)
-                .map(ParsedEffects::Fast)
-                .or_else(|_| {
-                    bcs::from_bytes::<TransactionEffects>(bytes)
-                        .map(ParsedEffects::Full)
-                        .map_err(|_| "effects")
-                })
-                .ok()
+            if use_bcs_fast_path() {
+                bcs_reader::parse_effects(bytes)
+                    .map(ParsedEffects::Fast)
+                    .or_else(|_| {
+                        bcs::from_bytes::<TransactionEffects>(bytes)
+                            .map(ParsedEffects::Full)
+                            .map_err(|_| "effects")
+                    })
+                    .ok()
+            } else {
+                bcs::from_bytes::<TransactionEffects>(bytes)
+                    .map(ParsedEffects::Full)
+                    .ok()
+            }
         });
         profile.bcs_effects_ns += t1.elapsed().as_nanos() as u64;
 
         let t2 = Instant::now();
         let tx_data = ptx.transaction_bcs.and_then(|bytes| {
-            bcs_reader::parse_tx_data(bytes)
-                .map(ParsedTxData::Fast)
-                .or_else(|_| {
-                    crate::extract::decode_transaction_data_pub(bytes)
-                        .map(ParsedTxData::Full)
-                        .ok_or("tx")
-                })
-                .ok()
+            if use_bcs_fast_path() {
+                bcs_reader::parse_tx_data(bytes)
+                    .map(ParsedTxData::Fast)
+                    .or_else(|_| {
+                        crate::extract::decode_transaction_data_pub(bytes)
+                            .map(ParsedTxData::Full)
+                            .ok_or("tx")
+                    })
+                    .ok()
+            } else {
+                crate::extract::decode_transaction_data_pub(bytes)
+                    .map(ParsedTxData::Full)
+            }
         });
         profile.bcs_tx_data_ns += t2.elapsed().as_nanos() as u64;
 
