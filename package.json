@@ -28,7 +28,6 @@
     "jun": "./src/cli.ts"
   },
   "scripts": {
-    "postinstall": "bun scripts/fetch-protos.ts",
     "test": "bun test"
   },
   "devDependencies": {
