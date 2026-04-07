@@ -1990,8 +1990,10 @@ function maskToTableNames(mask: number, ExtractMask: any): string[] {
 
 addTableFlags(indexCmd
   .command("replay-chain")
-  .description("Backfill structural chain data from archive to per-table SQLite files")
+  .description("Backfill structural chain data from archive to per-table SQLite files or ClickHouse")
   .option("--output <dir>", "output directory for per-table SQLite files")
+  .option("--clickhouse <url>", "ClickHouse HTTP URL (e.g. http://localhost:8123)")
+  .option("--clickhouse-database <db>", "ClickHouse database name", "jun")
   .option("--epoch <number>", "backfill a completed epoch")
   .option("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
@@ -2062,11 +2064,19 @@ addTableFlags(indexCmd
       to = opts.to ? BigInt(opts.to) : undefined;
     }
 
-    const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./replay-chain");
-    const storage = createPerTableSqliteStorage(outputDir, mask);
-
     const pipeline = createPipeline();
-    pipeline.storage(storage);
+
+    if (opts.clickhouse) {
+      const { createClickHouseStorage } = await import("./pipeline/destinations/clickhouse.ts");
+      pipeline.storage(createClickHouseStorage({
+        url: opts.clickhouse,
+        database: opts.clickhouseDatabase ?? "jun",
+      }));
+    } else {
+      const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./replay-chain");
+      pipeline.storage(createPerTableSqliteStorage(outputDir, mask));
+      if (!opts.quiet) console.error(`  output          ${outputDir}`);
+    }
     pipeline.source(createArchiveSource({
       archiveUrl,
       from,
@@ -2099,7 +2109,7 @@ addTableFlags(indexCmd
       if (opts.epoch) console.error(`  epoch           ${opts.epoch}`);
       if (to) console.error(`  checkpoints     ${from} → ${to} (${(to - from + 1n).toLocaleString()})`);
       console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
-      console.error(`  output          ${outputDir}`);
+      if (opts.clickhouse) console.error(`  clickhouse      ${opts.clickhouse} / ${opts.clickhouseDatabase ?? "jun"}`);
       console.error(`  concurrency     ${opts.concurrency ?? 200}`);
       if (opts.workers) console.error(`  workers         ${opts.workers}`);
       console.error("");

@@ -5,6 +5,7 @@
     "": {
       "name": "jun",
       "dependencies": {
+        "@clickhouse/client": "^1.18.2",
         "@grpc/grpc-js": "^1.14.3",
         "@grpc/proto-loader": "^0.8.0",
         "@modelcontextprotocol/sdk": "^1.28.0",
@@ -12,11 +13,8 @@
         "@mysten/sui": "^2.13.4",
         "@noble/curves": "^1.9.0",
         "@noble/hashes": "^1.7.0",
-        "@unconfirmed/bcs": "file:../bcs",
         "@unconfirmed/kei": "0.0.9",
-        "@unconfirmed/sui-bcs": "file:../sui-bcs",
         "commander": "^14.0.3",
-        "fzstd": "^0.1.1",
         "js-yaml": "^4.1.1",
         "nats": "^2.29.3",
         "p-map": "^7.0.4",
@@ -38,6 +36,10 @@
     "@0no-co/graphql.web": ["@0no-co/graphql.web@1.2.0", "", { "peerDependencies": { "graphql": "^14.0.0 || ^15.0.0 || ^16.0.0" }, "optionalPeers": ["graphql"] }, "sha512-/1iHy9TTr63gE1YcR5idjx8UREz1s0kFhydf3bBLCXyqjhkIc6igAzTOx3zPifCwFR87tsh/4Pa9cNts6d2otw=="],
 
     "@0no-co/graphqlsp": ["@0no-co/graphqlsp@1.15.2", "", { "dependencies": { "@gql.tada/internal": "^1.0.0", "graphql": "^15.5.0 || ^16.0.0 || ^17.0.0" }, "peerDependencies": { "typescript": "^5.0.0" } }, "sha512-Ys031WnS3sTQQBtRTkQsYnw372OlW72ais4sp0oh2UMPRNyxxnq85zRfU4PIdoy9kWriysPT5BYAkgIxhbonFA=="],
+
+    "@clickhouse/client": ["@clickhouse/client@1.18.2", "", { "dependencies": { "@clickhouse/client-common": "1.18.2" } }, "sha512-fuquQswRSHWM6D079ZeuGqkMOsqtcUPL06UdTnowmoeeYjVrqisfVmvnw8pc3OeKS4kVb91oygb/MfLDiMs0TQ=="],
+
+    "@clickhouse/client-common": ["@clickhouse/client-common@1.18.2", "", {}, "sha512-J0SG6q9V31ydxonglpj9xhNRsUxCsF71iEZ784yldqMYwsHixj/9xHFDgBDX3DuMiDx/kPDfXnf+pimp08wIBA=="],
 
     "@gql.tada/cli-utils": ["@gql.tada/cli-utils@1.7.2", "", { "dependencies": { "@0no-co/graphqlsp": "^1.12.13", "@gql.tada/internal": "1.0.8", "graphql": "^15.5.0 || ^16.0.0 || ^17.0.0" }, "peerDependencies": { "@gql.tada/svelte-support": "1.0.1", "@gql.tada/vue-support": "1.0.1", "typescript": "^5.0.0" }, "optionalPeers": ["@gql.tada/svelte-support", "@gql.tada/vue-support"] }, "sha512-Qbc7hbLvCz6IliIJpJuKJa9p05b2Jona7ov7+qofCsMRxHRZE1kpAmZMvL8JCI4c0IagpIlWNaMizXEQUe8XjQ=="],
 
@@ -105,11 +107,7 @@
 
     "@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, ""],
 
-    "@unconfirmed/bcs": ["@unconfirmed/bcs@file:../bcs", { "devDependencies": { "@mysten/bcs": "^2.0.3", "@types/bun": "latest" }, "peerDependencies": { "typescript": "^5" } }],
-
     "@unconfirmed/kei": ["@unconfirmed/kei@0.0.9", "", { "dependencies": { "@mysten/bcs": "^1.3.0", "@noble/curves": "^1.9.0", "@noble/hashes": "^1.7.0" } }, "sha512-3D6SzqCpEt/f+4hTFGy4Ihh8k22ctg8yv0e+C5bZASAZ+ApgjuxUwio/BOFxk867otE8G8UOJsIPV5kDkeu1tQ=="],
-
-    "@unconfirmed/sui-bcs": ["@unconfirmed/sui-bcs@file:../sui-bcs", { "dependencies": { "@unconfirmed/bcs": "^1.0.0" }, "devDependencies": { "@types/bun": "latest", "typescript": "^5.9.3" }, "peerDependencies": { "typescript": "^5" } }],
 
     "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
 
@@ -208,8 +206,6 @@
     "fresh": ["fresh@2.0.0", "", {}, "sha512-Rx/WycZ60HOaqLKAi6cHRKKI7zxWbJ31MhntmtwMoaTeF7XFH9hhBp8vITaMidfljRQ6eYWCKkaTK+ykVJHP2A=="],
 
     "function-bind": ["function-bind@1.1.2", "", {}, "sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA=="],
-
-    "fzstd": ["fzstd@0.1.1", "", {}, "sha512-dkuVSOKKwh3eas5VkJy1AW1vFpet8TA/fGmVA5krThl8YcOVE/8ZIoEA1+U1vEn5ckxxhLirSdY837azmbaNHA=="],
 
     "get-caller-file": ["get-caller-file@2.0.5", "", {}, ""],
 
@@ -426,8 +422,6 @@
     "@unconfirmed/kei/@mysten/bcs": ["@mysten/bcs@1.9.2", "", { "dependencies": { "@mysten/utils": "0.2.0", "@scure/base": "^1.2.6" } }, "sha512-kBk5xrxV9OWR7i+JhL/plQrgQ2/KJhB2pB5gj+w6GXhbMQwS3DPpOvi/zN0Tj84jwPvHMllpEl0QHj6ywN7/eQ=="],
 
     "@unconfirmed/kei/@noble/hashes": ["@noble/hashes@1.8.0", "", {}, ""],
-
-    "@unconfirmed/sui-bcs/@unconfirmed/bcs": ["@unconfirmed/bcs@1.0.0", "", { "peerDependencies": { "typescript": "^5" } }, "sha512-nrQdPx91cmHuMlU6Zyyx8CcpbGnPmQ/fTjkFnDQQ0MG3MLI7287rxMM6SD3ZTRYwsmFCnPg9QoF5Je3Itn2QEQ=="],
 
     "@unconfirmed/kei/@mysten/bcs/@mysten/utils": ["@mysten/utils@0.2.0", "", { "dependencies": { "@scure/base": "^1.2.6" } }, "sha512-CM6kJcJHX365cK6aXfFRLBiuyXc5WSBHQ43t94jqlCAIRw8umgNcTb5EnEA9n31wPAQgLDGgbG/rCUISCTJ66w=="],
 
