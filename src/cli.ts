@@ -2098,7 +2098,7 @@ addTableFlags(indexCmd
       devnet: "https://checkpoints.devnet.sui.io",
     };
     const net = opts.network ?? "mainnet";
-    const grpcUrl = opts.grpcUrl ?? "hayabusa.mainnet.unconfirmed.cloud:443";
+    const grpcUrl = opts.grpcUrl ?? process.env.GRPC_URL ?? "hayabusa.mainnet.unconfirmed.cloud:443";
     const archiveUrl = opts.archiveUrl ?? networkDefaults[net];
 
     let from: bigint;
@@ -2202,7 +2202,7 @@ addTableFlags(indexCmd
     }
 
     const mask = buildExtractMask(opts, ExtractMask);
-    const grpcUrl = opts.grpcUrl ?? "hayabusa.mainnet.unconfirmed.cloud:443";
+    const grpcUrl = opts.grpcUrl ?? process.env.GRPC_URL ?? "hayabusa.mainnet.unconfirmed.cloud:443";
 
     if (opts.log) {
       process.env.LOG_LEVEL = typeof opts.log === "string" ? opts.log : "info";
