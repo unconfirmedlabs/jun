@@ -21,23 +21,17 @@ src/
     write-buffer.ts            Batching + backpressure
     sources/
       grpc.ts                  Live gRPC subscription (native HTTP/2)
-      grpc-web.ts              Browser gRPC-Web source
       archive.ts               Archive backfill (parallel fetch + Rust decode)
-      archive-web.ts           Browser archive backfill (fzstd)
     processors/
       events.ts                BCS event decoding
       balanceChanges.ts        Balance change extraction
       transactionBlocks.ts     Transaction + move call extraction
     destinations/
-      sql.ts                   Unified SQLite/Postgres storage
-      sql-web.ts               Browser sql.js storage
+      clickhouse.ts            ClickHouse analytics storage
+      per-table-sqlite.ts      Per-table SQLite files (one file per table type)
       sse.ts                   Server-Sent Events broadcast
       nats.ts                  NATS broadcast
       stdout.ts                JSONL stdout broadcast
-    writers/
-      sqlite.ts                SQLite WriterChannel (Bun.Worker)
-      sqlite.worker.ts         Worker script for async SQLite writes
-      postgres.ts              Postgres WriterChannel (async queue)
   grpc.ts                      gRPC client (subscribe, getCheckpoint, getEpoch, getDatatype)
   schema.ts                    Field DSL → BCS schemas + DDL generation
   normalize.ts                 Address/type normalization + stripGenerics
@@ -57,100 +51,53 @@ native/
 
 ## CLI
 
-### Pipeline
-
 ```bash
-# Continuous (backfill + live)
-jun pipeline run config.yml
-
-# Snapshot (backfill only, exit when done)
-jun pipeline snapshot \
+# Backfill a completed epoch → per-table SQLite files
+jun index replay-chain \
   --epoch 1080 \
-  --transaction-blocks \
-  --coin-type '*' \
-  --sqlite /tmp/epoch.db \
-  --sqlite-export s3://bucket/mainnet/epoch_1080.db \
-  --sqlite-export-split-datasets \
+  --archive-url https://checkpoints.mainnet.sui.io \
+  --grpc-url hayabusa.mainnet.unconfirmed.cloud:443 \
+  --output ./epoch-1080 \
   --concurrency 300 \
   --workers 24 \
+  --batch-size 1000 \
   --quiet --yes
-```
 
-### CLI Flags (match config keys 1:1)
+# Backfill to ClickHouse
+jun index replay-chain \
+  --from 258828309 --to 258878308 \
+  --clickhouse http://localhost:8123 \
+  --archive-url https://checkpoints.mainnet.sui.io \
+  --grpc-url hayabusa.mainnet.unconfirmed.cloud:443
 
-| Flag | Config Key | Description |
-|------|-----------|-------------|
-| `--grpc-url` | `sources.grpcUrl` | gRPC endpoint |
-| `--archive-url` | `sources.archiveUrl` | Archive base URL |
-| `--epoch` | `sources.epoch` | Backfill completed epoch |
-| `--start-checkpoint` | `sources.startCheckpoint` | Start (inclusive) |
-| `--end-checkpoint` | `sources.endCheckpoint` | End (inclusive) |
-| `--concurrency` | `sources.concurrency` | Archive fetch concurrency |
-| `--workers` | `sources.workers` | Decoder worker threads |
-| `--transaction-blocks` | `processors.transactionBlocks` | Index transactions + move calls |
-| `--coin-type` | `processors.balances.coinTypes` | Balance tracking (repeatable, "*" for all) |
-| `--event-type` | `processors.events.{name}.type` | Event types (repeatable) |
-| `--checkpoints` | `processors.checkpoints` | Index checkpoint summaries (1 row/checkpoint) |
-| `--object-changes` | `processors.objectChanges` | Index per-object state changes from effects |
-| `--dependencies` | `processors.dependencies` | Index transaction dependencies from effects |
-| `--inputs` | `processors.inputs` | Index programmable transaction inputs |
-| `--commands` | `processors.commands` | Index all PTB commands (superset of `move_calls`) |
-| `--system-transactions` | `processors.systemTransactions` | Index non-programmable (system) transactions |
-| `--unchanged-consensus-objects` | `processors.unchangedConsensusObjects` | Index read-only consensus object refs |
-| `--sqlite` | `storage.sqlite` | SQLite output path |
-| `--postgres` | `storage.postgres` | Postgres URL |
-| `--sqlite-export` | `storage.sqliteExport` | VACUUM + upload to S3 |
-| `--sqlite-export-split-datasets` | - | Split export into `transactions`, `balance_changes`, `balances`, and `events` DBs |
-| `--stdout` | `broadcast.stdout` | JSONL stdout |
-| `--sse` | `broadcast.sse` | SSE server port |
-| `--nats` | `broadcast.nats` | NATS URL |
-| `--snapshot` | (command) | `jun pipeline snapshot` = backfill only |
-| `--quiet` | quiet | Suppress stdout (progress bar still shows on stderr) |
-| `--yes` | - | Skip confirmation prompt |
+# Live gRPC stream → broadcast
+jun index stream-chain \
+  --grpc-url hayabusa.mainnet.unconfirmed.cloud:443 \
+  --sse 8080
 
-### Other Commands
-
-```bash
 jun client balance <address>
 jun client object <id>
 jun ns resolve <name>
 jun verify tx <digest>
 ```
 
-## Config Schema (Canonical)
+### replay-chain flags
 
-```yaml
-sources:
-  grpcUrl: "hayabusa.mainnet.unconfirmed.cloud:443"
-  archiveUrl: "https://checkpoints.mainnet.sui.io"
-  epoch: 1080
-  startCheckpoint: 100000
-  endCheckpoint: 200000
-  concurrency: 300
-  workers: 24
-
-processors:
-  transactionBlocks: true
-  balances:
-    coinTypes: "*"
-  events:
-    swaps:
-      type: "0xdee9::clob_v2::OrderPlaced"
-
-storage:
-  sqlite: ./data.db
-  # OR
-  postgres: postgres://localhost/mydb
-
-broadcast:
-  stdout: true
-  sse: 8080
-  nats: nats://localhost:4222
-
-network: mainnet
-```
-
-Legacy config keys (`sources.live.grpc`, `sources.backfill.from`) still work via `normalizeConfig()`.
+| Flag | Description |
+|------|-------------|
+| `--epoch <n>` | Backfill completed epoch (resolves range via gRPC) |
+| `--from / --to` | Explicit checkpoint range |
+| `--archive-url <url>` | Archive base URL (or JUN_ARCHIVE_URL) |
+| `--grpc-url <url>` | gRPC endpoint (or JUN_GRPC_URL) |
+| `--network <name>` | Network name for cache scoping (default: mainnet) |
+| `--output <dir>` | Per-table SQLite output directory |
+| `--clickhouse <url>` | ClickHouse HTTP URL |
+| `--clickhouse-database <db>` | ClickHouse database (default: jun) |
+| `--concurrency <n>` | Archive fetch concurrency (default: 200) |
+| `--workers <n>` | Decoder worker threads (default: auto) |
+| `--batch-size <n>` | Write buffer flush threshold in checkpoints (default: 1000) |
+| `--all` | Index all tables (default) |
+| `--transactions` `--balance-changes` `--object-changes` `--events` etc. | Per-table flags |
 
 ## Processors
 
@@ -201,16 +148,6 @@ Legacy config keys (`sources.live.grpc`, `sources.backfill.from`) still work via
 ### unchanged_consensus_objects
 `tx_digest, object_id, kind, version, digest, object_type, checkpoint_seq, sui_timestamp`
 
-## Snapshot Mode
-
-`jun pipeline snapshot` optimizations:
-- Tables created without PRIMARY KEY/UNIQUE constraints (bulk insert speed)
-- `PRAGMA synchronous=OFF, journal_mode=OFF, locking_mode=EXCLUSIVE`
-- No `ON CONFLICT` checks (sequential checkpoints = no duplicates)
-- Deferred index creation at shutdown
-- Balance materialization at shutdown (skip incremental upserts)
-- Duplicate row dedup before unique index creation
-
 ## Native Rust Decoder
 
 Checkpoint decoding uses a prebuilt Rust library via Bun FFI:
@@ -220,14 +157,6 @@ Checkpoint decoding uses a prebuilt Rust library via Bun FFI:
 - Prebuilt for darwin-arm64, linux-x64
 - Falls back to JS if native lib not available
 - Build: `cd native/rust-decoder && cargo build --release`
-
-## Browser Targets
-
-Jun exports browser-compatible variants:
-- `jun/pipeline/sources/grpc-web` — gRPC-Web via @mysten/sui SuiGrpcClient
-- `jun/pipeline/sources/archive-web` — archive backfill with fzstd
-- `jun/pipeline/destinations/sql-web` — sql.js SQLite WASM
-- `jun/package-reader` — fetch + parse package modules
 
 ## Code Quality
 
