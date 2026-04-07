@@ -2092,14 +2092,14 @@ addTableFlags(indexCmd
     }
 
     const cfg = loadConfig();
-    const grpcUrl = opts.grpcUrl ?? process.env.GRPC_URL ?? cfg.grpcUrl;
+    const grpcUrl = opts.grpcUrl ?? process.env.JUN_GRPC_URL ?? cfg.grpcUrl;
     if (!grpcUrl) {
-      console.error("[jun] error: no gRPC URL configured. Set --grpc-url, GRPC_URL env var, or 'jun config set grpc_url <url>'");
+      console.error("[jun] error: no gRPC URL configured. Set --grpc-url, JUN_GRPC_URL env var, or 'jun config set grpc_url <url>'");
       process.exit(1);
     }
-    const archiveUrl = opts.archiveUrl ?? process.env.ARCHIVE_URL ?? cfg.archiveUrl;
+    const archiveUrl = opts.archiveUrl ?? process.env.JUN_ARCHIVE_URL ?? cfg.archiveUrl;
     if (!archiveUrl) {
-      console.error("[jun] error: no archive URL configured. Set --archive-url, ARCHIVE_URL env var, or 'jun config set archive_url <url>'");
+      console.error("[jun] error: no archive URL configured. Set --archive-url, JUN_ARCHIVE_URL env var, or 'jun config set archive_url <url>'");
       process.exit(1);
     }
 
@@ -2204,9 +2204,9 @@ addTableFlags(indexCmd
 
     const mask = buildExtractMask(opts, ExtractMask);
     const cfg = loadConfig();
-    const grpcUrl = opts.grpcUrl ?? process.env.GRPC_URL ?? cfg.grpcUrl;
+    const grpcUrl = opts.grpcUrl ?? process.env.JUN_GRPC_URL ?? cfg.grpcUrl;
     if (!grpcUrl) {
-      console.error("[jun] error: no gRPC URL configured. Set --grpc-url, GRPC_URL env var, or 'jun config set grpc_url <url>'");
+      console.error("[jun] error: no gRPC URL configured. Set --grpc-url, JUN_GRPC_URL env var, or 'jun config set grpc_url <url>'");
       process.exit(1);
     }
 
@@ -2227,22 +2227,26 @@ addTableFlags(indexCmd
     // Live gRPC source (Rust binary decoder)
     pipeline.source(createGrpcLiveSource({ url: grpcUrl }));
 
-    // Broadcasts
+    // Broadcasts — CLI flags override env vars
+    const natsUrl = opts.nats ?? process.env.JUN_INDEX_NATS_BROADCAST_URL;
+    const ssePort = opts.sse ?? process.env.JUN_INDEX_SSE_BROADCAST_PORT;
+    const sseHost = process.env.JUN_INDEX_SSE_BROADCAST_HOST;
+
     if (opts.stdout) {
       const { createStdoutBroadcast } = await import("./pipeline/destinations/stdout.ts");
       pipeline.broadcast(createStdoutBroadcast());
     }
-    if (opts.sse) {
+    if (ssePort) {
       const { createSseBroadcast } = await import("./pipeline/destinations/sse.ts");
-      pipeline.broadcast(createSseBroadcast({ port: parseInt(opts.sse) }));
+      pipeline.broadcast(createSseBroadcast({ port: parseInt(ssePort), hostname: sseHost }));
     }
-    if (opts.nats) {
+    if (natsUrl) {
       const { createNatsBroadcast } = await import("./pipeline/destinations/nats.ts");
-      pipeline.broadcast(createNatsBroadcast({ url: opts.nats }));
+      pipeline.broadcast(createNatsBroadcast({ url: natsUrl }));
     }
 
-    if (!opts.output && !opts.stdout && !opts.sse && !opts.nats) {
-      console.error("[jun] error: provide at least one output (--output, --stdout, --sse, --nats)");
+    if (!opts.output && !opts.stdout && !ssePort && !natsUrl) {
+      console.error("[jun] error: provide at least one output (--output, --stdout, --sse, --nats, or JUN_INDEX_NATS_BROADCAST_URL / JUN_INDEX_SSE_BROADCAST_PORT env vars)");
       process.exit(1);
     }
 
@@ -2260,8 +2264,8 @@ addTableFlags(indexCmd
       console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
       if (opts.output) console.error(`  output          ${opts.output}`);
       if (opts.stdout) console.error(`  broadcast       stdout`);
-      if (opts.sse) console.error(`  broadcast       SSE :${opts.sse}`);
-      if (opts.nats) console.error(`  broadcast       NATS ${opts.nats}`);
+      if (ssePort) console.error(`  broadcast       SSE :${ssePort}${sseHost ? ` (${sseHost})` : ""}`);
+      if (natsUrl) console.error(`  broadcast       NATS`);
       console.error("");
     }
 
