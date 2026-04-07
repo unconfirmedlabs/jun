@@ -2001,6 +2001,7 @@ addTableFlags(indexCmd
   .option("--archive-url <url>", "archive base URL")
   .option("--concurrency <n>", "archive fetch concurrency", "200")
   .option("--workers <n>", "decoder worker threads")
+  .option("--batch-size <n>", "write buffer flush threshold in checkpoints (default: 1000)")
   .option("--quiet", "suppress human output")
   .option("--yes", "skip confirmation prompt")
   .option("--log [level]", "enable logging to stderr"))
@@ -2099,7 +2100,7 @@ addTableFlags(indexCmd
       quiet: opts.quiet ?? false,
       log: opts.log ?? false,
       totalCheckpoints,
-      buffer: { maxBatchSize: 1000 },
+      buffer: { maxBatchSize: opts.batchSize ? parseInt(opts.batchSize) : 1000 },
     });
 
     if (!opts.quiet) {

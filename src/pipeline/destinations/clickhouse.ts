@@ -540,6 +540,8 @@ export interface ClickHouseStorageOptions {
   username?: string;
   /** Password (default: empty) */
   password?: string;
+  /** Compress INSERT payloads with LZ4 (default: false). Recommended for remote ClickHouse; skip for localhost. */
+  compress?: boolean;
 }
 
 export function createClickHouseStorage(options: ClickHouseStorageOptions = {}): Storage {
@@ -561,6 +563,7 @@ export function createClickHouseStorage(options: ClickHouseStorageOptions = {}):
         database,
         username,
         password,
+        compression: { request: options.compress ?? false },
       });
 
       for (const table of TABLES) {
