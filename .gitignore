@@ -1,8 +1,7 @@
 # dependencies (bun install)
 node_modules
 
-# proto files (fetched via postinstall from MystenLabs/sui-apis)
-proto/
+# proto files — committed in repo (previously fetched via postinstall)
 
 # internal planning docs
 PLAN.md

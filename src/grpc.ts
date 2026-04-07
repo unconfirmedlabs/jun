@@ -53,6 +53,13 @@ const PROTO_LOAD_OPTIONS: protoLoader.Options = {
 };
 
 function loadProto() {
+  const subProtoPath = path.join(PROTO_DIR, "sui/rpc/v2/subscription_service.proto");
+  if (!require("fs").existsSync(subProtoPath)) {
+    console.error(`[jun] error: proto files not found at ${PROTO_DIR}`);
+    console.error("  Run: bun run scripts/fetch-protos.ts");
+    process.exit(1);
+  }
+
   // Subscription service
   const subDef = protoLoader.loadSync(
     path.join(PROTO_DIR, "sui/rpc/v2/subscription_service.proto"),
