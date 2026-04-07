@@ -28,7 +28,7 @@ import type {
 // Table definitions — static, no conditionals
 // ---------------------------------------------------------------------------
 
-interface TableDef {
+export interface TableDef {
   name: string;
   ddl: string;
   columns: string[];
@@ -36,7 +36,7 @@ interface TableDef {
   getRecords: (cp: ProcessedCheckpoint) => any[];
 }
 
-const TABLES: TableDef[] = [
+export const TABLES: TableDef[] = [
   {
     name: "transactions",
     ddl: `
@@ -373,7 +373,7 @@ const TABLE_FILE: Record<string, string> = {
 // ---------------------------------------------------------------------------
 
 // Map table name → ExtractMask bit for filtering
-const TABLE_MASK_BIT: Record<string, number> = {
+export const TABLE_MASK_BIT: Record<string, number> = {
   transactions: 1 << 0,
   move_calls: 1 << 1,
   balance_changes: 1 << 2,

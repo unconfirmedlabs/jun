@@ -1990,10 +1990,14 @@ function maskToTableNames(mask: number, ExtractMask: any): string[] {
 
 addTableFlags(indexCmd
   .command("replay-chain")
-  .description("Backfill structural chain data from archive to per-table SQLite files or ClickHouse")
+  .description("Backfill structural chain data from archive to SQLite, Postgres, or ClickHouse")
   .option("--output <dir>", "output directory for per-table SQLite files")
+  .option("--postgres <url>", "Postgres connection URL")
   .option("--clickhouse <url>", "ClickHouse HTTP URL (e.g. http://localhost:8123)")
   .option("--clickhouse-database <db>", "ClickHouse database name", "jun")
+  .option("--stdout", "broadcast JSONL to stdout")
+  .option("--sse <port>", "broadcast via SSE on port")
+  .option("--nats <url>", "broadcast to NATS")
   .option("--epoch <number>", "backfill a completed epoch")
   .option("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
@@ -2074,11 +2078,33 @@ addTableFlags(indexCmd
         url: opts.clickhouse,
         database: opts.clickhouseDatabase ?? "jun",
       }));
-    } else {
+    }
+    if (opts.postgres) {
+      const { createPerTablePostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
+      pipeline.storage(createPerTablePostgresStorage(opts.postgres, mask));
+    }
+    if (opts.output || (!opts.clickhouse && !opts.postgres)) {
       const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./replay-chain");
       pipeline.storage(createPerTableSqliteStorage(outputDir, mask));
       if (!opts.quiet) console.error(`  output          ${outputDir}`);
     }
+
+    const natsUrl = opts.nats ?? process.env.JUN_INDEX_NATS_BROADCAST_URL;
+    const ssePort = opts.sse ?? process.env.JUN_INDEX_SSE_BROADCAST_PORT;
+    const sseHost = process.env.JUN_INDEX_SSE_BROADCAST_HOST;
+    if (opts.stdout) {
+      const { createStdoutBroadcast } = await import("./pipeline/destinations/stdout.ts");
+      pipeline.broadcast(createStdoutBroadcast());
+    }
+    if (ssePort) {
+      const { createSseBroadcast } = await import("./pipeline/destinations/sse.ts");
+      pipeline.broadcast(createSseBroadcast({ port: parseInt(ssePort), hostname: sseHost }));
+    }
+    if (natsUrl) {
+      const { createNatsBroadcast } = await import("./pipeline/destinations/nats.ts");
+      pipeline.broadcast(createNatsBroadcast({ url: natsUrl }));
+    }
+
     pipeline.source(createArchiveSource({
       archiveUrl,
       network: opts.network ?? "mainnet",
@@ -2113,6 +2139,10 @@ addTableFlags(indexCmd
       if (to) console.error(`  checkpoints     ${from} → ${to} (${(to - from + 1n).toLocaleString()})`);
       console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
       if (opts.clickhouse) console.error(`  clickhouse      ${opts.clickhouse} / ${opts.clickhouseDatabase ?? "jun"}`);
+      if (opts.postgres) console.error(`  postgres        ${opts.postgres}`);
+      if (opts.stdout) console.error(`  broadcast       stdout`);
+      if (ssePort) console.error(`  broadcast       SSE :${ssePort}`);
+      if (natsUrl) console.error(`  broadcast       NATS`);
       console.error(`  concurrency     ${opts.concurrency ?? 200}`);
       if (opts.workers) console.error(`  workers         ${opts.workers}`);
       console.error("");
@@ -2136,8 +2166,11 @@ addTableFlags(indexCmd
 
 addTableFlags(indexCmd
   .command("stream-chain")
-  .description("Stream live chain data via gRPC with broadcast (SSE/NATS/stdout)")
-  .option("--output <dir>", "optional: also write to per-table SQLite files")
+  .description("Stream live chain data via gRPC to storage and/or broadcast")
+  .option("--output <dir>", "write to per-table SQLite files")
+  .option("--postgres <url>", "write to Postgres")
+  .option("--clickhouse <url>", "write to ClickHouse HTTP URL")
+  .option("--clickhouse-database <db>", "ClickHouse database name", "jun")
   .option("--grpc-url <url>", "gRPC endpoint", "hayabusa.mainnet.unconfirmed.cloud:443")
   .option("--stdout", "broadcast JSONL to stdout")
   .option("--sse <port>", "broadcast via SSE on port")
@@ -2175,7 +2208,17 @@ addTableFlags(indexCmd
 
     const pipeline = createPipeline();
 
-    // Optional disk storage
+    if (opts.clickhouse) {
+      const { createClickHouseStorage } = await import("./pipeline/destinations/clickhouse.ts");
+      pipeline.storage(createClickHouseStorage({
+        url: opts.clickhouse,
+        database: opts.clickhouseDatabase ?? "jun",
+      }));
+    }
+    if (opts.postgres) {
+      const { createPerTablePostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
+      pipeline.storage(createPerTablePostgresStorage(opts.postgres, mask));
+    }
     if (opts.output) {
       const { createPerTableSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
       pipeline.storage(createPerTableSqliteStorage(opts.output, mask));
@@ -2202,8 +2245,8 @@ addTableFlags(indexCmd
       pipeline.broadcast(createNatsBroadcast({ url: natsUrl }));
     }
 
-    if (!opts.output && !opts.stdout && !ssePort && !natsUrl) {
-      console.error("[jun] error: provide at least one output (--output, --stdout, --sse, --nats, or JUN_INDEX_NATS_BROADCAST_URL / JUN_INDEX_SSE_BROADCAST_PORT env vars)");
+    if (!opts.output && !opts.postgres && !opts.clickhouse && !opts.stdout && !ssePort && !natsUrl) {
+      console.error("[jun] error: provide at least one output (--output, --postgres, --clickhouse, --stdout, --sse, --nats)");
       process.exit(1);
     }
 
@@ -2220,6 +2263,8 @@ addTableFlags(indexCmd
       console.error(`  grpc            ${grpcUrl}`);
       console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
       if (opts.output) console.error(`  output          ${opts.output}`);
+      if (opts.postgres) console.error(`  postgres        ${opts.postgres}`);
+      if (opts.clickhouse) console.error(`  clickhouse      ${opts.clickhouse} / ${opts.clickhouseDatabase ?? "jun"}`);
       if (opts.stdout) console.error(`  broadcast       stdout`);
       if (ssePort) console.error(`  broadcast       SSE :${ssePort}${sseHost ? ` (${sseHost})` : ""}`);
       if (natsUrl) console.error(`  broadcast       NATS`);
