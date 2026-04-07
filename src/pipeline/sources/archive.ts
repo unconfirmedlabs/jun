@@ -14,6 +14,8 @@ import type { BalanceChange, ProcessedCheckpoint } from "../types.ts";
 export interface ArchiveSourceConfig {
   /** Archive base URL */
   archiveUrl: string;
+  /** Network name for cache directory scoping (default: "mainnet") */
+  network?: string;
   /** Starting checkpoint sequence */
   from: bigint;
   /** Optional: ending checkpoint (default: fetch latest from gRPC) */
@@ -147,12 +149,13 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
 
         // ─── Phase 1: Fetch all compressed checkpoints to disk cache ────
         // Single connection pool on main thread = maximum CDN throughput.
-        // Cache dir: ~/.jun/cache/checkpoints/ (or XDG_CACHE_HOME)
+        // Cache dir: ~/.jun/cache/checkpoints/{network}/ (or XDG_CACHE_HOME)
         const { mkdirSync, existsSync } = await import("fs");
         const { join } = await import("path");
         const { homedir } = await import("os");
         const cacheBase = process.env.XDG_CACHE_HOME ?? join(homedir(), ".jun", "cache");
-        const cacheDir = join(cacheBase, "checkpoints");
+        const network = config.network ?? "mainnet";
+        const cacheDir = join(cacheBase, "checkpoints", network);
         mkdirSync(cacheDir, { recursive: true });
 
         log.info({ concurrency: fetchConcurrency, total: totalCheckpoints, cacheDir }, "phase 1: fetching checkpoints");

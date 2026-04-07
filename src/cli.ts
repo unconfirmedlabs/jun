@@ -2002,6 +2002,7 @@ addTableFlags(indexCmd
   .option("--concurrency <n>", "archive fetch concurrency", "200")
   .option("--workers <n>", "decoder worker threads")
   .option("--batch-size <n>", "write buffer flush threshold in checkpoints (default: 1000)")
+  .option("--network <name>", "network name for cache scoping (default: mainnet)")
   .option("--quiet", "suppress human output")
   .option("--yes", "skip confirmation prompt")
   .option("--log [level]", "enable logging to stderr"))
@@ -2080,6 +2081,7 @@ addTableFlags(indexCmd
     }
     pipeline.source(createArchiveSource({
       archiveUrl,
+      network: opts.network ?? "mainnet",
       from,
       to,
       concurrency: parseInt(opts.concurrency ?? "200"),
