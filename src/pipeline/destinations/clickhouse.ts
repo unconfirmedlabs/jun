@@ -573,6 +573,7 @@ export function createClickHouseStorage(options: ClickHouseStorageOptions = {}):
 
     async write(batch: ProcessedCheckpoint[]): Promise<void> {
       // Resolve any deferred binary checkpoints (archive source optimization)
+      const t0 = performance.now();
       const resolved: ProcessedCheckpoint[] = batch.map((item) => {
         const raw = (item as unknown as { _rawBinary?: Uint8Array })._rawBinary;
         if (raw) {
@@ -581,6 +582,7 @@ export function createClickHouseStorage(options: ClickHouseStorageOptions = {}):
         }
         return item;
       });
+      const t1 = performance.now();
 
       await Promise.all(
         TABLES.map((table) => {
@@ -599,6 +601,8 @@ export function createClickHouseStorage(options: ClickHouseStorageOptions = {}):
           });
         }),
       );
+      const t2 = performance.now();
+      process.stderr.write(`[ch-write] batch=${batch.length} parse=${Math.round(t1-t0)}ms rows+insert=${Math.round(t2-t1)}ms total=${Math.round(t2-t0)}ms\n`);
     },
 
     async shutdown(): Promise<void> {
