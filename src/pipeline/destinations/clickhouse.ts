@@ -584,25 +584,26 @@ export function createClickHouseStorage(options: ClickHouseStorageOptions = {}):
       });
       const t1 = performance.now();
 
-      await Promise.all(
-        TABLES.map((table) => {
-          const rows: Record<string, unknown>[] = [];
-          for (const cp of resolved) {
-            for (const record of table.getRecords(cp)) {
-              rows.push(table.mapRow(record, cp.checkpoint));
-            }
+      const tableRows = TABLES.map((table) => {
+        const rows: Record<string, unknown>[] = [];
+        for (const cp of resolved) {
+          for (const record of table.getRecords(cp)) {
+            rows.push(table.mapRow(record, cp.checkpoint));
           }
-          if (rows.length === 0) return Promise.resolve();
+        }
+        return rows;
+      });
+      const t2 = performance.now();
 
-          return client.insert({
-            table: table.name,
-            values: rows,
-            format: "JSONEachRow",
-          });
+      await Promise.all(
+        TABLES.map((table, i) => {
+          const rows = tableRows[i]!;
+          if (rows.length === 0) return Promise.resolve();
+          return client.insert({ table: table.name, values: rows, format: "JSONEachRow" });
         }),
       );
-      const t2 = performance.now();
-      process.stderr.write(`[ch-write] batch=${batch.length} parse=${Math.round(t1-t0)}ms rows+insert=${Math.round(t2-t1)}ms total=${Math.round(t2-t0)}ms\n`);
+      const t3 = performance.now();
+      process.stderr.write(`[ch-write] batch=${batch.length} parse=${Math.round(t1-t0)}ms mapRow=${Math.round(t2-t1)}ms http=${Math.round(t3-t2)}ms total=${Math.round(t3-t0)}ms\n`);
     },
 
     async shutdown(): Promise<void> {
