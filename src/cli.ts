@@ -1918,70 +1918,6 @@ program
   });
 
 // ---------------------------------------------------------------------------
-// Move decompiler
-// ---------------------------------------------------------------------------
-
-const moveCmd = program
-  .command("move")
-  .description("Move bytecode tools");
-
-moveCmd
-  .command("decompile")
-  .description("Decompile a published Sui Move package")
-  .argument("<packageId>", "package object ID (0x...)")
-  .option("-m, --module <name...>", "specific module(s) to decompile (all if omitted)")
-  .option("--network <network>", "network to use", "mainnet")
-  .option("--output <dir>", "output directory for .move files")
-  .action(async (packageId: string, opts: { module?: string[]; network: string; output?: string }) => {
-    const { fetchPackageModules } = await import("./package-reader.ts");
-    const { decompile } = await import("./decompiler-native.ts");
-    const network = opts.network as "mainnet" | "testnet" | "devnet" | "localnet";
-
-    try {
-      const modules = await fetchPackageModules(packageId, network);
-
-      // Filter to specified modules if any
-      const filterSet = opts.module ? new Set(opts.module) : null;
-      const targets = filterSet
-        ? modules.filter((m) => filterSet.has(m.name))
-        : modules;
-
-      if (targets.length === 0) {
-        const available = modules.map((m) => m.name).join(", ");
-        if (filterSet) {
-          const missing = [...filterSet].filter((n) => !modules.some((m) => m.name === n));
-          throw new Error(`Module(s) not found: ${missing.join(", ")}. Available: ${available}`);
-        }
-        throw new Error("Package contains no modules");
-      }
-
-      if (!filterSet) {
-        console.error(`[jun] decompiling ${targets.length} module${targets.length !== 1 ? "s" : ""} from ${packageId}`);
-      }
-
-      for (const mod of targets) {
-        const source = await decompile(mod.bytes);
-
-        if (opts.output) {
-          const { mkdirSync, writeFileSync } = await import("fs");
-          mkdirSync(opts.output, { recursive: true });
-          const filePath = `${opts.output}/${mod.name}.move`;
-          writeFileSync(filePath, source);
-          console.error(`[jun] wrote ${filePath}`);
-        } else if (targets.length > 1) {
-          console.log(`// ===== ${mod.name} =====`);
-          console.log(source);
-          console.log("");
-        } else {
-          console.log(source);
-        }
-      }
-    } catch (err) {
-      cliError(err);
-    }
-  });
-
-// ---------------------------------------------------------------------------
 // pipeline — composable Source → Processor → Destination
 // ---------------------------------------------------------------------------
 
@@ -2097,6 +2033,10 @@ addTableFlags(indexCmd
       console.error("[jun] error: no gRPC URL configured. Set --grpc-url, JUN_GRPC_URL env var, or 'jun config set grpc_url <url>'");
       process.exit(1);
     }
+    if (!grpcUrl.includes(":")) {
+      console.error(`[jun] error: gRPC URL must include a port (e.g. ${grpcUrl}:443)`);
+      process.exit(1);
+    }
     const archiveUrl = opts.archiveUrl ?? process.env.JUN_ARCHIVE_URL ?? cfg.archiveUrl;
     if (!archiveUrl) {
       console.error("[jun] error: no archive URL configured. Set --archive-url, JUN_ARCHIVE_URL env var, or 'jun config set archive_url <url>'");
@@ -2207,6 +2147,10 @@ addTableFlags(indexCmd
     const grpcUrl = opts.grpcUrl ?? process.env.JUN_GRPC_URL ?? cfg.grpcUrl;
     if (!grpcUrl) {
       console.error("[jun] error: no gRPC URL configured. Set --grpc-url, JUN_GRPC_URL env var, or 'jun config set grpc_url <url>'");
+      process.exit(1);
+    }
+    if (!grpcUrl.includes(":")) {
+      console.error(`[jun] error: gRPC URL must include a port (e.g. ${grpcUrl}:443)`);
       process.exit(1);
     }
 

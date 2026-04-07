@@ -45,11 +45,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 *.sqlite*
 .gstack/
 native/libproto_parser.*
-native/*.o
-.zig-cache
-native/*.dylib
-native/*.so
-native/*.o
 defi-tracker.db
 defi-tracker.db-shm
 defi-tracker.db-wal

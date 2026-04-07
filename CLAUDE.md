@@ -1,6 +1,6 @@
 # Jun
 
-Sui data pipeline and chain toolkit for Bun. Native gRPC streaming, Zig-accelerated checkpoint decoding, BCS binary decoding, SQLite/Postgres storage.
+Sui data pipeline and chain toolkit for Bun. Native gRPC streaming, Rust-accelerated checkpoint decoding, BCS binary decoding, SQLite/Postgres storage.
 
 ## Runtime
 
@@ -22,7 +22,7 @@ src/
     sources/
       grpc.ts                  Live gRPC subscription (native HTTP/2)
       grpc-web.ts              Browser gRPC-Web source
-      archive.ts               Archive backfill (parallel fetch + Zig decode)
+      archive.ts               Archive backfill (parallel fetch + Rust decode)
       archive-web.ts           Browser archive backfill (fzstd)
     processors/
       events.ts                BCS event decoding
@@ -42,9 +42,6 @@ src/
   schema.ts                    Field DSL → BCS schemas + DDL generation
   normalize.ts                 Address/type normalization + stripGenerics
   codegen.ts                   On-chain struct → field DSL auto-resolution
-  decompiler.ts                Move bytecode decompiler (auto-detects native/WASM)
-  decompiler-wasm.ts           Browser WASM decompiler
-  decompiler-native.ts         Server native decompiler
   package-reader.ts            Fetch + parse Sui Move package modules
   db.ts                        createPostgresConnection + createSqliteConnection
   sql-helpers.ts               Shared SQL utilities
@@ -54,10 +51,8 @@ src/
   cli.ts                       CLI entry point (Commander.js)
   config.ts                    Local config (~/.jun/config.yml)
 native/
-  checkpoint_processor.zig     Zig FFI checkpoint decoder
-  build.zig                    Cross-compilation build system
-  vendor/zstd/                 Vendored zstd C source
-  lib/                         Prebuilt binaries (darwin-arm64, darwin-x64, linux-x64, linux-arm64)
+  rust-decoder/                Rust checkpoint decoder source
+  lib/                         Prebuilt Rust binaries (darwin-arm64, linux-x64)
 ```
 
 ## CLI
@@ -102,7 +97,6 @@ jun pipeline snapshot \
 | `--commands` | `processors.commands` | Index all PTB commands (superset of `move_calls`) |
 | `--system-transactions` | `processors.systemTransactions` | Index non-programmable (system) transactions |
 | `--unchanged-consensus-objects` | `processors.unchangedConsensusObjects` | Index read-only consensus object refs |
-| `--everything` | - | Enable every indexer above + `--coin-type '*'` (full baseline) |
 | `--sqlite` | `storage.sqlite` | SQLite output path |
 | `--postgres` | `storage.postgres` | Postgres URL |
 | `--sqlite-export` | `storage.sqliteExport` | VACUUM + upload to S3 |
@@ -113,13 +107,6 @@ jun pipeline snapshot \
 | `--snapshot` | (command) | `jun pipeline snapshot` = backfill only |
 | `--quiet` | quiet | Suppress stdout (progress bar still shows on stderr) |
 | `--yes` | - | Skip confirmation prompt |
-
-### Move Decompiler
-
-```bash
-jun move decompile 0x2 -m coin -m bag
-jun move decompile 0x2 --output ./sources
-```
 
 ### Other Commands
 
@@ -224,15 +211,15 @@ Legacy config keys (`sources.live.grpc`, `sources.backfill.from`) still work via
 - Balance materialization at shutdown (skip incremental upserts)
 - Duplicate row dedup before unique index creation
 
-## Native Zig Decoder
+## Native Rust Decoder
 
-Checkpoint decoding uses a native Zig library via Bun FFI:
+Checkpoint decoding uses a prebuilt Rust library via Bun FFI:
 - Decompresses zstd, parses protobuf, extracts BCS data
 - Returns binary format: transactions + move calls + events + balance changes
 - 24 worker threads for parallel decode
-- Prebuilt for darwin-arm64, darwin-x64, linux-x64, linux-arm64
+- Prebuilt for darwin-arm64, linux-x64
 - Falls back to JS if native lib not available
-- Cross-compile: `cd native && zig build -Doptimize=ReleaseFast [-Dtarget=x86_64-linux-musl]`
+- Build: `cd native/rust-decoder && cargo build --release`
 
 ## Browser Targets
 
@@ -240,7 +227,6 @@ Jun exports browser-compatible variants:
 - `jun/pipeline/sources/grpc-web` — gRPC-Web via @mysten/sui SuiGrpcClient
 - `jun/pipeline/sources/archive-web` — archive backfill with fzstd
 - `jun/pipeline/destinations/sql-web` — sql.js SQLite WASM
-- `jun/decompiler/wasm` — Move bytecode decompiler (87KB WASM)
 - `jun/package-reader` — fetch + parse package modules
 
 ## Code Quality
