@@ -2061,7 +2061,6 @@ addTableFlags(indexCmd
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
   .option("--grpc-url <url>", "gRPC endpoint (for epoch resolution)")
   .option("--archive-url <url>", "archive base URL")
-  .option("--network <name>", "network name", "mainnet")
   .option("--concurrency <n>", "archive fetch concurrency", "200")
   .option("--workers <n>", "decoder worker threads")
   .option("--quiet", "suppress human output")
@@ -2092,14 +2091,17 @@ addTableFlags(indexCmd
       process.env.LOG_LEVEL = "silent";
     }
 
-    const networkDefaults: Record<string, string> = {
-      mainnet: "https://checkpoints.mainnet.sui.io",
-      testnet: "https://checkpoints.testnet.sui.io",
-      devnet: "https://checkpoints.devnet.sui.io",
-    };
-    const net = opts.network ?? "mainnet";
-    const grpcUrl = opts.grpcUrl ?? process.env.GRPC_URL ?? "hayabusa.mainnet.unconfirmed.cloud:443";
-    const archiveUrl = opts.archiveUrl ?? networkDefaults[net];
+    const cfg = loadConfig();
+    const grpcUrl = opts.grpcUrl ?? process.env.GRPC_URL ?? cfg.grpcUrl;
+    if (!grpcUrl) {
+      console.error("[jun] error: no gRPC URL configured. Set --grpc-url, GRPC_URL env var, or 'jun config set grpc_url <url>'");
+      process.exit(1);
+    }
+    const archiveUrl = opts.archiveUrl ?? process.env.ARCHIVE_URL ?? cfg.archiveUrl;
+    if (!archiveUrl) {
+      console.error("[jun] error: no archive URL configured. Set --archive-url, ARCHIVE_URL env var, or 'jun config set archive_url <url>'");
+      process.exit(1);
+    }
 
     let from: bigint;
     let to: bigint | undefined;
@@ -2184,7 +2186,6 @@ addTableFlags(indexCmd
   .description("Stream live chain data via gRPC with broadcast (SSE/NATS/stdout)")
   .option("--output <dir>", "optional: also write to per-table SQLite files")
   .option("--grpc-url <url>", "gRPC endpoint", "hayabusa.mainnet.unconfirmed.cloud:443")
-  .option("--network <name>", "network name", "mainnet")
   .option("--stdout", "broadcast JSONL to stdout")
   .option("--sse <port>", "broadcast via SSE on port")
   .option("--nats <url>", "broadcast to NATS")
@@ -2202,7 +2203,12 @@ addTableFlags(indexCmd
     }
 
     const mask = buildExtractMask(opts, ExtractMask);
-    const grpcUrl = opts.grpcUrl ?? process.env.GRPC_URL ?? "hayabusa.mainnet.unconfirmed.cloud:443";
+    const cfg = loadConfig();
+    const grpcUrl = opts.grpcUrl ?? process.env.GRPC_URL ?? cfg.grpcUrl;
+    if (!grpcUrl) {
+      console.error("[jun] error: no gRPC URL configured. Set --grpc-url, GRPC_URL env var, or 'jun config set grpc_url <url>'");
+      process.exit(1);
+    }
 
     if (opts.log) {
       process.env.LOG_LEVEL = typeof opts.log === "string" ? opts.log : "info";
