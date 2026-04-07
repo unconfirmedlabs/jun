@@ -2208,7 +2208,7 @@ addTableFlags(indexCmd
     pipeline.configure({
       quiet: opts.quiet ?? false,
       log: opts.log ?? false,
-      buffer: { maxBatchSize: 50 },
+      buffer: { maxBatchSize: 10 },
     });
 
     if (!opts.quiet) {

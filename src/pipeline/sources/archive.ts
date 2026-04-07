@@ -4,16 +4,12 @@
  * Workers own fetch + decode (Rust binary FFI when available, JS fallback).
  * Main thread receives decoded results, optionally parses binary, yields checkpoints.
  */
-import { checkpointFromGrpcResponse } from "../../checkpoint-response.ts";
-import { parseBinaryCheckpoint } from "../../binary-parser.ts";
 import { createCheckpointDecoderPool, type CheckpointDecoderPool } from "../../checkpoint-decoder-pool.ts";
 import { isNativeCheckpointDecoderAvailable } from "../../checkpoint-native-decoder.ts";
 import { createLogger } from "../../logger.ts";
 import type { Logger } from "../../logger.ts";
 import { emptyProcessed, type Source, type Checkpoint } from "../types.ts";
 import type { BalanceChange, ProcessedCheckpoint } from "../types.ts";
-
-const textDecoder = new TextDecoder();
 
 export interface ArchiveSourceConfig {
   /** Archive base URL */
@@ -85,54 +81,11 @@ function filterPreProcessedCheckpoint(
   };
 }
 
-function checkpointFromBinaryResult(
-  binary: Uint8Array,
+function checkpointFromParsed(
+  parsed: { checkpoint: Checkpoint; processed: ProcessedCheckpoint },
   enabledProcessors: ArchiveSourceConfig["enabledProcessors"],
   balanceCoinTypes: string[] | "*" | undefined,
 ): Checkpoint {
-  const deferParsing = process.env.DEFER_BINARY_PARSING !== "0";
-  if (deferParsing) {
-    const view = new DataView(binary.buffer, binary.byteOffset, binary.byteLength);
-    let pos = 40;
-
-    const seqLen = view.getUint16(pos, true);
-    pos += 2;
-    const seqStr = textDecoder.decode(binary.subarray(pos, pos + seqLen));
-    pos += seqLen;
-
-    const epochLen = view.getUint16(pos, true);
-    pos += 2;
-    const epochStr = textDecoder.decode(binary.subarray(pos, pos + epochLen));
-    pos += epochLen;
-
-    const tsLen = view.getUint16(pos, true);
-    pos += 2;
-    const tsStr = textDecoder.decode(binary.subarray(pos, pos + tsLen));
-
-    const checkpoint: Checkpoint = {
-      sequenceNumber: BigInt(seqStr),
-      timestamp: new Date(tsStr),
-      transactions: [],
-      source: "backfill",
-      epoch: BigInt(epochStr),
-      digest: "",
-      previousDigest: null,
-      contentDigest: null,
-      totalNetworkTransactions: 0n,
-      epochRollingGasCostSummary: {
-        computationCost: "0",
-        storageCost: "0",
-        storageRebate: "0",
-        nonRefundableStorageFee: "0",
-      },
-    };
-    (checkpoint as any)._rawBinary = binary;
-    (checkpoint as any)._enabledProcessors = enabledProcessors;
-    (checkpoint as any)._balanceCoinTypes = balanceCoinTypes;
-    return checkpoint;
-  }
-
-  const parsed = parseBinaryCheckpoint(binary);
   const processed = filterPreProcessedCheckpoint(
     parsed.processed,
     enabledProcessors,
@@ -330,17 +283,11 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
           const seq = result.seq;
 
           let checkpoint: Checkpoint;
-          if (result.binary) {
-            checkpoint = checkpointFromBinaryResult(
-              result.binary,
+          if (result.parsed) {
+            checkpoint = checkpointFromParsed(
+              result.parsed,
               config.enabledProcessors,
               balanceCoinTypes,
-            );
-          } else if (result.payload) {
-            checkpoint = checkpointFromGrpcResponse(
-              result.payload.decoded,
-              "backfill",
-              result.payload.precomputedBalanceChanges,
             );
           } else {
             continue;

@@ -1,8 +1,9 @@
 /**
  * Checkpoint decode worker — Rust FFI binary decode from cached files.
  *
- * Each worker processes a range of checkpoints: readFileSync → Rust FFI → postMessage(binary).
- * Supports selective extraction via extractMask.
+ * Each worker processes a range of checkpoints: readFileSync → Rust FFI → parseBinaryCheckpoint
+ * → postMessage(parsed). Fully decoded ProcessedCheckpoint arrives on the main thread with no
+ * further JS parsing required.
  */
 /// <reference lib="webworker" />
 import {
@@ -10,6 +11,7 @@ import {
   decodeArchiveCheckpointBinarySelective,
   isNativeCheckpointDecoderAvailable,
 } from "./checkpoint-native-decoder.ts";
+import { parseBinaryCheckpoint } from "./binary-parser.ts";
 
 declare var self: Worker;
 
@@ -20,14 +22,6 @@ interface DecodeCachedRangeMessage {
   cacheDir: string;
   workerIndex: number;
   extractMask?: number;
-}
-
-function postBinaryBySeq(seq: bigint, binary: Uint8Array): void {
-  const result = new Uint8Array(8 + binary.length);
-  const view = new DataView(result.buffer);
-  view.setBigUint64(0, seq, true);
-  result.set(binary, 8);
-  postMessage(result, [result.buffer]);
 }
 
 async function handleDecodeCachedRange(msg: DecodeCachedRangeMessage): Promise<void> {
@@ -55,7 +49,9 @@ async function handleDecodeCachedRange(msg: DecodeCachedRangeMessage): Promise<v
         : decodeArchiveCheckpointBinary(compressed);
 
       if (binary) {
-        postBinaryBySeq(seq, binary);
+        // Parse the binary here in the worker thread — no JS parsing on the main thread.
+        const parsed = parseBinaryCheckpoint(binary);
+        postMessage({ seq: seq.toString(), parsed });
         processed++;
         if (processed % 5000 === 0) {
           const elapsed = (performance.now() - startedAt) / 1000;

@@ -140,16 +140,8 @@ async function runSource(
   const start = performance.now();
 
   for await (const checkpoint of source.stream()) {
-    const rawBinary = (checkpoint as any)._rawBinary as Uint8Array | undefined;
     const preProcessed = (checkpoint as any)._preProcessed as ProcessedCheckpoint | undefined;
-
     const processed = preProcessed ?? emptyProcessed(checkpoint);
-    if (rawBinary) {
-      (processed as any)._rawBinary = rawBinary;
-      (processed as any)._enabledProcessors = (checkpoint as any)._enabledProcessors;
-      (processed as any)._balanceCoinTypes = (checkpoint as any)._balanceCoinTypes;
-    }
-
     await buffer.push(processed);
     count++;
 

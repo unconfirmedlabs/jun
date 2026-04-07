@@ -21,7 +21,6 @@
  */
 import { createClient } from "@clickhouse/client";
 import type { ClickHouseClient } from "@clickhouse/client";
-import { parseBinaryCheckpoint } from "../../binary-parser.ts";
 import type {
   Checkpoint,
   ProcessedCheckpoint,
@@ -572,28 +571,15 @@ export function createClickHouseStorage(options: ClickHouseStorageOptions = {}):
     },
 
     async write(batch: ProcessedCheckpoint[]): Promise<void> {
-      // Resolve any deferred binary checkpoints (archive source optimization)
-      const t0 = performance.now();
-      const resolved: ProcessedCheckpoint[] = batch.map((item) => {
-        const raw = (item as unknown as { _rawBinary?: Uint8Array })._rawBinary;
-        if (raw) {
-          const result = parseBinaryCheckpoint(raw);
-          return { ...result.processed, checkpoint: result.checkpoint };
-        }
-        return item;
-      });
-      const t1 = performance.now();
-
       const tableRows = TABLES.map((table) => {
         const rows: Record<string, unknown>[] = [];
-        for (const cp of resolved) {
+        for (const cp of batch) {
           for (const record of table.getRecords(cp)) {
             rows.push(table.mapRow(record, cp.checkpoint));
           }
         }
         return rows;
       });
-      const t2 = performance.now();
 
       await Promise.all(
         TABLES.map((table, i) => {
@@ -602,8 +588,6 @@ export function createClickHouseStorage(options: ClickHouseStorageOptions = {}):
           return client.insert({ table: table.name, values: rows, format: "JSONEachRow" });
         }),
       );
-      const t3 = performance.now();
-      process.stderr.write(`[ch-write] batch=${batch.length} parse=${Math.round(t1-t0)}ms mapRow=${Math.round(t2-t1)}ms http=${Math.round(t3-t2)}ms total=${Math.round(t3-t0)}ms\n`);
     },
 
     async shutdown(): Promise<void> {

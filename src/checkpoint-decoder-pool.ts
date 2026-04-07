@@ -5,10 +5,11 @@
  * files, runs Rust FFI binary decode, and posts results back via postMessage.
  */
 import path from "path";
+import type { ParsedBinaryCheckpoint } from "./binary-parser.ts";
 
 export interface StreamDecodeResult {
   seq: bigint;
-  binary?: Uint8Array;
+  parsed?: ParsedBinaryCheckpoint;
 }
 
 export interface CheckpointDecoderPool {
@@ -87,18 +88,13 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
     worker.onmessage = (event: MessageEvent) => {
       const msg = event.data;
 
-      // Binary result: Uint8Array with 8-byte seq prefix
-      if (msg instanceof Uint8Array || msg instanceof ArrayBuffer) {
-        const bytes = msg instanceof Uint8Array ? msg : new Uint8Array(msg);
-        if (bytes.byteLength < 8) return;
-        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        const seq = view.getBigUint64(0, true);
-        pushStreamResult({ seq, binary: bytes.subarray(8) });
-        return;
-      }
-
-      // Control messages
       if (msg && typeof msg === "object") {
+        // Parsed result: { seq: string, parsed: ParsedBinaryCheckpoint }
+        if ("seq" in msg && "parsed" in msg) {
+          pushStreamResult({ seq: BigInt(msg.seq), parsed: msg.parsed });
+          return;
+        }
+
         if (msg.type === "done" && activeStream) {
           activeStream.doneWorkers += 1;
           if (activeStream.doneWorkers >= workers.length) {

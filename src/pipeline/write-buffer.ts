@@ -74,14 +74,6 @@ export function createPipelineWriteBuffer(
   let timer: Timer | null = null;
   let stopped = false;
 
-  function countEvents(): number {
-    let total = 0;
-    for (const cp of buffer) {
-      total += cp.events.length + cp.balanceChanges.length + cp.transactions.length + cp.moveCalls.length;
-    }
-    return total;
-  }
-
   async function doFlush(): Promise<void> {
     if (buffer.length === 0) return;
 
@@ -176,15 +168,9 @@ export function createPipelineWriteBuffer(
         cursors.set(cursorKey, seq);
       }
 
-      // Threshold-based flush with backpressure.
-      // Use checkpoint count as the threshold — countEvents() returns 0 with deferred
-      // binary parsing since record arrays are empty until write-time parsing.
-      const bufferSize = buffer.length > 0 && (buffer[0] as any)._rawBinary
-        ? buffer.length
-        : countEvents();
-      if (bufferSize >= maxBatchSize) {
+      if (buffer.length >= maxBatchSize) {
         if (flushing) {
-          log.debug({ bufferSize, label }, "backpressure — awaiting in-flight flush");
+          log.debug({ bufferSize: buffer.length, label }, "backpressure — awaiting in-flight flush");
           await flushing;
         }
         const flushPromise = doFlush();

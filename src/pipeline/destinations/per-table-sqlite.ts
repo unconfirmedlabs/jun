@@ -8,7 +8,6 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "fs";
 import { join } from "path";
-import { parseBinaryCheckpoint } from "../../binary-parser.ts";
 import type {
   Checkpoint,
   ProcessedCheckpoint,
@@ -428,18 +427,6 @@ export function createPerTableSqliteStorage(dir: string, enabledMask = 0x7FF): S
     },
 
     async write(batch: ProcessedCheckpoint[]): Promise<void> {
-      // Parse deferred binaries
-      const parsed: ProcessedCheckpoint[] = [];
-      for (const item of batch) {
-        const rawBinary = (item as any)._rawBinary as Uint8Array | undefined;
-        if (rawBinary) {
-          const result = parseBinaryCheckpoint(rawBinary);
-          parsed.push({ ...result.processed, checkpoint: result.checkpoint });
-        } else {
-          parsed.push(item);
-        }
-      }
-
       // BEGIN on all open connections
       for (const db of connections.values()) db.exec("BEGIN");
 
@@ -448,7 +435,7 @@ export function createPerTableSqliteStorage(dir: string, enabledMask = 0x7FF): S
           const stmt = stmts.get(tableDef.name);
           if (!stmt) continue;
 
-          for (const cp of parsed) {
+          for (const cp of batch) {
             const records = tableDef.getRecords(cp);
             for (const record of records) {
               stmt.run(...tableDef.mapRow(record));

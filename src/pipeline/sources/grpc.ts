@@ -68,7 +68,6 @@ export function createGrpcLiveSource(config: GrpcLiveSourceConfig): Source {
                 ...parsed.checkpoint,
                 source: "live",
               };
-              (checkpoint as any)._rawBinary = checkpointBinary;
               (checkpoint as any)._preProcessed = parsed.processed;
               yield checkpoint;
             }
