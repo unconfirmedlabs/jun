@@ -579,21 +579,23 @@ export function createClickHouseStorage(options: ClickHouseStorageOptions = {}):
         return item;
       });
 
-      for (const table of TABLES) {
-        const rows: Record<string, unknown>[] = [];
-        for (const cp of resolved) {
-          for (const record of table.getRecords(cp)) {
-            rows.push(table.mapRow(record, cp.checkpoint));
+      await Promise.all(
+        TABLES.map((table) => {
+          const rows: Record<string, unknown>[] = [];
+          for (const cp of resolved) {
+            for (const record of table.getRecords(cp)) {
+              rows.push(table.mapRow(record, cp.checkpoint));
+            }
           }
-        }
-        if (rows.length === 0) continue;
+          if (rows.length === 0) return Promise.resolve();
 
-        await client.insert({
-          table: table.name,
-          values: rows,
-          format: "JSONEachRow",
-        });
-      }
+          return client.insert({
+            table: table.name,
+            values: rows,
+            format: "JSONEachRow",
+          });
+        }),
+      );
     },
 
     async shutdown(): Promise<void> {
