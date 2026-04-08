@@ -575,6 +575,10 @@ function buildTableRows(batch: ProcessedCheckpoint[]): Record<string, unknown>[]
  *   backfill data has no duplicates so this is pure overhead.
  * - optimize_on_insert=0: skip forced merge on each insert; let ClickHouse's
  *   background merge process handle it. Avoids write amplification during load.
+ * - async_insert=1 + wait_for_async_insert=0: ClickHouse acknowledges the
+ *   insert immediately and buffers internally, decoupling the decode loop from
+ *   network I/O. Safe for backfill because the 50K chunk boundary is the
+ *   crash-recovery unit — incomplete async inserts are replayed on resume.
  * - compression disabled: Bun's zlib implementation produces payloads that
  *   trigger ZLIB_INFLATE_FAILED on ClickHouse Cloud (code 354). Raw inserts
  *   are reliable; ClickHouse Cloud's TLS handles transport compression anyway.
@@ -604,6 +608,8 @@ export function createReplayClickHouseStorage(options: ClickHouseStorageOptions 
             clickhouse_settings: {
               insert_deduplicate: 0,
               optimize_on_insert: 0,
+              async_insert: 1,
+              wait_for_async_insert: 0,
             },
           });
         }),
