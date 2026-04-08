@@ -2242,6 +2242,7 @@ indexCmd
     let next = from;
     let done = 0;
     let fetched = 0;
+    let failed = 0;
     let pendingWrites = 0;
     const MAX_PENDING_WRITES = 1000;
     const pendingWritePromises: Promise<void>[] = [];
@@ -2271,8 +2272,12 @@ indexCmd
             pendingWritePromises.push(p);
             if (pendingWrites >= MAX_PENDING_WRITES) await Promise.race(pendingWritePromises);
             fetched++;
+          } else {
+            failed++;
           }
-        } catch {}
+        } catch {
+          failed++;
+        }
         done++;
       }
     }
@@ -2287,7 +2292,8 @@ indexCmd
     const elapsed = ((Date.now() - start) / 1000).toFixed(1);
     const rate = Math.round(fetched / parseFloat(elapsed));
     const mbit = Math.round(rate * 26 * 8 / 1000);
-    process.stderr.write(`[prefetch] done — ${fetched.toLocaleString()} fetched + ${cachedCount.toLocaleString()} cached = ${total.toLocaleString()} total in ${elapsed}s (${rate.toLocaleString()} req/s, ~${mbit} Mbit/s)\n`);
+    const failedStr = failed > 0 ? `  failed=${failed.toLocaleString()}` : "";
+    process.stderr.write(`[prefetch] done — fetched=${fetched.toLocaleString()} cached=${cachedCount.toLocaleString()}${failedStr} in ${elapsed}s (${rate.toLocaleString()} req/s, ~${mbit} Mbit/s)\n`);
     process.exit(0);
   });
 
