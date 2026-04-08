@@ -93,8 +93,17 @@ const workerPromises = Array.from({ length: WORKER_COUNT }, (_, i) => {
     });
 
     worker.onmessage = (e) => {
-      totalFetched += e.data.fetched;
-      totalSkipped += e.data.skipped;
+      // Intermediate progress update
+      if (e.data.progress) {
+        totalFetched += e.data.fetched - (worker._lastFetched ?? 0);
+        totalSkipped += e.data.skipped - (worker._lastSkipped ?? 0);
+        worker._lastFetched = e.data.fetched;
+        worker._lastSkipped = e.data.skipped;
+        return;
+      }
+      // Final result
+      totalFetched += e.data.fetched - (worker._lastFetched ?? 0);
+      totalSkipped += e.data.skipped - (worker._lastSkipped ?? 0);
       worker.terminate();
       resolve(undefined);
     };

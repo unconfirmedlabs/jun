@@ -29,6 +29,12 @@ self.onmessage = async (event) => {
     }
   }
 
+  // Send intermediate progress every 10K fetches so main thread can display rate
+  const progressInterval = setInterval(() => {
+    postMessage({ progress: true, fetched, skipped });
+  }, 2000);
+
   await Promise.all(Array.from({ length: concurrency }, fetchLoop));
-  postMessage({ fetched, skipped });
+  clearInterval(progressInterval);
+  postMessage({ done: true, fetched, skipped });
 };
