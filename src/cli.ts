@@ -2294,6 +2294,20 @@ indexCmd
     const mbit = Math.round(rate * 26 * 8 / 1000);
     const failedStr = failed > 0 ? `  failed=${failed.toLocaleString()}` : "";
     process.stderr.write(`[prefetch] done — fetched=${fetched.toLocaleString()} cached=${cachedCount.toLocaleString()}${failedStr} in ${elapsed}s (${rate.toLocaleString()} req/s, ~${mbit} Mbit/s)\n`);
+
+    // Verify every file in range exists on disk
+    process.stderr.write(`[prefetch] verifying...\n`);
+    const { existsSync } = await import("fs");
+    let missing = 0;
+    for (let seq = from; seq <= to; seq++) {
+      if (!existsSync(join(cacheDir, `${seq}.binpb.zst`))) missing++;
+    }
+    if (missing === 0) {
+      process.stderr.write(`[prefetch] verified — all ${total.toLocaleString()} checkpoints present\n`);
+    } else {
+      process.stderr.write(`[prefetch] warning — ${missing.toLocaleString()} checkpoints missing from cache\n`);
+      process.exit(1);
+    }
     process.exit(0);
   });
 
