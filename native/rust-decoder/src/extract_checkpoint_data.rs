@@ -659,11 +659,17 @@ fn extract_object_changes(
     effects: &TransactionEffects,
     object_set: &ObjectSet,
 ) -> Vec<ObjectChangeRecord> {
-    let old_metadata: HashMap<ObjectID, Owner> = effects
-        .old_object_metadata()
-        .into_iter()
-        .map(|((id, _, _), owner)| (id, owner))
-        .collect();
+    // old_object_metadata() is V2-only. For V1 effects (pre-checkpoint ~23.9M) input
+    // owner data is not available in the effects — input_owner columns will be NULL for
+    // that era rather than panicking.
+    let v1_input_owners: HashMap<ObjectID, Owner> = match effects {
+        TransactionEffects::V2(_) => effects
+            .old_object_metadata()
+            .into_iter()
+            .map(|((id, _, _), owner)| (id, owner))
+            .collect(),
+        TransactionEffects::V1(_) => HashMap::new(),
+    };
 
     let mut new_metadata: HashMap<ObjectID, Owner> = HashMap::new();
     for ((id, _, _), owner) in effects.created() {
@@ -703,7 +709,19 @@ fn extract_object_changes(
         )
         .collect();
     let wrapped_ids: HashSet<ObjectID> = effects.wrapped().into_iter().map(|oref| oref.0).collect();
-    let published_ids: HashSet<ObjectID> = effects.published_packages().into_iter().collect();
+    // published_packages() is V2-only. For V1 we detect packages by checking the object_set:
+    // published packages appear in created() and have is_package() == true.
+    let published_ids: HashSet<ObjectID> = match effects {
+        TransactionEffects::V2(_) => effects.published_packages().into_iter().collect(),
+        TransactionEffects::V1(_) => effects
+            .created()
+            .into_iter()
+            .filter_map(|((id, v, _), _)| {
+                let obj = object_set.get(&ObjectKey(id, v))?;
+                if obj.is_package() { Some(id) } else { None }
+            })
+            .collect(),
+    };
 
     let gas_object_id = effects.gas_object().0 .0;
     let gas_object_id = if gas_object_id == ObjectID::ZERO {
@@ -719,7 +737,7 @@ fn extract_object_changes(
         // that slip through the filter — see docs/checkpoint-data-model.md)
         .filter(|change| change.input_version.is_some() || change.output_version.is_some())
         .map(|change| {
-            let input_owner = old_metadata.get(&change.id);
+            let input_owner = v1_input_owners.get(&change.id);
             let output_owner = new_metadata.get(&change.id);
             let (input_owner_value, input_owner_kind) = flatten_owner(input_owner);
             let (output_owner_value, output_owner_kind) = flatten_owner(output_owner);
