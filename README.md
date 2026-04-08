@@ -44,7 +44,7 @@ Checkpoints are cached to `~/.jun/cache/checkpoints/{network}/`. Subsequent `rep
 | `--from / --to` | — | Explicit checkpoint range |
 | `--archive-url` | `JUN_ARCHIVE_URL` | Archive base URL |
 | `--grpc-url` | `JUN_GRPC_URL` | gRPC endpoint (epoch resolution only) |
-| `--concurrency <n>` | `3000` | Concurrent fetch connections |
+| `--concurrency <n>` | `100` | Concurrent fetch connections |
 | `--network <name>` | `mainnet` | Cache sub-directory |
 
 ### Backfill (replay-chain)

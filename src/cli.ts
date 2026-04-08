@@ -2003,7 +2003,7 @@ addTableFlags(indexCmd
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
   .option("--grpc-url <url>", "gRPC endpoint (for epoch resolution)")
   .option("--archive-url <url>", "archive base URL")
-  .option("--concurrency <n>", "archive fetch concurrency", "3000")
+  .option("--concurrency <n>", "archive fetch concurrency", "100")
   .option("--workers <n>", "decoder worker threads")
   .option("--batch-size <n>", "write buffer flush threshold in checkpoints (default: 1000)")
   .option("--network <name>", "network name for cache scoping (default: mainnet)")
@@ -2172,7 +2172,7 @@ indexCmd
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
   .option("--grpc-url <url>", "gRPC endpoint (for epoch resolution)")
   .option("--archive-url <url>", "archive base URL")
-  .option("--concurrency <n>", "concurrent fetch connections", "3000")
+  .option("--concurrency <n>", "concurrent fetch connections", "100")
   .option("--network <name>", "network name for cache scoping", "mainnet")
   .action(async (opts: any) => {
     const { mkdirSync, readdirSync } = await import("fs");
