@@ -52,6 +52,7 @@ export interface ArchiveSourceConfig {
     database?: string;
     username?: string;
     password?: string;
+    batchSize?: number;
   };
   /** Pass for worker-level Postgres writes (replay only). */
   postgresWriteConfig?: { url: string };
@@ -223,7 +224,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
               clickhouseDatabase: config.clickhouseWriteConfig.database,
               clickhouseUsername: config.clickhouseWriteConfig.username,
               clickhousePassword: config.clickhouseWriteConfig.password,
-              batchSize: 10000,
+              batchSize: config.clickhouseWriteConfig?.batchSize ?? 10000,
               balanceCoinTypes: Array.isArray(balanceCoinTypes) ? balanceCoinTypes : null,
             }
           : config.postgresWriteConfig

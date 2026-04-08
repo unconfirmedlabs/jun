@@ -2000,6 +2000,7 @@ addTableFlags(indexCmd
   .option("--postgres <url>", "Postgres connection URL")
   .option("--clickhouse <url>", "ClickHouse HTTP URL (e.g. http://localhost:8123)")
   .option("--clickhouse-database <db>", "ClickHouse database name", "jun")
+  .option("--clickhouse-batch-size <n>", "checkpoints per worker batch insert (default: 10000)")
   .option("--epoch <number>", "backfill a completed epoch")
   .option("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
@@ -2084,6 +2085,11 @@ addTableFlags(indexCmd
       process.exit(1);
     }
 
+    if (opts.clickhouseBatchSize && !opts.clickhouse) {
+      console.error("[jun] error: --clickhouse-batch-size requires --clickhouse");
+      process.exit(1);
+    }
+
     const pipeline = createPipeline();
     const useWorkerWrites = !!(opts.clickhouse || opts.postgres);
 
@@ -2121,6 +2127,7 @@ addTableFlags(indexCmd
       clickhouseWriteConfig: opts.clickhouse ? {
         url: opts.clickhouse,
         database: opts.clickhouseDatabase ?? "jun",
+        batchSize: opts.clickhouseBatchSize ? parseInt(opts.clickhouseBatchSize) : undefined,
       } : undefined,
       postgresWriteConfig: opts.postgres ? { url: opts.postgres } : undefined,
     }));
