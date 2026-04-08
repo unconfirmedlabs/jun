@@ -2080,8 +2080,8 @@ addTableFlags(indexCmd
       }));
     }
     if (opts.postgres) {
-      const { createPerTablePostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
-      pipeline.storage(createPerTablePostgresStorage(opts.postgres, mask));
+      const { createReplayPostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
+      pipeline.storage(createReplayPostgresStorage(opts.postgres, mask));
     }
     if (opts.output || (!opts.clickhouse && !opts.postgres)) {
       const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./replay-chain");
@@ -2216,12 +2216,12 @@ addTableFlags(indexCmd
       }));
     }
     if (opts.postgres) {
-      const { createPerTablePostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
-      pipeline.storage(createPerTablePostgresStorage(opts.postgres, mask));
+      const { createLivePostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
+      pipeline.storage(createLivePostgresStorage(opts.postgres, mask));
     }
     if (opts.output) {
-      const { createPerTableSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
-      pipeline.storage(createPerTableSqliteStorage(opts.output, mask));
+      const { createLiveSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
+      pipeline.storage(createLiveSqliteStorage(opts.output, mask));
     }
 
     // Live gRPC source (Rust binary decoder)

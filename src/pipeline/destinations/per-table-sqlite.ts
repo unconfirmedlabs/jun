@@ -460,3 +460,76 @@ export function createPerTableSqliteStorage(dir: string, enabledMask = 0x7FF): S
     },
   };
 }
+
+/**
+ * SQLite storage for live streaming (stream-chain).
+ *
+ * WAL journal mode allows concurrent readers while writing.
+ * NORMAL synchronous is safe — crash-safe but no fsync on every commit.
+ * No EXCLUSIVE lock so other processes can read the DB concurrently.
+ * INSERT OR IGNORE for idempotency (live stream may replay on reconnect).
+ */
+export function createLiveSqliteStorage(dir: string, enabledMask = 0x7FF): Storage {
+  mkdirSync(dir, { recursive: true });
+  const enabledTables = TABLES.filter(t => enabledMask & (TABLE_MASK_BIT[t.name] ?? 0));
+
+  const connections = new Map<string, Database>();
+  const stmts = new Map<string, ReturnType<Database["query"]>>();
+
+  function getDb(tableDef: TableDef): Database {
+    const fileKey = TABLE_FILE[tableDef.name] ?? tableDef.name;
+    let db = connections.get(fileKey);
+    if (!db) {
+      db = new Database(join(dir, `${fileKey}.db`));
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA synchronous = NORMAL");
+      db.exec("PRAGMA temp_store = MEMORY");
+      db.exec("PRAGMA cache_size = -32000");
+      connections.set(fileKey, db);
+    }
+    return db;
+  }
+
+  return {
+    name: "live-sqlite",
+
+    async initialize(): Promise<void> {
+      for (const tableDef of enabledTables) {
+        const db = getDb(tableDef);
+        for (const stmt of tableDef.ddl.split(";").map(s => s.trim()).filter(Boolean)) {
+          db.exec(stmt);
+        }
+        const placeholders = tableDef.columns.map(() => "?").join(", ");
+        const insertSql = `INSERT OR IGNORE INTO ${tableDef.name} (${tableDef.columns.join(", ")}) VALUES (${placeholders})`;
+        stmts.set(tableDef.name, db.query(insertSql));
+      }
+    },
+
+    async write(batch: ProcessedCheckpoint[]): Promise<void> {
+      for (const db of connections.values()) db.exec("BEGIN");
+      try {
+        for (const tableDef of enabledTables) {
+          const stmt = stmts.get(tableDef.name);
+          if (!stmt) continue;
+          for (const cp of batch) {
+            for (const record of tableDef.getRecords(cp)) {
+              stmt.run(...tableDef.mapRow(record));
+            }
+          }
+        }
+        for (const db of connections.values()) db.exec("COMMIT");
+      } catch (e) {
+        for (const db of connections.values()) {
+          try { db.exec("ROLLBACK"); } catch {}
+        }
+        throw e;
+      }
+    },
+
+    async shutdown(): Promise<void> {
+      for (const db of connections.values()) db.close();
+      connections.clear();
+      stmts.clear();
+    },
+  };
+}
