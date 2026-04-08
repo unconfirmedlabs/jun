@@ -2003,7 +2003,7 @@ addTableFlags(indexCmd
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
   .option("--grpc-url <url>", "gRPC endpoint (for epoch resolution)")
   .option("--archive-url <url>", "archive base URL")
-  .option("--concurrency <n>", "archive fetch concurrency", "200")
+  .option("--concurrency <n>", "archive fetch concurrency", "3000")
   .option("--workers <n>", "decoder worker threads")
   .option("--batch-size <n>", "write buffer flush threshold in checkpoints (default: 1000)")
   .option("--network <name>", "network name for cache scoping (default: mainnet)")
@@ -2157,6 +2157,137 @@ addTableFlags(indexCmd
     }
 
     await pipeline.run();
+    process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// prefetch — fill local checkpoint cache as fast as possible (fetch only)
+// ---------------------------------------------------------------------------
+
+indexCmd
+  .command("prefetch")
+  .description("Download checkpoints to local cache without decoding (maximize cache fill rate)")
+  .option("--epoch <number>", "prefetch a completed epoch (resolves range via gRPC)")
+  .option("--from <checkpoint>", "start checkpoint (inclusive)")
+  .option("--to <checkpoint>", "end checkpoint (inclusive)")
+  .option("--grpc-url <url>", "gRPC endpoint (for epoch resolution)")
+  .option("--archive-url <url>", "archive base URL")
+  .option("--concurrency <n>", "concurrent fetch connections", "3000")
+  .option("--network <name>", "network name for cache scoping", "mainnet")
+  .action(async (opts: any) => {
+    const { mkdirSync, readdirSync } = await import("fs");
+    const { join } = await import("path");
+    const { homedir } = await import("os");
+
+    const cfg = loadConfig();
+    const archiveUrl = opts.archiveUrl ?? process.env.JUN_ARCHIVE_URL ?? cfg.archiveUrl;
+    if (!archiveUrl) {
+      console.error("[jun] error: no archive URL configured. Set --archive-url, JUN_ARCHIVE_URL env var, or 'jun config set archive_url <url>'");
+      process.exit(1);
+    }
+
+    if (!opts.epoch && !opts.from) {
+      console.error("[jun] error: provide --epoch or --from/--to");
+      process.exit(1);
+    }
+
+    let from: bigint;
+    let to: bigint;
+
+    if (opts.epoch) {
+      const grpcUrl = opts.grpcUrl ?? process.env.JUN_GRPC_URL ?? cfg.grpcUrl;
+      if (!grpcUrl) {
+        console.error("[jun] error: --grpc-url required for epoch resolution");
+        process.exit(1);
+      }
+      if (!grpcUrl.includes(":")) {
+        console.error(`[jun] error: gRPC URL must include a port (e.g. ${grpcUrl}:443)`);
+        process.exit(1);
+      }
+      const { createGrpcClient } = await import("./grpc.ts");
+      const client = createGrpcClient({ url: grpcUrl });
+      const epochInfo = await client.getEpoch(BigInt(opts.epoch));
+      from = BigInt(epochInfo.firstCheckpoint!);
+      to = BigInt(epochInfo.lastCheckpoint!);
+      client.close();
+      if (!from || !to) {
+        console.error(`[jun] error: could not resolve epoch ${opts.epoch}`);
+        process.exit(1);
+      }
+    } else {
+      from = BigInt(opts.from);
+      if (!opts.to) {
+        console.error("[jun] error: --to required when using --from");
+        process.exit(1);
+      }
+      to = BigInt(opts.to);
+    }
+
+    const cacheBase = process.env.XDG_CACHE_HOME ?? join(homedir(), ".jun", "cache");
+    const cacheDir = join(cacheBase, "checkpoints", opts.network);
+    mkdirSync(cacheDir, { recursive: true });
+
+    const concurrency = parseInt(opts.concurrency);
+    const total = Number(to - from + 1n);
+
+    process.stderr.write(`[prefetch] scanning cache dir...\n`);
+    const existing = new Set(readdirSync(cacheDir));
+    let cachedCount = 0;
+    for (let i = 0n; i <= to - from; i++) {
+      if (existing.has(`${from + i}.binpb.zst`)) cachedCount++;
+    }
+    const toFetch = total - cachedCount;
+    process.stderr.write(`[prefetch] ${cachedCount.toLocaleString()} cached, ${toFetch.toLocaleString()} to fetch, concurrency=${concurrency}\n`);
+
+    let next = from;
+    let done = 0;
+    let fetched = 0;
+    let pendingWrites = 0;
+    const MAX_PENDING_WRITES = 1000;
+    const pendingWritePromises: Promise<void>[] = [];
+    const start = Date.now();
+
+    function logProgress() {
+      const elapsed = (Date.now() - start) / 1000;
+      if (elapsed < 0.01) return;
+      const rate = Math.round(fetched / elapsed);
+      const eta = rate > 0 ? Math.round((total - done) / rate) : 0;
+      const mbit = Math.round(rate * 26 * 8 / 1000);
+      process.stderr.write(`[prefetch] ${done.toLocaleString()}/${total.toLocaleString()} rate=${rate.toLocaleString()} req/s ~${mbit} Mbit/s ETA=${eta}s\n`);
+    }
+
+    async function worker() {
+      while (true) {
+        const seq = next++;
+        if (seq > to) break;
+        const filename = `${seq}.binpb.zst`;
+        if (existing.has(filename)) { done++; continue; }
+        try {
+          const res = await fetch(`${archiveUrl}/${filename}`);
+          if (res.ok) {
+            const buf = await res.arrayBuffer();
+            pendingWrites++;
+            const p = Bun.write(join(cacheDir, filename), buf).then(() => { pendingWrites--; }) as Promise<void>;
+            pendingWritePromises.push(p);
+            if (pendingWrites >= MAX_PENDING_WRITES) await Promise.race(pendingWritePromises);
+            fetched++;
+          }
+        } catch {}
+        done++;
+      }
+    }
+
+    const interval = setInterval(logProgress, 5000);
+    (interval as any).unref?.();
+
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    await Promise.all(pendingWritePromises);
+    clearInterval(interval);
+
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+    const rate = Math.round(fetched / parseFloat(elapsed));
+    const mbit = Math.round(rate * 26 * 8 / 1000);
+    process.stderr.write(`[prefetch] done — ${fetched.toLocaleString()} fetched + ${cachedCount.toLocaleString()} cached = ${total.toLocaleString()} total in ${elapsed}s (${rate.toLocaleString()} req/s, ~${mbit} Mbit/s)\n`);
     process.exit(0);
   });
 

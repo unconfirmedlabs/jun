@@ -17,9 +17,39 @@ Prebuilt Rust decoder included for `darwin-arm64` and `linux-x64`. Build from so
 
 ## Commands
 
+### Cache fill (prefetch)
+
+Download checkpoints to local disk at maximum throughput before indexing. Single event loop, 3K concurrent connections — saturates a 10 Gbit link.
+
+```bash
+# Prefetch a completed epoch
+jun index prefetch \
+  --epoch 1090 \
+  --archive-url https://checkpoints.mainnet.sui.io \
+  --grpc-url hayabusa.mainnet.unconfirmed.cloud:443
+
+# Prefetch explicit range
+jun index prefetch \
+  --from 261843573 --to 262511698 \
+  --archive-url https://checkpoints.mainnet.sui.io
+```
+
+Checkpoints are cached to `~/.jun/cache/checkpoints/{network}/`. Subsequent `replay-chain` runs skip the download phase entirely.
+
+**Key flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--epoch <n>` | — | Prefetch a completed epoch (resolves range via gRPC) |
+| `--from / --to` | — | Explicit checkpoint range |
+| `--archive-url` | `JUN_ARCHIVE_URL` | Archive base URL |
+| `--grpc-url` | `JUN_GRPC_URL` | gRPC endpoint (epoch resolution only) |
+| `--concurrency <n>` | `3000` | Concurrent fetch connections |
+| `--network <name>` | `mainnet` | Cache sub-directory |
+
 ### Backfill (replay-chain)
 
-Index historical checkpoints from the Sui archive. Two-phase: parallel HTTP fetch → cached disk → parallel Rust decode → write.
+Index historical checkpoints from the Sui archive. Two-phase: parallel HTTP fetch → cached disk → parallel Rust decode → write. Run `prefetch` first to maximize throughput.
 
 ```bash
 # Backfill a completed epoch → per-table SQLite files
@@ -57,7 +87,7 @@ jun index replay-chain \
 | `--clickhouse <url>` | — | ClickHouse HTTP URL |
 | `--postgres <url>` | — | Postgres connection URL |
 | `--workers <n>` | auto | Rust decoder threads |
-| `--concurrency <n>` | `200` | Archive fetch concurrency |
+| `--concurrency <n>` | `3000` | Archive fetch concurrency |
 | `--batch-size <n>` | `1000` | Write buffer flush threshold |
 
 ### Live indexing (stream-chain)
