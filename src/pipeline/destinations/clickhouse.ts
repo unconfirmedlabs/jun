@@ -527,7 +527,7 @@ const TABLES: ChTableDef[] = [
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Storage factory
+// Storage factories
 // ---------------------------------------------------------------------------
 
 export interface ClickHouseStorageOptions {
@@ -539,53 +539,121 @@ export interface ClickHouseStorageOptions {
   username?: string;
   /** Password (default: empty) */
   password?: string;
-  /** Compress INSERT payloads with LZ4 (default: false). Recommended for remote ClickHouse; skip for localhost. */
-  compress?: boolean;
 }
 
-export function createClickHouseStorage(options: ClickHouseStorageOptions = {}): Storage {
-  const {
-    url = "http://localhost:8123",
-    database = "jun",
-    username = "default",
-    password = "",
-  } = options;
+function resolveOptions(options: ClickHouseStorageOptions) {
+  return {
+    url: options.url ?? "http://localhost:8123",
+    database: options.database ?? "jun",
+    username: options.username ?? "default",
+    password: options.password ?? "",
+  };
+}
 
+async function initializeClient(client: ClickHouseClient): Promise<void> {
+  for (const table of TABLES) {
+    await client.exec({ query: table.ddl });
+  }
+}
+
+function buildTableRows(batch: ProcessedCheckpoint[]): Record<string, unknown>[][] {
+  return TABLES.map((table) => {
+    const rows: Record<string, unknown>[] = [];
+    for (const cp of batch) {
+      for (const record of table.getRecords(cp)) {
+        rows.push(table.mapRow(record, cp.checkpoint));
+      }
+    }
+    return rows;
+  });
+}
+
+/**
+ * ClickHouse storage for replay-chain (batch backfill).
+ *
+ * - LZ4 request compression: large JSON payloads compress 3-5x, reducing
+ *   network I/O and server-side parsing work.
+ * - insert_deduplicate=0: skip block checksum deduplication — sequential
+ *   backfill data has no duplicates so this is pure overhead.
+ * - optimize_on_insert=0: skip forced merge on each insert; let ClickHouse's
+ *   background merge process handle it. Avoids write amplification during load.
+ */
+export function createReplayClickHouseStorage(options: ClickHouseStorageOptions = {}): Storage {
+  const { url, database, username, password } = resolveOptions(options);
   let client: ClickHouseClient;
 
   return {
-    name: "clickhouse",
+    name: "replay-clickhouse",
 
     async initialize(): Promise<void> {
-      client = createClient({
-        url,
-        database,
-        username,
-        password,
-        compression: { request: options.compress ?? false },
-      });
-
-      for (const table of TABLES) {
-        await client.exec({ query: table.ddl });
-      }
+      client = createClient({ url, database, username, password, compression: { request: true } });
+      await initializeClient(client);
     },
 
     async write(batch: ProcessedCheckpoint[]): Promise<void> {
-      const tableRows = TABLES.map((table) => {
-        const rows: Record<string, unknown>[] = [];
-        for (const cp of batch) {
-          for (const record of table.getRecords(cp)) {
-            rows.push(table.mapRow(record, cp.checkpoint));
-          }
-        }
-        return rows;
-      });
-
+      const tableRows = buildTableRows(batch);
       await Promise.all(
         TABLES.map((table, i) => {
           const rows = tableRows[i]!;
           if (rows.length === 0) return Promise.resolve();
-          return client.insert({ table: table.name, values: rows, format: "JSONEachRow" });
+          return client.insert({
+            table: table.name,
+            values: rows,
+            format: "JSONEachRow",
+            clickhouse_settings: {
+              insert_deduplicate: 0,
+              optimize_on_insert: 0,
+            },
+          });
+        }),
+      );
+    },
+
+    async shutdown(): Promise<void> {
+      await client.close();
+    },
+  };
+}
+
+/**
+ * ClickHouse storage for stream-chain (live continuous indexing).
+ *
+ * - async_insert=1: server buffers multiple small inserts before writing a
+ *   part. Critical for live mode — without this, each tiny batch (10 cp ≈
+ *   50-100 rows/table) creates its own part, causing "too many parts" errors
+ *   and slow background merges over time.
+ * - wait_for_async_insert=1: block until the insert is acknowledged by the
+ *   async insert queue. Provides back-pressure and ensures data is committed
+ *   before the pipeline advances the cursor.
+ * - No compression: small batches don't benefit enough to justify the overhead.
+ */
+export function createLiveClickHouseStorage(options: ClickHouseStorageOptions = {}): Storage {
+  const { url, database, username, password } = resolveOptions(options);
+  let client: ClickHouseClient;
+
+  return {
+    name: "live-clickhouse",
+
+    async initialize(): Promise<void> {
+      client = createClient({ url, database, username, password });
+      await initializeClient(client);
+    },
+
+    async write(batch: ProcessedCheckpoint[]): Promise<void> {
+      const tableRows = buildTableRows(batch);
+      await Promise.all(
+        TABLES.map((table, i) => {
+          const rows = tableRows[i]!;
+          if (rows.length === 0) return Promise.resolve();
+          return client.insert({
+            table: table.name,
+            values: rows,
+            format: "JSONEachRow",
+            clickhouse_settings: {
+              async_insert: 1,
+              wait_for_async_insert: 1,
+            },
+          });
         }),
       );
     },

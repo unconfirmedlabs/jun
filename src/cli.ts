@@ -2073,8 +2073,8 @@ addTableFlags(indexCmd
     const pipeline = createPipeline();
 
     if (opts.clickhouse) {
-      const { createClickHouseStorage } = await import("./pipeline/destinations/clickhouse.ts");
-      pipeline.storage(createClickHouseStorage({
+      const { createReplayClickHouseStorage } = await import("./pipeline/destinations/clickhouse.ts");
+      pipeline.storage(createReplayClickHouseStorage({
         url: opts.clickhouse,
         database: opts.clickhouseDatabase ?? "jun",
       }));
@@ -2209,8 +2209,8 @@ addTableFlags(indexCmd
     const pipeline = createPipeline();
 
     if (opts.clickhouse) {
-      const { createClickHouseStorage } = await import("./pipeline/destinations/clickhouse.ts");
-      pipeline.storage(createClickHouseStorage({
+      const { createLiveClickHouseStorage } = await import("./pipeline/destinations/clickhouse.ts");
+      pipeline.storage(createLiveClickHouseStorage({
         url: opts.clickhouse,
         database: opts.clickhouseDatabase ?? "jun",
       }));
