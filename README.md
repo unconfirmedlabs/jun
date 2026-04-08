@@ -1,13 +1,10 @@
 # jun
 
-Sui data pipeline for Bun. Composable Source → Processor → Destination architecture with native gRPC streaming, BCS decoding, and multi-destination output.
+Sui blockchain data pipeline for Bun. Rust-accelerated checkpoint decoding, native gRPC streaming, and multi-destination storage.
 
 ```
-Sui Fullnode ──gRPC──▶ Sources ──▶ Processors ──▶ Destinations
-                       (live)     (events)        (Postgres)
-                       (archive)  (balances)       (SQLite)
-                                                   (SSE)
-                                                   (NATS)
+Archive (zstd) ──▶ Rust decoder (worker pool) ──▶ SQLite / Postgres / ClickHouse
+gRPC stream    ──▶                              ──▶ NATS / SSE / stdout
 ```
 
 ## Install
@@ -16,346 +13,222 @@ Sui Fullnode ──gRPC──▶ Sources ──▶ Processors ──▶ Destinat
 bun install
 ```
 
-## Quick start
+Prebuilt Rust decoder included for `darwin-arm64` and `linux-x64`. Build from source: `cd native/rust-decoder && cargo build --release`.
 
-### YAML config
+## Commands
 
-```yaml
-# config.yml
-sources:
-  live:
-    grpc: fullnode.testnet.sui.io:443
-  backfill:
-    archive: https://checkpoints.testnet.sui.io
-    from: 316756645
+### Cache fill (prefetch)
 
-processors:
-  events:
-    my_event:
-      type: "0xPKG::module::MyEvent"
-  balances:
-    coinTypes:
-      - "0x2::sui::SUI"
-
-storage:
-  postgres:
-    url: $DATABASE_URL
-```
+Download checkpoints to local disk at maximum throughput before indexing. Single event loop, 3K concurrent connections — saturates a 10 Gbit link.
 
 ```bash
-jun pipeline run config.yml
+# Prefetch a completed epoch
+jun index prefetch \
+  --epoch 1090 \
+  --archive-url https://checkpoints.mainnet.sui.io \
+  --grpc-url hayabusa.mainnet.unconfirmed.cloud:443
+
+# Prefetch explicit range
+jun index prefetch \
+  --from 261843573 --to 262511698 \
+  --archive-url https://checkpoints.mainnet.sui.io
 ```
 
-That's it. Jun fetches event field definitions from the chain automatically, creates tables, runs live + backfill concurrently, and writes events + balance changes to Postgres.
+Checkpoints are cached to `~/.jun/cache/checkpoints/{network}/`. Subsequent `replay-chain` runs skip the download phase entirely.
 
-### SDK
+**Key flags:**
 
-```typescript
-import { createPipeline } from "jun";
-import { createGrpcLiveSource } from "jun/pipeline/sources/grpc-live";
-import { createBalanceTracker } from "jun/pipeline/processors/balance-tracker";
-import { createPostgresDestination } from "jun/pipeline/destinations/postgres";
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--epoch <n>` | — | Prefetch a completed epoch (resolves range via gRPC) |
+| `--from / --to` | — | Explicit checkpoint range |
+| `--archive-url` | `JUN_ARCHIVE_URL` | Archive base URL |
+| `--grpc-url` | `JUN_GRPC_URL` | gRPC endpoint (epoch resolution only) |
+| `--concurrency <n>` | `100` | Concurrent fetch connections |
+| `--network <name>` | `mainnet` | Cache sub-directory |
 
-await createPipeline()
-  .source(createGrpcLiveSource({ url: "fullnode.testnet.sui.io:443" }))
-  .processor(createBalanceTracker({ coinTypes: ["0x2::sui::SUI"] }))
-  .destination(createPostgresDestination({ url: process.env.DATABASE_URL! }))
-  .run();
-```
+### Backfill (replay-chain)
 
-## Pipeline
-
-### Sources
-
-| Source | Description |
-|--------|-------------|
-| `live` | gRPC subscription to Sui fullnode. Real-time checkpoints. |
-| `backfill` | Fetch from checkpoint archive. Historical data from genesis. Worker pool for parallel decode. |
-
-```yaml
-sources:
-  live:
-    grpc: fullnode.testnet.sui.io:443
-  backfill:
-    archive: https://checkpoints.testnet.sui.io
-    from: 316756645          # number, "epoch:N", "timestamp:ISO", "package:0x..."
-    concurrency: 10          # parallel fetches (default: 10)
-    workers: 4               # decoder threads (default: auto)
-```
-
-### Processors
-
-| Processor | Description |
-|-----------|-------------|
-| `events` | Match events by Move type, auto-decode BCS. Fields resolved from chain. |
-| `balances` | Track coin balance changes. Running totals + ledger. |
-
-```yaml
-processors:
-  events:
-    my_event:                          # handler name = table name
-      type: "0xPKG::module::MyEvent"
-      # Fields auto-resolved from chain — no manual definition needed
-    item_listed:
-      type: "0xdead...::marketplace::ItemListedEvent"
-
-  balances:
-    coinTypes:
-      - "0x2::sui::SUI"
-      - "0xdba3...::usdc::USDC"
-    # or: coinTypes: "*"  for all coin types
-```
-
-### Storage (persistent, batched, retried)
-
-| Storage | Description |
-|---------|-------------|
-| `postgres` | Batch inserts. Event tables + balance tables (ledger + running totals). |
-| `sqlite` | Local SQLite file with WAL mode. |
-
-```yaml
-storage:
-  postgres:
-    url: $DATABASE_URL
-  # or:
-  sqlite:
-    path: ./events.db
-```
-
-#### SQLite vs Postgres schema differences
-
-Jun aims to produce identical row counts and semantically equivalent data in both dialects, but a few column types differ because the databases have different native types. **Every schema change must preserve the following invariants.**
-
-| Jun field | Postgres type | SQLite type | Why different |
-|---|---|---|---|
-| u64 / u128 / u256 (gas costs, epochs, versions, amounts) | `NUMERIC` | `NUMERIC` (type affinity) | SQLite NUMERIC auto-coerces strings to INTEGER for values ≤ 2^63−1 (all Sui u64 values). Larger values degrade to REAL with precision loss — jun's built-in tables never populate u128/u256, so this only matters for user-defined event fields. Neither Postgres nor SQLite have a native `uint64` type; [industry consensus](https://github.com/launchbadge/sqlx/discussions/2977) is to use `NUMERIC` in Postgres for arbitrary-precision integers beyond BIGINT's 2^63−1 limit. |
-| Timestamps (`sui_timestamp`, `indexed_at`) | `TIMESTAMPTZ` | `TEXT` | SQLite has no dedicated timestamp type. All values are written as ISO 8601 strings so they sort and compare lexicographically in both dialects. |
-| Booleans (`success`, `is_gas_object`) | `BOOLEAN` | `INTEGER` (0/1) | SQLite has no boolean type. Writers emit `true`/`false` for Postgres and `1`/`0` for SQLite. |
-| JSON blobs (`commands.args`, `system_transactions.data`) | `TEXT` | `TEXT` | Jun currently uses TEXT in both for portability. `JSONB` is available in Postgres for future optimization but is not schema-portable. |
-| User event fields (`FieldDefs`) | Generated per-type (`schema.ts`) | Generated per-type (`sql-helpers.ts`) | The DSL maps `address` → TEXT, `u8/u16/u32` → INTEGER, `u64/u128/u256` → NUMERIC (PG) / TEXT (SQLite), `vector<T>` → JSONB (PG) / TEXT (SQLite). |
-
-Practical consequences:
-- All numeric columns are nullable and the writer converts `""` and `undefined` to SQL `NULL` via `numOrNull()`. Postgres `NUMERIC` rejects the empty-string literal; SQLite would silently store it as TEXT, losing numeric ordering. Normalizing to NULL keeps both behaviors identical.
-- Timestamp columns are written as `.toISOString()` in both dialects. Do not pass raw `Date` objects — Bun.SQL does not auto-convert them.
-- When adding or modifying a storage table, verify the DDL in both `src/pipeline/destinations/sql.ts` (SQLite branch and Postgres branch) and update this table if a new column type divergence is introduced.
-
-### Broadcast (fire-and-forget, low latency)
-
-| Broadcast | Description |
-|-----------|-------------|
-| `sse` | Server-Sent Events streaming with filtering. |
-| `nats` | NATS pub/sub with subject hierarchy. |
-| `stdout` | Console output (JSONL or formatted). Default if nothing configured. |
-
-```yaml
-broadcast:
-  sse:
-    port: 8080
-  nats:
-    url: nats://localhost:4222
-    prefix: jun
-  stdout:
-    format: jsonl
-```
-
-## Example configs
-
-Ready-to-use configs in the `configs/` directory:
-
-| Config | Use case |
-|--------|----------|
-| [`balance-tracker.yml`](configs/balance-tracker.yml) | Track SUI holders with running totals. Whale dashboards, balance alerts. |
-| [`event-indexer.yml`](configs/event-indexer.yml) | Index specific Move events to Postgres. dApp analytics, contract monitoring. |
-| [`multi-coin-tracker.yml`](configs/multi-coin-tracker.yml) | Track all coin types (`*`). DeFi dashboards, portfolio tracking. |
-| [`live-stream.yml`](configs/live-stream.yml) | Stream to console — no database. Quick inspection, debugging. |
-| [`full-stack.yml`](configs/full-stack.yml) | Events + balances + Postgres + SSE + NATS. Full production setup. |
-| [`local-dev.yml`](configs/local-dev.yml) | SQLite storage, no external deps. Prototyping, local exploration. |
+Index historical checkpoints from the Sui archive. Two-phase: parallel HTTP fetch → cached disk → parallel Rust decode → write. Run `prefetch` first to maximize throughput.
 
 ```bash
-# Try any config:
-jun pipeline run configs/live-stream.yml
-DATABASE_URL=postgres://... jun pipeline run configs/balance-tracker.yml
+# Backfill a completed epoch → per-table SQLite files
+jun index replay-chain \
+  --epoch 1090 \
+  --archive-url https://checkpoints.mainnet.sui.io \
+  --grpc-url hayabusa.mainnet.unconfirmed.cloud:443 \
+  --output ./epoch-1090
+
+# Explicit checkpoint range → ClickHouse
+jun index replay-chain \
+  --from 261843573 --to 262511698 \
+  --archive-url https://checkpoints.mainnet.sui.io \
+  --grpc-url hayabusa.mainnet.unconfirmed.cloud:443 \
+  --clickhouse http://localhost:8123
+
+# Explicit checkpoint range → Postgres
+jun index replay-chain \
+  --from 261843573 --to 262511698 \
+  --archive-url https://checkpoints.mainnet.sui.io \
+  --grpc-url hayabusa.mainnet.unconfirmed.cloud:443 \
+  --postgres postgresql://user:pass@localhost/jun
 ```
 
-## Balance indexing
+**Key flags:**
 
-Jun tracks coin holder balances in real-time with two tables:
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--epoch <n>` | — | Backfill a completed epoch (resolves range via gRPC) |
+| `--from / --to` | — | Explicit checkpoint range |
+| `--archive-url` | `JUN_ARCHIVE_URL` | Checkpoint archive base URL |
+| `--grpc-url` | `JUN_GRPC_URL` | gRPC endpoint for epoch resolution |
+| `--network <name>` | `mainnet` | Network name for cache directory scoping |
+| `--output <dir>` | `./replay-chain` | Per-table SQLite output directory |
+| `--clickhouse <url>` | — | ClickHouse HTTP URL |
+| `--postgres <url>` | — | Postgres connection URL |
+| `--workers <n>` | auto | Rust decoder threads |
+| `--concurrency <n>` | `3000` | Archive fetch concurrency |
+| `--batch-size <n>` | `1000` | Write buffer flush threshold |
 
-- `balance_changes` — every individual change (the ledger)
-- `balances` — current running totals (the snapshot)
+### Live indexing (stream-chain)
 
-```sql
--- Top SUI holders
-SELECT address, balance FROM balances
-WHERE coin_type = '0x2::sui::SUI' AND balance > 0
-ORDER BY balance DESC LIMIT 100;
-
--- Single address balance (O(1) primary key lookup)
-SELECT balance FROM balances
-WHERE address = '0x...' AND coin_type = '0x2::sui::SUI';
-
--- Recent transfers
-SELECT * FROM balance_changes
-WHERE address = '0x...'
-ORDER BY checkpoint_seq DESC LIMIT 20;
-```
-
-Balance changes are computed from:
-- **Live (gRPC)**: pre-computed by fullnode
-- **Archive (backfill)**: derived from coin object diffs + accumulator writes in worker threads
-
-## Remote config
-
-Fetch config from S3 or HTTPS instead of a local file:
+Subscribe to the gRPC checkpoint stream and write continuously.
 
 ```bash
-jun pipeline run --config-url s3://my-bucket/configs/indexer.yml
-# or
-JUN_CONFIG_URL=s3://my-bucket/configs/indexer.yml jun pipeline run
-```
+# Live stream → NATS
+jun index stream-chain \
+  --grpc-url hayabusa.mainnet.unconfirmed.cloud:443 \
+  --nats nats://localhost:4222
 
-S3 credentials via standard AWS env vars (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL`).
+# Live stream → SSE on port 8080
+jun index stream-chain \
+  --grpc-url hayabusa.mainnet.unconfirmed.cloud:443 \
+  --sse 8080
 
-## Logging
-
-Two independent output channels:
-
-| Flag | Human output (stdout) | Machine logs (stderr) | Use case |
-|------|----------------------|----------------------|----------|
-| (default) | ✅ | ❌ | Developer, demo |
-| `--log` | ✅ | ✅ info | Local dev with logs |
-| `--log=debug` | ✅ | ✅ debug | Debugging |
-| `--quiet` | ❌ | ✅ info | Production, Docker |
-
-```bash
-jun pipeline run config.yml                    # human output only
-jun pipeline run config.yml --log              # + JSON logs to stderr
-jun pipeline run config.yml --log=debug        # + debug logs
-jun pipeline run config.yml --quiet            # production (logs only)
-jun pipeline run config.yml --quiet --log 2>/var/log/jun.jsonl
-```
-
-## CLI reference
-
-### Pipeline
-
-```bash
-jun pipeline run config.yml                    # run from YAML config
-jun pipeline run --config-url s3://bucket/key  # run from remote config
-jun pipeline run config.yml --quiet --log      # production mode
+# Live stream → Postgres
+jun index stream-chain \
+  --grpc-url hayabusa.mainnet.unconfirmed.cloud:443 \
+  --postgres postgresql://user:pass@localhost/jun
 ```
 
 ### Chain queries
 
 ```bash
-jun c info                          # chain ID, epoch, checkpoint
-jun c object 0x5                    # get object
-jun c balance 0xADDR                # SUI balance
-jun c tx-block DIGEST               # transaction details
-jun c package 0x1                   # package modules
-jun c ping                          # gRPC latency
+jun client balance <address>      # coin balances
+jun client object <id>            # object state
+jun ns resolve <name>             # .sui name resolution
+jun verify tx <digest>            # cryptographic verification
 ```
 
-### Other commands
+## Table selection
+
+By default all tables are indexed. Select specific tables with flags:
 
 ```bash
-jun verify tx DIGEST                # cryptographic verification
-jun codegen 0xPKG::module::Struct   # generate field definitions
-jun mcp                             # MCP server for AI
-jun chat --live                     # AI chat with chain data
-jun config show                     # environment management
-jun ns resolve-address name.sui     # name service
+jun index replay-chain --transactions --balance-changes --object-changes ...
 ```
 
-## SDK exports
+| Flag | Tables written |
+|------|---------------|
+| `--transactions` | `transactions`, `move_calls` |
+| `--balance-changes` | `balance_changes` |
+| `--object-changes` | `object_changes` |
+| `--events` | `raw_events` |
+| `--dependencies` | `transaction_dependencies` |
+| `--inputs` | `transaction_inputs` |
+| `--commands` | `commands` |
+| `--system-transactions` | `system_transactions` |
+| `--unchanged-consensus-objects` | `unchanged_consensus_objects` |
+| `--checkpoints` | `checkpoints` |
 
-```
-jun                                     createPipeline, types
-jun/pipeline/sources/grpc-live          createGrpcLiveSource
-jun/pipeline/sources/archive            createArchiveSource
-jun/pipeline/processors/event-decoder   createEventDecoder
-jun/pipeline/processors/balance-tracker createBalanceTracker
-jun/pipeline/destinations/postgres      createPostgresDestination
-jun/pipeline/destinations/sqlite        createSqliteDestination
-jun/pipeline/destinations/sse           createSseDestination
-jun/pipeline/destinations/nats          createNatsDestination
-jun/pipeline/destinations/stdout        createStdoutDestination
-jun/pipeline/config                     parsePipelineConfig
-jun/grpc                                createGrpcClient
-jun/schema                              buildBcsSchema, generateDDL
-jun/checkpoints                         createArchiveClient
-jun/verify                              verifyTransaction, verifyObject
-jun/codegen                             generateFieldDSL
-jun/mcp                                 createMcpServer
-jun/signing                             signMessage, verifyMessage
-jun/logger                              createLogger
-jun/normalize                           normalizeSuiAddress, normalizeCoinType
-```
+## Storage tables
+
+| Table | Key columns |
+|-------|-------------|
+| `transactions` | digest, sender, success, gas costs, epoch, error info, lamport_version |
+| `move_calls` | tx_digest, call_index, package, module, function |
+| `balance_changes` | tx_digest, address, coin_type, amount |
+| `object_changes` | tx_digest, object_id, change_type, object_type, owner before/after |
+| `transaction_dependencies` | tx_digest, depends_on_digest |
+| `transaction_inputs` | tx_digest, input_index, kind, object_id, coin_type, amount |
+| `commands` | tx_digest, command_index, kind, package, module, function, args |
+| `system_transactions` | tx_digest, kind, data (JSON) |
+| `unchanged_consensus_objects` | tx_digest, object_id, kind, version |
+| `checkpoints` | sequence_number, epoch, digest, timestamp, rolling gas totals |
+| `raw_events` | tx_digest, event_seq, package_id, module, event_type, contents |
 
 ## Performance
 
-Benchmarked on AMD Ryzen 9 9950X3D (16C/32T, 10gbit). Archive backfill with balance tracking + event decoding for all coin types. Full pipeline: HTTP fetch → Zig checkpoint processor (zstd + protobuf + BCS + balance diff) → ordered drain.
+Benchmarked on a bare metal server (AMD EPYC, 10 Gbit), 50K mainnet checkpoints from disk cache, 24 Rust decoder workers.
 
-### Backfill throughput
+### Per-table throughput (SQLite, replay)
 
-| Mode | Throughput | Bandwidth | Notes |
-|------|-----------|-----------|-------|
-| Network (10gbit) | **15,775 cp/s** | 7.2 Gbit/s | 358K checkpoints in 23s, 32 workers |
+Write throughput varies by row cardinality. Plan accordingly when backfilling:
 
-### Scaling by worker count (network, concurrency 500)
+| Table | cp/s |
+|-------|------|
+| `checkpoints` | 20,955 |
+| `commands` | 18,268 |
+| `balance_changes` | 16,622 |
+| `events` | 11,701 |
+| `system_transactions` | 11,103 |
+| `unchanged_consensus_objects` | 10,810 |
+| `transaction_inputs` | 10,469 |
+| `transactions` + `move_calls` | 4,589 |
+| `transaction_dependencies` | 3,246 |
+| `object_changes` | 2,318 |
 
-| Workers | Throughput |
-|---------|-----------|
-| 8 | 5,442 cp/s |
-| 16 | 6,850 cp/s |
-| 32 | **15,775 cp/s** |
+`object_changes` is the bottleneck for full-table runs (~15–30 rows/tx, 15 columns). If you don't need object change history, exclude it with table selection flags for a 5–9× throughput improvement.
 
-At 15,775 cp/s, a full genesis backfill (~500M checkpoints) completes in ~9 hours.
+### Backend comparison (all tables, replay)
 
-### Architecture
+| Backend | cp/s | Notes |
+|---------|------|-------|
+| SQLite (UNLOGGED → WAL at shutdown) | ~2,300 | Bottlenecked by object_changes |
+| ClickHouse (LZ4, async insert off) | ~6,300 | Best for analytics queries |
+| Postgres (UNNEST, UNLOGGED tables) | ~5,360 | Good for OLTP + analytics |
 
-The performance comes from a layered optimization stack:
+All backends use replay-optimized adapters: UNLOGGED tables or equivalent bulk-insert settings during load, indexes built at shutdown.
 
-- **Zig checkpoint processor** (`native/checkpoint_processor.zig`): single FFI call does zstd decompression + protobuf wire format parsing + BCS event decode + BCS balance computation + coin version diffing + aggregation. 17x faster than the equivalent JS pipeline.
-- **Zero-copy worker IPC**: workers transfer raw Zig output buffers via `postMessage` transferable — no structured clone of JS objects.
-- **Streaming pipeline**: fetch, decode, and yield run concurrently with backpressure signaling. No window-based batching.
-- **Direct fetch**: backfill bypasses the disk cache entirely — checkpoints go straight from CDN to worker pool.
+### Checkpoint cache
 
-### Fallback
-
-Set `JUN_LEGACY_PARSERS=1` to fall back to the pure TypeScript pipeline (protobufjs + @mysten/sui/bcs). Useful for debugging or platforms without Zig.
-
-Build the native lib: `cd native && ./build.sh` (requires Zig + libzstd).
+Phase 1 fetches and caches compressed checkpoints to `~/.jun/cache/checkpoints/{network}/` before decoding. Subsequent runs skip the download entirely. At 300 concurrency: ~2,500–3,000 req/s fetch rate (~26 KB/checkpoint compressed).
 
 ## Architecture
 
 ```
 src/
   pipeline/
-    types.ts              Source, Processor, Destination interfaces
-    pipeline.ts           Orchestrator (connects S→P→D)
-    config-parser.ts      YAML config → pipeline components
+    pipeline.ts               Orchestrator: Source → Processor → Writer → Broadcast
+    types.ts                   Core interfaces (Source, Processor, Storage, etc.)
+    write-buffer.ts            Batching + backpressure
     sources/
-      grpc-live.ts        Live gRPC streaming
-      archive.ts          Archive with worker pool
+      grpc.ts                  Live gRPC subscription (native HTTP/2)
+      archive.ts               Archive backfill (parallel fetch + Rust decode)
     processors/
-      event-decoder.ts    Event matching + BCS decode
-      balance-tracker.ts  Balance change extraction
+      events.ts                BCS event decoding
+      balanceChanges.ts        Balance change extraction
+      transactionBlocks.ts     Transaction + move call extraction
     destinations/
-      postgres.ts         Batch inserts (events + balances)
-      sqlite.ts           SQLite with WAL
-      sse.ts              SSE streaming
-      nats.ts             NATS publishing
-      stdout.ts           Console output
-  grpc.ts                 Native gRPC client (@grpc/grpc-js)
-  archive.ts              Checkpoint archive client
-  archive-balance.ts      Balance computation from archive ObjectSet
-  schema.ts               Field DSL → BCS schemas + Postgres DDL
-  normalize.ts            @mysten/sui/utils normalization
-  logger.ts               Structured logging (pino → stderr)
-  cli.ts                  CLI commands
-  mcp.ts                  MCP server (chain queries + dev tools)
+      clickhouse.ts            ClickHouse (replay + live adapters)
+      per-table-sqlite.ts      Per-table SQLite files (replay + live adapters)
+      per-table-postgres.ts    Per-table Postgres (replay + live adapters)
+      sse.ts                   Server-Sent Events broadcast
+      nats.ts                  NATS broadcast
+      stdout.ts                JSONL stdout broadcast
+  grpc.ts                      gRPC client
+  schema.ts                    Field DSL → BCS schemas + DDL generation
+  normalize.ts                 Address/type normalization
+  db.ts                        Postgres + SQLite connection factories
+  cli.ts                       CLI entry point
+native/
+  rust-decoder/                Rust checkpoint decoder source
+  lib/                         Prebuilt binaries (darwin-arm64, linux-x64)
 ```
+
+Each backend has separate **replay** and **live** adapters optimized for their workload:
+- **Replay** (batch backfill): bulk-optimized — UNLOGGED tables, deferred indexes, LZ4 compression, no deduplication overhead
+- **Live** (continuous indexing): reliability-optimized — logged tables, immediate indexes, idempotent ON CONFLICT DO NOTHING, async insert for ClickHouse
 
 ## License
 

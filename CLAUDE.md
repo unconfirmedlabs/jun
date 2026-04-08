@@ -93,7 +93,7 @@ jun verify tx <digest>
 | `--output <dir>` | Per-table SQLite output directory |
 | `--clickhouse <url>` | ClickHouse HTTP URL |
 | `--clickhouse-database <db>` | ClickHouse database (default: jun) |
-| `--concurrency <n>` | Archive fetch concurrency (default: 200) |
+| `--concurrency <n>` | Archive fetch concurrency (default: 100) |
 | `--workers <n>` | Decoder worker threads (default: auto) |
 | `--batch-size <n>` | Write buffer flush threshold in checkpoints (default: 1000) |
 | `--all` | Index all tables (default) |
