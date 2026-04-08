@@ -571,12 +571,13 @@ function buildTableRows(batch: ProcessedCheckpoint[]): Record<string, unknown>[]
 /**
  * ClickHouse storage for replay-chain (batch backfill).
  *
- * - LZ4 request compression: large JSON payloads compress 3-5x, reducing
- *   network I/O and server-side parsing work.
  * - insert_deduplicate=0: skip block checksum deduplication — sequential
  *   backfill data has no duplicates so this is pure overhead.
  * - optimize_on_insert=0: skip forced merge on each insert; let ClickHouse's
  *   background merge process handle it. Avoids write amplification during load.
+ * - compression disabled: Bun's zlib implementation produces payloads that
+ *   trigger ZLIB_INFLATE_FAILED on ClickHouse Cloud (code 354). Raw inserts
+ *   are reliable; ClickHouse Cloud's TLS handles transport compression anyway.
  */
 export function createReplayClickHouseStorage(options: ClickHouseStorageOptions = {}): Storage {
   const { url, database, username, password } = resolveOptions(options);
@@ -586,7 +587,7 @@ export function createReplayClickHouseStorage(options: ClickHouseStorageOptions 
     name: "replay-clickhouse",
 
     async initialize(): Promise<void> {
-      client = createClient({ url, database, username, password, compression: { request: true } });
+      client = createClient({ url, database, username, password, compression: { request: false } });
       await initializeClient(client);
     },
 
