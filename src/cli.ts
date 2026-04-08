@@ -2000,7 +2000,7 @@ addTableFlags(indexCmd
   .option("--postgres <url>", "Postgres connection URL")
   .option("--clickhouse <url>", "ClickHouse HTTP URL (e.g. http://localhost:8123)")
   .option("--clickhouse-database <db>", "ClickHouse database name", "jun")
-  .option("--clickhouse-batch-size <n>", "checkpoints per worker batch insert (default: 10000)")
+  .option("--clickhouse-batch-size <n>", "checkpoints per worker batch insert (default: 2000)")
   .option("--epoch <number>", "backfill a completed epoch")
   .option("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")

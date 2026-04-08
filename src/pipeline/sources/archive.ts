@@ -224,7 +224,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
               clickhouseDatabase: config.clickhouseWriteConfig.database,
               clickhouseUsername: config.clickhouseWriteConfig.username,
               clickhousePassword: config.clickhouseWriteConfig.password,
-              batchSize: config.clickhouseWriteConfig?.batchSize ?? 10000,
+              batchSize: config.clickhouseWriteConfig?.batchSize ?? 2000,
               balanceCoinTypes: Array.isArray(balanceCoinTypes) ? balanceCoinTypes : null,
             }
           : config.postgresWriteConfig
