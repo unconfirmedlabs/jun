@@ -58,7 +58,7 @@ interface ChTableDef {
   mapRow(record: unknown, checkpoint: Checkpoint): Record<string, unknown>;
 }
 
-const TABLES: ChTableDef[] = [
+export const TABLES: ChTableDef[] = [
   // ── transactions ──────────────────────────────────────────────────────────
   {
     name: "transactions",
@@ -556,7 +556,7 @@ async function initializeClient(client: ClickHouseClient): Promise<void> {
   }
 }
 
-function buildTableRows(batch: ProcessedCheckpoint[]): Record<string, unknown>[][] {
+export function buildTableRows(batch: ProcessedCheckpoint[]): Record<string, unknown>[][] {
   return TABLES.map((table) => {
     const rows: Record<string, unknown>[] = [];
     for (const cp of batch) {
@@ -566,6 +566,49 @@ function buildTableRows(batch: ProcessedCheckpoint[]): Record<string, unknown>[]
     }
     return rows;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Internal unified factory
+// ---------------------------------------------------------------------------
+
+function createClickHouseStorage(options: ClickHouseStorageOptions, mode: "replay" | "live"): Storage {
+  const { url, database, username, password } = resolveOptions(options);
+  let client: ClickHouseClient;
+
+  const settings =
+    mode === "replay"
+      ? { insert_deduplicate: 0 as const, optimize_on_insert: 0 as const, async_insert: 1 as const, wait_for_async_insert: 0 as const }
+      : { async_insert: 1 as const, wait_for_async_insert: 1 as const };
+
+  return {
+    name: mode === "replay" ? "replay-clickhouse" : "live-clickhouse",
+
+    async initialize(): Promise<void> {
+      client = createClient({ url, database, username, password, compression: { request: false } });
+      await initializeClient(client);
+    },
+
+    async write(batch: ProcessedCheckpoint[]): Promise<void> {
+      const tableRows = buildTableRows(batch);
+      await Promise.all(
+        TABLES.map((table, i) => {
+          const rows = tableRows[i]!;
+          if (rows.length === 0) return Promise.resolve();
+          return client.insert({
+            table: table.name,
+            values: rows,
+            format: "JSONEachRow",
+            clickhouse_settings: settings,
+          });
+        }),
+      );
+    },
+
+    async shutdown(): Promise<void> {
+      await client.close();
+    },
+  };
 }
 
 /**
@@ -584,42 +627,7 @@ function buildTableRows(batch: ProcessedCheckpoint[]): Record<string, unknown>[]
  *   are reliable; ClickHouse Cloud's TLS handles transport compression anyway.
  */
 export function createReplayClickHouseStorage(options: ClickHouseStorageOptions = {}): Storage {
-  const { url, database, username, password } = resolveOptions(options);
-  let client: ClickHouseClient;
-
-  return {
-    name: "replay-clickhouse",
-
-    async initialize(): Promise<void> {
-      client = createClient({ url, database, username, password, compression: { request: false } });
-      await initializeClient(client);
-    },
-
-    async write(batch: ProcessedCheckpoint[]): Promise<void> {
-      const tableRows = buildTableRows(batch);
-      await Promise.all(
-        TABLES.map((table, i) => {
-          const rows = tableRows[i]!;
-          if (rows.length === 0) return Promise.resolve();
-          return client.insert({
-            table: table.name,
-            values: rows,
-            format: "JSONEachRow",
-            clickhouse_settings: {
-              insert_deduplicate: 0,
-              optimize_on_insert: 0,
-              async_insert: 1,
-              wait_for_async_insert: 0,
-            },
-          });
-        }),
-      );
-    },
-
-    async shutdown(): Promise<void> {
-      await client.close();
-    },
-  };
+  return createClickHouseStorage(options, "replay");
 }
 
 /**
@@ -635,38 +643,5 @@ export function createReplayClickHouseStorage(options: ClickHouseStorageOptions 
  * - No compression: small batches don't benefit enough to justify the overhead.
  */
 export function createLiveClickHouseStorage(options: ClickHouseStorageOptions = {}): Storage {
-  const { url, database, username, password } = resolveOptions(options);
-  let client: ClickHouseClient;
-
-  return {
-    name: "live-clickhouse",
-
-    async initialize(): Promise<void> {
-      client = createClient({ url, database, username, password });
-      await initializeClient(client);
-    },
-
-    async write(batch: ProcessedCheckpoint[]): Promise<void> {
-      const tableRows = buildTableRows(batch);
-      await Promise.all(
-        TABLES.map((table, i) => {
-          const rows = tableRows[i]!;
-          if (rows.length === 0) return Promise.resolve();
-          return client.insert({
-            table: table.name,
-            values: rows,
-            format: "JSONEachRow",
-            clickhouse_settings: {
-              async_insert: 1,
-              wait_for_async_insert: 1,
-            },
-          });
-        }),
-      );
-    },
-
-    async shutdown(): Promise<void> {
-      await client.close();
-    },
-  };
+  return createClickHouseStorage(options, "live");
 }

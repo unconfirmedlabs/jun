@@ -4,7 +4,7 @@
  *
  * Usage: bun scripts/test-clickhouse.ts
  */
-import { createClickHouseStorage } from "../src/pipeline/destinations/clickhouse.ts";
+import { createReplayClickHouseStorage } from "../src/pipeline/destinations/clickhouse.ts";
 import { createClient } from "@clickhouse/client";
 import type { ProcessedCheckpoint } from "../src/pipeline/types.ts";
 
@@ -241,7 +241,7 @@ const syntheticCheckpoint: ProcessedCheckpoint = {
 // Run
 // ---------------------------------------------------------------------------
 
-const storage = createClickHouseStorage({
+const storage = createReplayClickHouseStorage({
   url: "http://localhost:8123",
   database: "jun",
 });

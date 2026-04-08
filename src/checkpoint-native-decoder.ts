@@ -28,6 +28,11 @@ type NativeCheckpointDecoder = {
   decode_checkpoint_binary_selective: NativeSelectiveDecodeFn;
 };
 
+/** Keys whose FFI signature is the standard 4-arg NativeDecodeFn (no mask argument). */
+type NativeDecodeFnKey = Exclude<keyof NativeCheckpointDecoder, "decode_checkpoint_binary_selective">;
+/** Keys whose FFI signature returns binary output (used in decodeBinary). */
+type NativeBinaryDecodeFnKey = "decode_checkpoint_binary" | "decode_subscribe_response_binary";
+
 /** Extraction mask bits — controls which record types the Rust decoder extracts. */
 export const ExtractMask = {
   TRANSACTIONS:         1 << 0,
@@ -91,23 +96,19 @@ for (const libPath of LIB_PATHS) {
     });
     nativeDecoder = lib.symbols;
     break;
-  } catch {}
+  } catch (err) {
+    process.stderr.write(`[jun] native decoder load failed (${libPath}): ${err}\n`);
+  }
+}
+if (!nativeDecoder && process.env.JUN_BCS_DECODER !== "js") {
+  process.stderr.write(`[jun] native decoder unavailable — falling back to JS decoder (significantly slower)\n`);
 }
 
 const decoder = new TextDecoder();
 const DEFAULT_CAPACITY = 16 * 1024 * 1024;
-const MAX_CAPACITY = 128 * 1024 * 1024;
+const MAX_CAPACITY = (Number(process.env.JUN_DECODER_MAX_CAPACITY_MB) || 128) * 1024 * 1024;
 const BINARY_DEFAULT_CAPACITY = 64 * 1024 * 1024;
-const BINARY_MAX_CAPACITY = 256 * 1024 * 1024;
-
-let outputBuf = new Uint8Array(DEFAULT_CAPACITY);
-let outputPtr = ptr(outputBuf);
-
-function ensureCapacity(capacity: number): void {
-  if (outputBuf.length >= capacity) return;
-  outputBuf = new Uint8Array(capacity);
-  outputPtr = ptr(outputBuf);
-}
+const BINARY_MAX_CAPACITY = (Number(process.env.JUN_DECODER_BINARY_MAX_CAPACITY_MB) || 256) * 1024 * 1024;
 
 function reviveBytes(value: unknown): Uint8Array | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -130,29 +131,29 @@ function hydrateResponse(response: GrpcCheckpointResponse): GrpcCheckpointRespon
   return response;
 }
 
-function decodeJson(symbol: keyof NativeCheckpointDecoder, input: Uint8Array): string | null {
+function decodeJson(symbol: NativeDecodeFnKey, input: Uint8Array): string | null {
   if (!nativeDecoder) return null;
 
-  let capacity = outputBuf.length;
+  let capacity = DEFAULT_CAPACITY;
   while (capacity <= MAX_CAPACITY) {
-    ensureCapacity(capacity);
-    const bytesWritten = nativeDecoder[symbol](ptr(input), input.length, outputPtr, outputBuf.length);
+    const outBuf = new Uint8Array(capacity);
+    const bytesWritten = nativeDecoder[symbol](ptr(input), input.length, ptr(outBuf), outBuf.length);
     if (bytesWritten > 0) {
-      return decoder.decode(outputBuf.subarray(0, bytesWritten));
+      return decoder.decode(outBuf.subarray(0, bytesWritten));
     }
     capacity *= 2;
   }
 
-  throw new Error(`Native checkpoint decoder failed for ${symbol}`);
+  throw new Error(`Native checkpoint decoder failed for ${symbol}: output exceeded ${MAX_CAPACITY} bytes (set JUN_DECODER_MAX_CAPACITY_MB to increase)`);
 }
 
-function decodeResponse(symbol: keyof NativeCheckpointDecoder, input: Uint8Array): GrpcCheckpointResponse | null {
+function decodeResponse(symbol: NativeDecodeFnKey, input: Uint8Array): GrpcCheckpointResponse | null {
   const json = decodeJson(symbol, input);
   if (!json) return null;
   return hydrateResponse(JSON.parse(json) as GrpcCheckpointResponse);
 }
 
-function decodeBinary(symbol: keyof NativeCheckpointDecoder, input: Uint8Array): Uint8Array | null {
+function decodeBinary(symbol: NativeBinaryDecodeFnKey, input: Uint8Array): Uint8Array | null {
   if (!nativeDecoder) return null;
 
   let capacity = BINARY_DEFAULT_CAPACITY;
@@ -165,7 +166,7 @@ function decodeBinary(symbol: keyof NativeCheckpointDecoder, input: Uint8Array):
     capacity *= 2;
   }
 
-  throw new Error(`Native checkpoint decoder failed for ${symbol}`);
+  throw new Error(`Native checkpoint decoder failed for ${symbol}: output exceeded ${BINARY_MAX_CAPACITY} bytes (set JUN_DECODER_BINARY_MAX_CAPACITY_MB to increase)`);
 }
 
 export function isNativeCheckpointDecoderAvailable(): boolean {
@@ -219,7 +220,7 @@ export function decodeArchiveCheckpointBinarySelective(input: Uint8Array, mask: 
     capacity *= 2;
   }
 
-  throw new Error("Native checkpoint decoder failed for selective binary decode");
+  throw new Error(`Native checkpoint decoder failed for selective binary decode: output exceeded ${BINARY_MAX_CAPACITY} bytes (set JUN_DECODER_BINARY_MAX_CAPACITY_MB to increase)`);
 }
 
 export function decodeGetCheckpointResponseNative(

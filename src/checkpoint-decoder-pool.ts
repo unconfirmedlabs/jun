@@ -12,6 +12,17 @@ export interface StreamDecodeResult {
   parsed?: ParsedBinaryCheckpoint;
 }
 
+export interface WorkerWriteConfig {
+  backend: "clickhouse" | "postgres";
+  clickhouseUrl?: string;
+  clickhouseDatabase?: string;
+  clickhouseUsername?: string;
+  clickhousePassword?: string;
+  postgresUrl?: string;
+  batchSize?: number;
+  balanceCoinTypes?: string[] | null;
+}
+
 export interface CheckpointDecoderPool {
   /** Assign cached file ranges to workers — workers own the decode loop. */
   decodeCachedRange(
@@ -20,6 +31,18 @@ export interface CheckpointDecoderPool {
     cacheDir: string,
     extractMask?: number,
   ): AsyncIterable<StreamDecodeResult>;
+  /**
+   * Assign cached file ranges to workers — workers decode AND write directly
+   * to ClickHouse or Postgres. Returns when all workers have finished.
+   */
+  decodeAndWriteCachedRange(
+    from: bigint,
+    to: bigint,
+    cacheDir: string,
+    extractMask: number | undefined,
+    writeConfig: WorkerWriteConfig,
+    onProgress?: (decoded: number) => void,
+  ): Promise<void>;
   /** Terminate all workers. */
   shutdown(): void;
   /** Number of workers in the pool. */
@@ -42,7 +65,18 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
     closed: boolean;
   }
 
+  interface WriteState {
+    doneWorkers: number;
+    totalDecoded: number;
+    resolve: () => void;
+    reject: (err: Error) => void;
+    onProgress?: (total: number) => void;
+  }
+
   let activeStream: StreamState | null = null;
+  let activeWrite: WriteState | null = null;
+  /** Per-worker running decoded counts — used to turn worker running-totals into deltas. */
+  const workerProgress: number[] = new Array(size).fill(0);
 
   function closeStream(state: StreamState): void {
     if (state.closed) return;
@@ -95,13 +129,49 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
           return;
         }
 
-        if (msg.type === "done" && activeStream) {
-          activeStream.doneWorkers += 1;
-          if (activeStream.doneWorkers >= workers.length) {
-            closeStream(activeStream);
-          }
+        if (msg.type === "write-progress" && activeWrite) {
+          // Worker sends its running total; pool tracks per-worker last-seen
+          // values and computes the global total.
+          const workerTotal = msg.decoded as number;
+          const prev = workerProgress[i] ?? 0;
+          workerProgress[i] = workerTotal;
+          activeWrite.totalDecoded += workerTotal - prev;
+          activeWrite.onProgress?.(activeWrite.totalDecoded);
           return;
         }
+
+        if (msg.type === "write-error") {
+          console.error(`[decoder-pool] worker ${i} write-error: ${msg.error ?? "unknown"}`);
+          return;
+        }
+
+        if (msg.type === "done") {
+          if (activeWrite) {
+            // Worker sends { type: "done", decoded: N } with the final count.
+            // Apply the same delta logic as write-progress.
+            if (typeof msg.decoded === "number") {
+              const prev = workerProgress[i] ?? 0;
+              workerProgress[i] = msg.decoded;
+              activeWrite.totalDecoded += msg.decoded - prev;
+            }
+            activeWrite.doneWorkers += 1;
+            activeWrite.onProgress?.(activeWrite.totalDecoded);
+            if (activeWrite.doneWorkers >= workers.length) {
+              const write = activeWrite;
+              activeWrite = null;
+              write.resolve();
+            }
+            return;
+          }
+          if (activeStream) {
+            activeStream.doneWorkers += 1;
+            if (activeStream.doneWorkers >= workers.length) {
+              closeStream(activeStream);
+            }
+            return;
+          }
+        }
+
         if (msg.type === "error" && activeStream) {
           console.error(`[decoder-pool] worker ${i} error: ${msg.error ?? "unknown"}`);
           return;
@@ -110,6 +180,15 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
     };
 
     worker.onerror = (event) => {
+      if (activeWrite) {
+        activeWrite.doneWorkers += 1;
+        if (activeWrite.doneWorkers >= workers.length) {
+          const write = activeWrite;
+          activeWrite = null;
+          write.reject(new Error(`worker ${i} crashed: ${event.message}`));
+        }
+        return;
+      }
       if (activeStream) {
         console.error(`[decoder-pool] worker ${i} crashed: ${event.message}`);
         activeStream.doneWorkers += 1;
@@ -128,6 +207,9 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
     decodeCachedRange(from: bigint, to: bigint, cacheDir: string, extractMask?: number): AsyncIterable<StreamDecodeResult> {
       if (activeStream) {
         throw new Error("decoder pool is already streaming");
+      }
+      if (activeWrite) {
+        throw new Error("decoder pool is currently writing");
       }
 
       const streamState: StreamState = {
@@ -171,8 +253,56 @@ export function createCheckpointDecoderPool(size: number): CheckpointDecoderPool
       };
     },
 
+    decodeAndWriteCachedRange(
+      from: bigint,
+      to: bigint,
+      cacheDir: string,
+      extractMask: number | undefined,
+      writeConfig: WorkerWriteConfig,
+      onProgress?: (decoded: number) => void,
+    ): Promise<void> {
+      if (activeStream) {
+        throw new Error("decoder pool is already streaming");
+      }
+      if (activeWrite) {
+        throw new Error("decoder pool is already writing");
+      }
+
+      return new Promise<void>((resolve, reject) => {
+        workerProgress.fill(0);
+        activeWrite = {
+          doneWorkers: 0,
+          totalDecoded: 0,
+          resolve,
+          reject,
+          onProgress,
+        };
+
+        const ranges = splitRange(from, to, workers.length);
+        for (let i = 0; i < workers.length; i++) {
+          workers[i]!.postMessage({
+            type: "decode-write-range",
+            from: ranges[i]!.from.toString(),
+            to: ranges[i]!.to.toString(),
+            cacheDir,
+            workerIndex: i,
+            extractMask,
+            batchSize: writeConfig.batchSize ?? 1000,
+            backend: writeConfig.backend,
+            clickhouseUrl: writeConfig.clickhouseUrl,
+            clickhouseDatabase: writeConfig.clickhouseDatabase,
+            clickhouseUsername: writeConfig.clickhouseUsername,
+            clickhousePassword: writeConfig.clickhousePassword,
+            postgresUrl: writeConfig.postgresUrl,
+            balanceCoinTypes: writeConfig.balanceCoinTypes ?? null,
+          });
+        }
+      });
+    },
+
     shutdown(): void {
       if (activeStream) closeStream(activeStream);
+      activeWrite = null;
       for (const worker of workers) worker.terminate();
       workers.length = 0;
     },

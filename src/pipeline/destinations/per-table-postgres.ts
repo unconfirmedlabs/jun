@@ -27,7 +27,7 @@ import { TABLES, TABLE_MASK_BIT } from "./per-table-sqlite.ts";
 type PgType = "text" | "int4";
 
 /** Postgres types for each column, matched to column order in TABLES. */
-const PG_COLUMN_TYPES: Record<string, PgType[]> = {
+export const PG_COLUMN_TYPES: Record<string, PgType[]> = {
   transactions: [
     "text", "text", "int4",         // digest, sender, success
     "text", "text", "text", "text", // computation_cost, storage_cost, storage_rebate, non_refundable_storage_fee
@@ -93,7 +93,7 @@ function pgArrayLiteral(values: unknown[], pgType: PgType): string {
 }
 
 /** Single INSERT via UNNEST — one round-trip per table regardless of row count. */
-async function insertUnnest(
+export async function insertUnnest(
   sql: ReturnType<typeof createPostgresConnection>,
   table: string,
   columns: string[],
@@ -114,7 +114,7 @@ async function insertUnnest(
 }
 
 /** Collect rows per table from a batch (pure JS, no I/O). */
-function collectTableRows(
+export function collectTableRows(
   enabledTables: typeof TABLES,
   batch: ProcessedCheckpoint[],
 ): unknown[][][] {

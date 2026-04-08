@@ -9,6 +9,11 @@ import { createGrpcClient, type GrpcCheckpointResponse, type CheckpointEvent } f
 import { loadConfig } from "./config.ts";
 import { parseTimestampMs } from "./timestamp.ts";
 
+process.on("unhandledRejection", (reason) => {
+  process.stderr.write(`[jun] unhandled rejection: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}\n`);
+  process.exit(1);
+});
+
 const cfg = loadConfig();
 
 // ---------------------------------------------------------------------------
@@ -1991,13 +1996,10 @@ function maskToTableNames(mask: number, ExtractMask: any): string[] {
 addTableFlags(indexCmd
   .command("replay-chain")
   .description("Backfill structural chain data from archive to SQLite, Postgres, or ClickHouse")
-  .option("--output <dir>", "output directory for per-table SQLite files")
+  .option("--sqlite <dir>", "output directory for per-table SQLite files")
   .option("--postgres <url>", "Postgres connection URL")
   .option("--clickhouse <url>", "ClickHouse HTTP URL (e.g. http://localhost:8123)")
   .option("--clickhouse-database <db>", "ClickHouse database name", "jun")
-  .option("--stdout", "broadcast JSONL to stdout")
-  .option("--sse <port>", "broadcast via SSE on port")
-  .option("--nats <url>", "broadcast to NATS")
   .option("--epoch <number>", "backfill a completed epoch")
   .option("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
@@ -2070,7 +2072,20 @@ addTableFlags(indexCmd
       to = opts.to ? BigInt(opts.to) : undefined;
     }
 
+    // Exactly one destination: --clickhouse, --postgres, or --sqlite (--output is alias)
+    const sqliteDir = opts.sqlite;
+    const destCount = [opts.clickhouse, opts.postgres, sqliteDir].filter(Boolean).length;
+    if (destCount === 0) {
+      console.error("[jun] error: specify a destination: --clickhouse <url>, --postgres <url>, or --sqlite <dir>");
+      process.exit(1);
+    }
+    if (destCount > 1) {
+      console.error("[jun] error: specify exactly one destination: --clickhouse, --postgres, or --sqlite");
+      process.exit(1);
+    }
+
     const pipeline = createPipeline();
+    const useWorkerWrites = !!(opts.clickhouse || opts.postgres);
 
     if (opts.clickhouse) {
       const { createReplayClickHouseStorage } = await import("./pipeline/destinations/clickhouse.ts");
@@ -2078,31 +2093,11 @@ addTableFlags(indexCmd
         url: opts.clickhouse,
         database: opts.clickhouseDatabase ?? "jun",
       }));
-    }
-    if (opts.postgres) {
+    } else if (opts.postgres) {
       const { createReplayPostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
       pipeline.storage(createReplayPostgresStorage(opts.postgres, mask));
-    }
-    if (opts.output || (!opts.clickhouse && !opts.postgres)) {
-      const outputDir = opts.output ?? (opts.epoch ? `./epoch-${opts.epoch}` : "./replay-chain");
-      pipeline.storage(createPerTableSqliteStorage(outputDir, mask));
-      if (!opts.quiet) console.error(`  output          ${outputDir}`);
-    }
-
-    const natsUrl = opts.nats ?? process.env.JUN_INDEX_NATS_BROADCAST_URL;
-    const ssePort = opts.sse ?? process.env.JUN_INDEX_SSE_BROADCAST_PORT;
-    const sseHost = process.env.JUN_INDEX_SSE_BROADCAST_HOST;
-    if (opts.stdout) {
-      const { createStdoutBroadcast } = await import("./pipeline/destinations/stdout.ts");
-      pipeline.broadcast(createStdoutBroadcast());
-    }
-    if (ssePort) {
-      const { createSseBroadcast } = await import("./pipeline/destinations/sse.ts");
-      pipeline.broadcast(createSseBroadcast({ port: parseInt(ssePort), hostname: sseHost }));
-    }
-    if (natsUrl) {
-      const { createNatsBroadcast } = await import("./pipeline/destinations/nats.ts");
-      pipeline.broadcast(createNatsBroadcast({ url: natsUrl }));
+    } else {
+      pipeline.storage(createPerTableSqliteStorage(sqliteDir, mask));
     }
 
     pipeline.source(createArchiveSource({
@@ -2121,6 +2116,13 @@ addTableFlags(indexCmd
       unorderedDrain: true,
       grpcUrl: to ? undefined : grpcUrl,
       extractMask: mask,
+      // Worker writes: workers decode + write directly to CH/Postgres.
+      // Pipeline storage still handles initialize() and shutdown() lifecycle.
+      clickhouseWriteConfig: opts.clickhouse ? {
+        url: opts.clickhouse,
+        database: opts.clickhouseDatabase ?? "jun",
+      } : undefined,
+      postgresWriteConfig: opts.postgres ? { url: opts.postgres } : undefined,
     }));
 
     const totalCheckpoints = to !== undefined ? to - from + 1n : undefined;
@@ -2138,11 +2140,9 @@ addTableFlags(indexCmd
       if (opts.epoch) console.error(`  epoch           ${opts.epoch}`);
       if (to) console.error(`  checkpoints     ${from} → ${to} (${(to - from + 1n).toLocaleString()})`);
       console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
-      if (opts.clickhouse) console.error(`  clickhouse      ${opts.clickhouse} / ${opts.clickhouseDatabase ?? "jun"}`);
-      if (opts.postgres) console.error(`  postgres        ${opts.postgres}`);
-      if (opts.stdout) console.error(`  broadcast       stdout`);
-      if (ssePort) console.error(`  broadcast       SSE :${ssePort}`);
-      if (natsUrl) console.error(`  broadcast       NATS`);
+      if (opts.clickhouse) console.error(`  destination     clickhouse ${opts.clickhouse} / ${opts.clickhouseDatabase ?? "jun"}${useWorkerWrites ? " (worker writes)" : ""}`);
+      else if (opts.postgres) console.error(`  destination     postgres ${opts.postgres}${useWorkerWrites ? " (worker writes)" : ""}`);
+      else console.error(`  destination     sqlite ${sqliteDir}`);
       console.error(`  concurrency     ${opts.concurrency ?? 200}`);
       if (opts.workers) console.error(`  workers         ${opts.workers}`);
       console.error("");
@@ -2317,15 +2317,12 @@ indexCmd
 
 addTableFlags(indexCmd
   .command("stream-chain")
-  .description("Stream live chain data via gRPC to storage and/or broadcast")
-  .option("--output <dir>", "write to per-table SQLite files")
+  .description("Stream live chain data via gRPC to storage")
+  .option("--sqlite <dir>", "write to per-table SQLite files")
   .option("--postgres <url>", "write to Postgres")
   .option("--clickhouse <url>", "write to ClickHouse HTTP URL")
   .option("--clickhouse-database <db>", "ClickHouse database name", "jun")
   .option("--grpc-url <url>", "gRPC endpoint", "hayabusa.mainnet.unconfirmed.cloud:443")
-  .option("--stdout", "broadcast JSONL to stdout")
-  .option("--sse <port>", "broadcast via SSE on port")
-  .option("--nats <url>", "broadcast to NATS")
   .option("--quiet", "suppress human output")
   .option("--log [level]", "enable logging to stderr"))
   .action(async (opts: any) => {
@@ -2357,6 +2354,17 @@ addTableFlags(indexCmd
       process.env.LOG_LEVEL = "silent";
     }
 
+    // Exactly one destination
+    const destCount = [opts.clickhouse, opts.postgres, opts.sqlite].filter(Boolean).length;
+    if (destCount === 0) {
+      console.error("[jun] error: specify a destination: --clickhouse <url>, --postgres <url>, or --sqlite <dir>");
+      process.exit(1);
+    }
+    if (destCount > 1) {
+      console.error("[jun] error: specify exactly one destination: --clickhouse, --postgres, or --sqlite");
+      process.exit(1);
+    }
+
     const pipeline = createPipeline();
 
     if (opts.clickhouse) {
@@ -2365,41 +2373,16 @@ addTableFlags(indexCmd
         url: opts.clickhouse,
         database: opts.clickhouseDatabase ?? "jun",
       }));
-    }
-    if (opts.postgres) {
+    } else if (opts.postgres) {
       const { createLivePostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
       pipeline.storage(createLivePostgresStorage(opts.postgres, mask));
-    }
-    if (opts.output) {
+    } else {
       const { createLiveSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
-      pipeline.storage(createLiveSqliteStorage(opts.output, mask));
+      pipeline.storage(createLiveSqliteStorage(opts.sqlite, mask));
     }
 
     // Live gRPC source (Rust binary decoder)
     pipeline.source(createGrpcLiveSource({ url: grpcUrl }));
-
-    // Broadcasts — CLI flags override env vars
-    const natsUrl = opts.nats ?? process.env.JUN_INDEX_NATS_BROADCAST_URL;
-    const ssePort = opts.sse ?? process.env.JUN_INDEX_SSE_BROADCAST_PORT;
-    const sseHost = process.env.JUN_INDEX_SSE_BROADCAST_HOST;
-
-    if (opts.stdout) {
-      const { createStdoutBroadcast } = await import("./pipeline/destinations/stdout.ts");
-      pipeline.broadcast(createStdoutBroadcast());
-    }
-    if (ssePort) {
-      const { createSseBroadcast } = await import("./pipeline/destinations/sse.ts");
-      pipeline.broadcast(createSseBroadcast({ port: parseInt(ssePort), hostname: sseHost }));
-    }
-    if (natsUrl) {
-      const { createNatsBroadcast } = await import("./pipeline/destinations/nats.ts");
-      pipeline.broadcast(createNatsBroadcast({ url: natsUrl }));
-    }
-
-    if (!opts.output && !opts.postgres && !opts.clickhouse && !opts.stdout && !ssePort && !natsUrl) {
-      console.error("[jun] error: provide at least one output (--output, --postgres, --clickhouse, --stdout, --sse, --nats)");
-      process.exit(1);
-    }
 
     pipeline.configure({
       quiet: opts.quiet ?? false,
@@ -2413,15 +2396,49 @@ addTableFlags(indexCmd
       console.error("  ────────────");
       console.error(`  grpc            ${grpcUrl}`);
       console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
-      if (opts.output) console.error(`  output          ${opts.output}`);
-      if (opts.postgres) console.error(`  postgres        ${opts.postgres}`);
-      if (opts.clickhouse) console.error(`  clickhouse      ${opts.clickhouse} / ${opts.clickhouseDatabase ?? "jun"}`);
-      if (opts.stdout) console.error(`  broadcast       stdout`);
-      if (ssePort) console.error(`  broadcast       SSE :${ssePort}${sseHost ? ` (${sseHost})` : ""}`);
-      if (natsUrl) console.error(`  broadcast       NATS`);
+      if (opts.clickhouse) console.error(`  destination     clickhouse ${opts.clickhouse} / ${opts.clickhouseDatabase ?? "jun"}`);
+      else if (opts.postgres) console.error(`  destination     postgres ${opts.postgres}`);
+      else console.error(`  destination     sqlite ${opts.sqlite}`);
       console.error("");
     }
 
+    await pipeline.run();
+  });
+
+// ---------------------------------------------------------------------------
+// broadcast — live gRPC → NATS relay, no storage
+// ---------------------------------------------------------------------------
+
+program
+  .command("broadcast")
+  .description("Relay live gRPC checkpoints to NATS without storing")
+  .argument("<natsUrl>", "NATS server URL (e.g. nats://localhost:4222)")
+  .option("--grpc-url <url>", "gRPC endpoint (or JUN_GRPC_URL)", process.env.JUN_GRPC_URL ?? cfg.grpcUrl)
+  .option("--prefix <prefix>", "NATS subject prefix (default: jun)")
+  .option("--quiet", "suppress output")
+  .option("--log [level]", "log level")
+  .action(async (natsUrl: string, opts: { grpcUrl?: string; prefix?: string; quiet?: boolean; log?: boolean | string }) => {
+    const grpcUrl = opts.grpcUrl ?? process.env.JUN_GRPC_URL ?? cfg.grpcUrl;
+    if (!grpcUrl) { console.error("[jun] error: --grpc-url required (or set JUN_GRPC_URL)"); process.exit(1); }
+    if (!grpcUrl.includes(":")) { console.error("[jun] error: --grpc-url must include port (e.g. host:443)"); process.exit(1); }
+    if (opts.log) process.env.LOG_LEVEL = typeof opts.log === "string" ? opts.log : "info";
+    else process.env.LOG_LEVEL = "silent";
+
+    const { createPipeline } = await import("./pipeline/pipeline.ts");
+    const { createGrpcLiveSource } = await import("./pipeline/sources/grpc.ts");
+    const { createNatsBroadcast } = await import("./pipeline/destinations/nats.ts");
+
+    const pipeline = createPipeline();
+    pipeline.source(createGrpcLiveSource({ url: grpcUrl }));
+    pipeline.broadcast(createNatsBroadcast({ url: natsUrl, prefix: opts.prefix }));
+
+    if (!opts.quiet) {
+      const prefix = opts.prefix ?? "jun";
+      console.error(`\n  broadcast\n  ${"─".repeat(30)}`);
+      console.error(`  grpc     ${grpcUrl}`);
+      console.error(`  nats     ${natsUrl}`);
+      console.error(`  subjects ${prefix}.checkpoints, ${prefix}.transactions\n`);
+    }
     await pipeline.run();
   });
 

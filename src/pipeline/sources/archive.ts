@@ -4,11 +4,10 @@
  * Workers own fetch + decode (Rust binary FFI when available, JS fallback).
  * Main thread receives decoded results, optionally parses binary, yields checkpoints.
  */
-import { createCheckpointDecoderPool, type CheckpointDecoderPool } from "../../checkpoint-decoder-pool.ts";
-import { isNativeCheckpointDecoderAvailable } from "../../checkpoint-native-decoder.ts";
+import { createCheckpointDecoderPool, type CheckpointDecoderPool, type WorkerWriteConfig } from "../../checkpoint-decoder-pool.ts";
 import { createLogger } from "../../logger.ts";
 import type { Logger } from "../../logger.ts";
-import { emptyProcessed, type Source, type Checkpoint } from "../types.ts";
+import { type Source, type Checkpoint } from "../types.ts";
 import type { BalanceChange, ProcessedCheckpoint } from "../types.ts";
 
 export interface ArchiveSourceConfig {
@@ -39,8 +38,6 @@ export interface ArchiveSourceConfig {
     events: boolean;
     checkpoints: boolean;
   };
-  /** Snapshot-only optimization: workers own SQLite shard writes, main DB merges later. */
-  sqliteShardingPath?: string;
   /** gRPC URL for fetching latest checkpoint */
   grpcUrl?: string;
   /** Skip ordered drain — yield checkpoints as they arrive from workers.
@@ -48,6 +45,16 @@ export interface ArchiveSourceConfig {
   unorderedDrain?: boolean;
   /** Extraction mask bitfield — controls which record types Rust decodes. 0x7FF = all. */
   extractMask?: number;
+  /** Pass for worker-level ClickHouse writes (replay only). Still add createReplayClickHouseStorage
+   *  to pipeline for table init and shutdown lifecycle. */
+  clickhouseWriteConfig?: {
+    url?: string;
+    database?: string;
+    username?: string;
+    password?: string;
+  };
+  /** Pass for worker-level Postgres writes (replay only). */
+  postgresWriteConfig?: { url: string };
 }
 
 function filterBalanceChanges(
@@ -111,9 +118,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
       const workerCount = config.workers ?? Math.max(1, Math.min(4, (navigator.hardwareConcurrency ?? 4) - 1));
       const balanceCoinTypes = config.balanceCoinTypes;
 
-      decoderPool = createCheckpointDecoderPool(workerCount, {
-        balanceCoinTypes,
-      });
+      decoderPool = createCheckpointDecoderPool(workerCount);
       log.info(
         { workers: workerCount, fetchConcurrency, from: config.from.toString() },
         "archive source starting",
@@ -138,6 +143,9 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
 
       log.info({ from: config.from.toString(), to: to.toString(), total: (to - config.from + 1n).toString() }, "backfill range");
       const pending = new Map<bigint, Checkpoint>();
+      // Hard cap: prevents OOM if workers stall or are severely unbalanced.
+      // Use --unordered for large backfills where insert order doesn't matter.
+      const MAX_PENDING = 100_000;
       let watermark = config.from - 1n;
       const endSeq = to;
 
@@ -163,6 +171,7 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
         let fetchNext = config.from;
         let fetchDone = 0;
         let fetchSkipped = 0;
+        let fetchFailed = 0;
 
         async function fetchWorker() {
           while (fetchNext <= endSeq && !stopped) {
@@ -183,93 +192,70 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
                   const elapsed = (performance.now() - fetchStart) / 1000;
                   console.error(`[fetch] ${fetchDone}/${totalCheckpoints} (${Math.round(fetchDone / elapsed)} req/s, ${fetchSkipped} cached)`);
                 }
+              } else {
+                fetchFailed++;
+                log.warn({ seq: seq.toString(), status: resp.status }, "archive fetch failed — checkpoint will be missing");
               }
-            } catch {}
+            } catch (err) {
+              fetchFailed++;
+              log.warn({ seq: seq.toString(), err: String(err) }, "archive fetch error — checkpoint will be missing");
+            }
           }
         }
 
         await Promise.all(Array.from({ length: fetchConcurrency }, () => fetchWorker()));
         const fetchElapsed = (performance.now() - fetchStart) / 1000;
         log.info(
-          { fetched: fetchDone, skipped: fetchSkipped, elapsed: `${fetchElapsed.toFixed(1)}s`, rate: Math.round(fetchDone / fetchElapsed) },
+          { fetched: fetchDone, skipped: fetchSkipped, failed: fetchFailed, elapsed: `${fetchElapsed.toFixed(1)}s`, rate: Math.round(fetchDone / fetchElapsed) },
           "phase 1 complete",
         );
-
-        const shardingRequested = !!config.sqliteShardingPath;
-        const canUseSqliteSharding = shardingRequested && isNativeCheckpointDecoderAvailable();
-        if (shardingRequested && !canUseSqliteSharding) {
-          log.warn("sqlite sharding requested but native checkpoint decoder is unavailable; falling back to main-thread write path");
+        if (fetchFailed > 0) {
+          log.warn({ fetchFailed }, "phase 1 completed with fetch failures — run will have checkpoint gaps");
         }
 
-        if (canUseSqliteSharding) {
-          const { createHash } = await import("crypto");
-          const { mkdirSync, rmSync } = await import("fs");
-          const { homedir } = await import("os");
-          const { join } = await import("path");
+        // ─── Phase 2: Decode + write (worker write path) ──────────────
+        // For ClickHouse and Postgres, workers decode AND write directly.
+        // Main thread only tracks progress, yields nothing to pipeline.
+        const workerWriteConfig: WorkerWriteConfig | null = config.clickhouseWriteConfig
+          ? {
+              backend: "clickhouse",
+              clickhouseUrl: config.clickhouseWriteConfig.url,
+              clickhouseDatabase: config.clickhouseWriteConfig.database,
+              clickhouseUsername: config.clickhouseWriteConfig.username,
+              clickhousePassword: config.clickhouseWriteConfig.password,
+              batchSize: 2000,
+              balanceCoinTypes: Array.isArray(balanceCoinTypes) ? balanceCoinTypes : null,
+            }
+          : config.postgresWriteConfig
+          ? {
+              backend: "postgres",
+              postgresUrl: config.postgresWriteConfig.url,
+              batchSize: 1000,
+              balanceCoinTypes: Array.isArray(balanceCoinTypes) ? balanceCoinTypes : null,
+            }
+          : null;
 
-          const shardHash = createHash("sha256")
-            .update(`${config.from}-${endSeq}-${config.sqliteShardingPath}`)
-            .digest("hex")
-            .slice(0, 12);
-          const shardDir = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".jun"), "shards", shardHash);
-
-          rmSync(shardDir, { recursive: true, force: true });
-          mkdirSync(shardDir, { recursive: true });
-
-          log.info({ workers: workerCount, shardDir }, "phase 2: decode + write SQLite shards");
-          const shardStart = performance.now();
-          const shardPaths = await pool.decodeAndWriteRange(
+        if (workerWriteConfig) {
+          log.info({ workers: workerCount }, "phase 2: decode + write (workers)");
+          const writeStart = performance.now();
+          let totalWritten = 0;
+          await pool.decodeAndWriteCachedRange(
             config.from,
             endSeq,
             cacheDir,
-            shardDir,
-            {
-              balances: !!config.enabledProcessors?.balances,
-              transactions: !!config.enabledProcessors?.transactions,
-              objectChanges: !!config.enabledProcessors?.objectChanges,
-              dependencies: !!config.enabledProcessors?.dependencies,
-              inputs: !!config.enabledProcessors?.inputs,
-              commands: !!config.enabledProcessors?.commands,
-              systemTransactions: !!config.enabledProcessors?.systemTransactions,
-              unchangedConsensusObjects: !!config.enabledProcessors?.unchangedConsensusObjects,
-              events: !!config.enabledProcessors?.events,
-              checkpoints: !!config.enabledProcessors?.checkpoints,
+            config.extractMask,
+            workerWriteConfig,
+            (decoded) => {
+              totalWritten = decoded;
+              const elapsed = (performance.now() - writeStart) / 1000;
+              const rate = Math.round(decoded / (elapsed || 1));
+              process.stderr.write(`\r[backfill] ${decoded.toLocaleString()} written | ${rate}/s  `);
             },
           );
-
-          const shardElapsed = (performance.now() - shardStart) / 1000;
-          log.info(
-            { workers: workerCount, elapsed: `${shardElapsed.toFixed(1)}s`, shardCount: shardPaths.length },
-            "phase 2 complete",
-          );
-
-          if (stopped) {
-            return;
-          }
-
-          const markerCheckpoint: Checkpoint = {
-            sequenceNumber: endSeq,
-            timestamp: new Date(0),
-            transactions: [],
-            source: "backfill",
-            epoch: 0n,
-            digest: "",
-            previousDigest: null,
-            contentDigest: null,
-            totalNetworkTransactions: 0n,
-            epochRollingGasCostSummary: {
-              computationCost: "0",
-              storageCost: "0",
-              storageRebate: "0",
-              nonRefundableStorageFee: "0",
-            },
-          };
-          const markerProcessed = emptyProcessed(markerCheckpoint);
-          (markerProcessed as any)._shardPaths = shardPaths;
-          (markerProcessed as any)._shardSessionDir = shardDir;
-          (markerCheckpoint as Checkpoint & { _preProcessed?: ProcessedCheckpoint })._preProcessed = markerProcessed;
-          yield markerCheckpoint;
-          return;
+          const elapsed = (performance.now() - writeStart) / 1000;
+          process.stderr.write(`\r[backfill] ${totalWritten.toLocaleString()} written | ${Math.round(totalWritten / (elapsed || 1))}/s | ${elapsed.toFixed(1)}s\n`);
+          log.info({ written: totalWritten, elapsed: `${elapsed.toFixed(1)}s` }, "phase 2 complete (worker writes)");
+          return; // workers wrote directly — yield nothing to pipeline
         }
 
         // ─── Phase 2: Decode from disk cache via worker pool ───────────
@@ -302,6 +288,12 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
             yield checkpoint;
           } else {
             pending.set(seq, checkpoint);
+            if (pending.size > MAX_PENDING) {
+              throw new Error(
+                `Pending checkpoint buffer exceeded ${MAX_PENDING} entries (watermark: ${watermark}, size: ${pending.size}). ` +
+                `Workers may be stalled or severely unbalanced. Use unorderedDrain for large backfills.`,
+              );
+            }
             while (pending.has(watermark + 1n)) {
               watermark += 1n;
               const ready = pending.get(watermark)!;
