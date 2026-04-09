@@ -1997,8 +1997,8 @@ addTableFlags(indexCmd
   .command("replay-chain")
   .description("Backfill structural chain data from archive to SQLite, Postgres, or ClickHouse")
   .option("--sqlite <dir>", "output directory for per-table SQLite files")
-  .option("--postgres <url>", "Postgres connection URL (or JUN_POSTGRES_URL)")
-  .option("--clickhouse <url>", "ClickHouse HTTP URL (or JUN_CLICKHOUSE_URL)")
+  .option("--postgres [url]", "use Postgres (URL from JUN_POSTGRES_URL if omitted)")
+  .option("--clickhouse [url]", "use ClickHouse (URL from JUN_CLICKHOUSE_URL if omitted)")
   .option("--clickhouse-database <db>", "ClickHouse database name (or JUN_CLICKHOUSE_DATABASE)", process.env.JUN_CLICKHOUSE_DATABASE ?? "jun")
   .option("--clickhouse-batch-size <n>", "checkpoints per worker batch insert (default: 2000)")
   .option("--epoch <number>", "backfill a completed epoch")
@@ -2073,19 +2073,34 @@ addTableFlags(indexCmd
       to = opts.to ? BigInt(opts.to) : undefined;
     }
 
-    // Resolve storage URLs from flag → env var
-    const clickhouseUrl: string | undefined = opts.clickhouse ?? process.env.JUN_CLICKHOUSE_URL;
-    const postgresUrl: string | undefined = opts.postgres ?? process.env.JUN_POSTGRES_URL;
-
-    // Exactly one destination: --clickhouse, --postgres, or --sqlite (--output is alias)
+    // Resolve storage: flag selects backend, env var provides connection details
+    const useClickhouse = opts.clickhouse !== undefined;
+    const usePostgres = opts.postgres !== undefined;
     const sqliteDir = opts.sqlite;
-    const destCount = [clickhouseUrl, postgresUrl, sqliteDir].filter(Boolean).length;
+
+    const clickhouseUrl = useClickhouse
+      ? (typeof opts.clickhouse === "string" ? opts.clickhouse : process.env.JUN_CLICKHOUSE_URL)
+      : undefined;
+    const postgresUrl = usePostgres
+      ? (typeof opts.postgres === "string" ? opts.postgres : process.env.JUN_POSTGRES_URL)
+      : undefined;
+
+    // Exactly one destination
+    const destCount = [useClickhouse, usePostgres, sqliteDir].filter(Boolean).length;
     if (destCount === 0) {
-      console.error("[jun] error: specify a destination: --clickhouse <url>, --postgres <url>, or --sqlite <dir>");
+      console.error("[jun] error: specify a destination: --clickhouse, --postgres, or --sqlite <dir>");
       process.exit(1);
     }
     if (destCount > 1) {
       console.error("[jun] error: specify exactly one destination: --clickhouse, --postgres, or --sqlite");
+      process.exit(1);
+    }
+    if (useClickhouse && !clickhouseUrl) {
+      console.error("[jun] error: --clickhouse requires a URL or JUN_CLICKHOUSE_URL env var");
+      process.exit(1);
+    }
+    if (usePostgres && !postgresUrl) {
+      console.error("[jun] error: --postgres requires a URL or JUN_POSTGRES_URL env var");
       process.exit(1);
     }
 
@@ -2330,8 +2345,8 @@ addTableFlags(indexCmd
   .command("stream-chain")
   .description("Stream live chain data via gRPC to storage")
   .option("--sqlite <dir>", "write to per-table SQLite files")
-  .option("--postgres <url>", "write to Postgres (or JUN_POSTGRES_URL)")
-  .option("--clickhouse <url>", "write to ClickHouse HTTP URL")
+  .option("--postgres [url]", "use Postgres (URL from JUN_POSTGRES_URL if omitted)")
+  .option("--clickhouse [url]", "use ClickHouse (URL from JUN_CLICKHOUSE_URL if omitted)")
   .option("--clickhouse-database <db>", "ClickHouse database name (or JUN_CLICKHOUSE_DATABASE)", process.env.JUN_CLICKHOUSE_DATABASE ?? "jun")
   .option("--grpc-url <url>", "gRPC endpoint (or JUN_GRPC_URL)")
   .option("--quiet", "suppress human output")
@@ -2365,18 +2380,33 @@ addTableFlags(indexCmd
       process.env.LOG_LEVEL = "silent";
     }
 
-    // Resolve storage URLs from flag → env var
-    const clickhouseUrl: string | undefined = opts.clickhouse ?? process.env.JUN_CLICKHOUSE_URL;
-    const postgresUrl: string | undefined = opts.postgres ?? process.env.JUN_POSTGRES_URL;
+    // Resolve storage: flag selects backend, env var provides connection details
+    const useClickhouse = opts.clickhouse !== undefined;
+    const usePostgres = opts.postgres !== undefined;
+
+    const clickhouseUrl = useClickhouse
+      ? (typeof opts.clickhouse === "string" ? opts.clickhouse : process.env.JUN_CLICKHOUSE_URL)
+      : undefined;
+    const postgresUrl = usePostgres
+      ? (typeof opts.postgres === "string" ? opts.postgres : process.env.JUN_POSTGRES_URL)
+      : undefined;
 
     // Exactly one destination
-    const destCount = [clickhouseUrl, postgresUrl, opts.sqlite].filter(Boolean).length;
+    const destCount = [useClickhouse, usePostgres, opts.sqlite].filter(Boolean).length;
     if (destCount === 0) {
-      console.error("[jun] error: specify a destination: --clickhouse <url>, --postgres <url>, or --sqlite <dir>");
+      console.error("[jun] error: specify a destination: --clickhouse, --postgres, or --sqlite <dir>");
       process.exit(1);
     }
     if (destCount > 1) {
       console.error("[jun] error: specify exactly one destination: --clickhouse, --postgres, or --sqlite");
+      process.exit(1);
+    }
+    if (useClickhouse && !clickhouseUrl) {
+      console.error("[jun] error: --clickhouse requires a URL or JUN_CLICKHOUSE_URL env var");
+      process.exit(1);
+    }
+    if (usePostgres && !postgresUrl) {
+      console.error("[jun] error: --postgres requires a URL or JUN_POSTGRES_URL env var");
       process.exit(1);
     }
 

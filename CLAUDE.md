@@ -20,11 +20,11 @@ All environment-identity config follows the 12-factor pattern: **CLI flag > env 
 | `JUN_NETWORK` | `mainnet` | Network identity — affects gRPC client, coin/protocol resolution, cache scoping |
 | `JUN_GRPC_URL` | from `~/.jun/config.yml` | Sui gRPC endpoint |
 | `JUN_ARCHIVE_URL` | from `~/.jun/config.yml` | Sui checkpoint archive base URL |
-| `JUN_CLICKHOUSE_URL` | `http://localhost:8123` | ClickHouse HTTP endpoint |
+| `JUN_CLICKHOUSE_URL` | (required if `--clickhouse`) | ClickHouse HTTP endpoint |
 | `JUN_CLICKHOUSE_DATABASE` | `jun` | ClickHouse database name |
 | `JUN_CLICKHOUSE_USERNAME` | `default` | ClickHouse auth username |
 | `JUN_CLICKHOUSE_PASSWORD` | (empty) | ClickHouse auth password |
-| `JUN_POSTGRES_URL` | (none) | Postgres connection URL |
+| `JUN_POSTGRES_URL` | (required if `--postgres`) | Postgres connection URL |
 | `JUN_BCS_DECODER` | (auto) | Set to `js` to force JS decoder instead of native Rust |
 | `JUN_DECODER_MAX_CAPACITY_MB` | `128` | Rust decoder output buffer cap |
 | `JUN_DECODER_BINARY_MAX_CAPACITY_MB` | `256` | Rust decoder binary buffer cap |
@@ -108,14 +108,12 @@ jun index replay-chain \
   --batch-size 1000 \
   --quiet --yes
 
-# Backfill to ClickHouse (uses JUN_CLICKHOUSE_URL if set, or --clickhouse flag)
-jun index replay-chain \
-  --from 258828309 --to 258878308 \
-  --clickhouse http://localhost:8123
+# Backfill to ClickHouse (URL from JUN_CLICKHOUSE_URL, or pass inline)
+jun index replay-chain --clickhouse --epoch 1090
+jun index replay-chain --clickhouse http://other:8123 --from 100 --to 200
 
 # Live gRPC stream → ClickHouse
-jun index stream-chain \
-  --clickhouse http://localhost:8123
+jun index stream-chain --clickhouse
 
 # Live gRPC stream → SSE broadcast
 jun index stream-chain --sse 8080

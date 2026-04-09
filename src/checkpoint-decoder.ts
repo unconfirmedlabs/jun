@@ -120,7 +120,7 @@ async function handleDecodeWriteRange(msg: DecodeWriteRangeMessage): Promise<voi
     const { buildTableRows, TABLES } = await import("./pipeline/destinations/clickhouse.ts");
 
     const client = createClient({
-      url: msg.clickhouseUrl ?? process.env.JUN_CLICKHOUSE_URL ?? "http://localhost:8123",
+      url: msg.clickhouseUrl ?? process.env.JUN_CLICKHOUSE_URL,
       database: msg.clickhouseDatabase ?? process.env.JUN_CLICKHOUSE_DATABASE ?? "jun",
       username: msg.clickhouseUsername ?? process.env.JUN_CLICKHOUSE_USERNAME ?? "default",
       password: msg.clickhousePassword ?? process.env.JUN_CLICKHOUSE_PASSWORD ?? "",
