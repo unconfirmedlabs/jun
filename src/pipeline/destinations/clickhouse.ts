@@ -545,8 +545,8 @@ function resolveOptions(options: ClickHouseStorageOptions) {
   return {
     url: options.url ?? process.env.JUN_CLICKHOUSE_URL,
     database: options.database ?? process.env.JUN_CLICKHOUSE_DATABASE,
-    username: options.username ?? process.env.JUN_CLICKHOUSE_USERNAME ?? "default",
-    password: options.password ?? process.env.JUN_CLICKHOUSE_PASSWORD ?? "",
+    username: options.username ?? process.env.JUN_CLICKHOUSE_USERNAME,
+    password: options.password ?? process.env.JUN_CLICKHOUSE_PASSWORD,
   };
 }
 
