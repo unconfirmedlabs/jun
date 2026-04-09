@@ -12,7 +12,7 @@
  *   {prefix}.commands
  *   {prefix}.system_transactions
  *   {prefix}.unchanged_consensus_objects
- *   {prefix}.raw_events
+ *   {prefix}.events
  *
  * Default prefix: "jun.sui" — decoded protocol events use "jun.{protocol}"
  */
@@ -169,7 +169,7 @@ export function createNatsBroadcast(config: NatsDestinationConfig): Broadcast {
       }
 
       for (const ev of processed.rawEvents) {
-        pub("raw_events", {
+        pub("events", {
           tx_digest: ev.txDigest,
           event_seq: ev.eventSeq,
           package_id: ev.packageId,
