@@ -2421,7 +2421,7 @@ program
   .description("Relay live gRPC checkpoints to NATS without storing")
   .argument("<natsUrl>", "NATS server URL (e.g. nats://localhost:4222)")
   .option("--grpc-url <url>", "gRPC endpoint (or JUN_GRPC_URL)", process.env.JUN_GRPC_URL ?? cfg.grpcUrl)
-  .option("--prefix <prefix>", "NATS subject prefix (default: jun)")
+  .option("--prefix <prefix>", "NATS subject prefix (default: jun.sui)")
   .option("--quiet", "suppress output")
   .option("--log [level]", "log level")
   .action(async (natsUrl: string, opts: { grpcUrl?: string; prefix?: string; quiet?: boolean; log?: boolean | string }) => {
@@ -2440,7 +2440,7 @@ program
     pipeline.broadcast(createNatsBroadcast({ url: natsUrl, prefix: opts.prefix }));
 
     if (!opts.quiet) {
-      const prefix = opts.prefix ?? "jun";
+      const prefix = opts.prefix ?? "jun.sui";
       console.error(`\n  broadcast\n  ${"─".repeat(30)}`);
       console.error(`  grpc     ${grpcUrl}`);
       console.error(`  nats     ${natsUrl}`);
