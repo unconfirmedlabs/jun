@@ -163,7 +163,8 @@ export function createArchiveSource(config: ArchiveSourceConfig): Source {
         const { join } = await import("path");
         const { homedir } = await import("os");
         const cacheBase = process.env.XDG_CACHE_HOME ?? join(homedir(), ".jun", "cache");
-        const network = config.network ?? "mainnet";
+        const network = config.network ?? process.env.JUN_NETWORK;
+        if (!network) throw new Error("Network not configured. Set JUN_NETWORK env var or pass network in config.");
         const cacheDir = join(cacheBase, "checkpoints", network);
         mkdirSync(cacheDir, { recursive: true });
 

@@ -568,7 +568,8 @@ export async function getCommittee(grpcUrl: string, epoch: string): Promise<Prep
 }
 
 export function createArchiveClient(options?: ArchiveClientOptions): ArchiveClient {
-  const archiveUrl = (options?.archiveUrl ?? "https://checkpoints.mainnet.sui.io").replace(/\/$/, "");
+  const archiveUrl = (options?.archiveUrl ?? process.env.JUN_ARCHIVE_URL ?? "").replace(/\/$/, "");
+  if (!archiveUrl) throw new Error("archiveUrl is required — set JUN_ARCHIVE_URL or pass archiveUrl option");
   const verify = options?.verify ?? false;
   const grpcUrl = options?.grpcUrl;
 
@@ -752,7 +753,7 @@ export interface RawCheckpoint {
  */
 export async function fetchRawCheckpoint(
   seq: bigint,
-  archiveUrl = "https://checkpoints.mainnet.sui.io",
+  archiveUrl = process.env.JUN_ARCHIVE_URL ?? "",
 ): Promise<RawCheckpoint> {
   const Checkpoint = await getCheckpointType();
   const compressed = await fetchCompressed(seq, archiveUrl.replace(/\/$/, ""));

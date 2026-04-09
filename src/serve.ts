@@ -320,7 +320,7 @@ export function createServer(config: ServeConfig, ctx: ServeContext): IndexerSer
 
   const server = Bun.serve({
     port: config.port,
-    hostname: config.hostname ?? "127.0.0.1",
+    hostname: config.hostname ?? process.env.JUN_SERVE_HOST ?? "127.0.0.1",
     routes: {
       "/health": () => Response.json({ status: "ok" }),
       "/status": () => Response.json(metrics.snapshot()),
@@ -349,7 +349,7 @@ export function createServer(config: ServeConfig, ctx: ServeContext): IndexerSer
     },
   });
 
-  log.info({ port: server.port, hostname: config.hostname ?? "127.0.0.1" }, "started");
+  log.info({ port: server.port, hostname: config.hostname ?? process.env.JUN_SERVE_HOST ?? "127.0.0.1" }, "started");
 
   return {
     get port() { return server.port; },

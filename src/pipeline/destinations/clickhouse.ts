@@ -531,7 +531,7 @@ export const TABLES: ChTableDef[] = [
 // ---------------------------------------------------------------------------
 
 export interface ClickHouseStorageOptions {
-  /** ClickHouse URL (default: http://localhost:8123) */
+  /** ClickHouse URL (from JUN_CLICKHOUSE_URL, required) */
   url?: string;
   /** Database name (default: jun) */
   database?: string;

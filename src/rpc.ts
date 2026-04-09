@@ -7,11 +7,10 @@ type SuiNetwork = "mainnet" | "testnet" | "devnet" | "localnet";
 
 function resolveNetwork(): SuiNetwork {
   const env = process.env.JUN_NETWORK;
-  if (env === "testnet" || env === "devnet" || env === "localnet") return env;
-  if (env === "mainnet") return "mainnet";
+  if (env === "mainnet" || env === "testnet" || env === "devnet" || env === "localnet") return env;
   const cfg = loadConfig().activeEnv;
-  if (cfg === "testnet" || cfg === "devnet" || cfg === "localnet") return cfg;
-  return "mainnet";
+  if (cfg === "mainnet" || cfg === "testnet" || cfg === "devnet" || cfg === "localnet") return cfg;
+  throw new Error("Network not configured. Set JUN_NETWORK env var or run 'jun config use <network>'");
 }
 
 const clients = new Map<string, SuiGrpcClient>();

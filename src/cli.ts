@@ -2009,7 +2009,6 @@ addTableFlags(indexCmd
   .option("--concurrency <n>", "archive fetch concurrency", "100")
   .option("--workers <n>", "decoder worker threads")
   .option("--batch-size <n>", "write buffer flush threshold in checkpoints (default: 1000)")
-  .option("--network <name>", "network name for cache scoping (default: mainnet)")
   .option("--quiet", "suppress human output")
   .option("--yes", "skip confirmation prompt")
   .option("--log [level]", "enable logging to stderr"))
@@ -2127,7 +2126,7 @@ addTableFlags(indexCmd
 
     pipeline.source(createArchiveSource({
       archiveUrl,
-      network: opts.network ?? "mainnet",
+      network: process.env.JUN_NETWORK ?? loadConfig().activeEnv,
       from,
       to,
       concurrency: parseInt(opts.concurrency ?? "200"),
@@ -2199,7 +2198,6 @@ indexCmd
   .option("--grpc-url <url>", "gRPC endpoint (for epoch resolution)")
   .option("--archive-url <url>", "archive base URL")
   .option("--concurrency <n>", "concurrent fetch connections", "100")
-  .option("--network <name>", "network name for cache scoping", "mainnet")
   .action(async (opts: any) => {
     const { mkdirSync, readdirSync } = await import("fs");
     const { join } = await import("path");
@@ -2457,12 +2455,14 @@ addTableFlags(indexCmd
 program
   .command("broadcast")
   .description("Relay live gRPC checkpoints to NATS without storing")
-  .argument("<natsUrl>", "NATS server URL (e.g. nats://localhost:4222)")
-  .option("--grpc-url <url>", "gRPC endpoint (or JUN_GRPC_URL)", process.env.JUN_GRPC_URL ?? cfg.grpcUrl)
+  .argument("[natsUrl]", "NATS server URL (or JUN_NATS_URL)")
+  .option("--grpc-url <url>", "gRPC endpoint (or JUN_GRPC_URL)")
   .option("--prefix <prefix>", "NATS subject prefix (default: jun.sui)")
   .option("--quiet", "suppress output")
   .option("--log [level]", "log level")
-  .action(async (natsUrl: string, opts: { grpcUrl?: string; prefix?: string; quiet?: boolean; log?: boolean | string }) => {
+  .action(async (natsUrlArg: string | undefined, opts: { grpcUrl?: string; prefix?: string; quiet?: boolean; log?: boolean | string }) => {
+    const natsUrl = natsUrlArg ?? process.env.JUN_NATS_URL;
+    if (!natsUrl) { console.error("[jun] error: provide NATS URL as argument or set JUN_NATS_URL"); process.exit(1); }
     const grpcUrl = opts.grpcUrl ?? process.env.JUN_GRPC_URL ?? cfg.grpcUrl;
     if (!grpcUrl) { console.error("[jun] error: --grpc-url required (or set JUN_GRPC_URL)"); process.exit(1); }
     if (!grpcUrl.includes(":")) { console.error("[jun] error: --grpc-url must include port (e.g. host:443)"); process.exit(1); }

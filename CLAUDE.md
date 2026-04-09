@@ -17,7 +17,7 @@ All environment-identity config follows the 12-factor pattern: **CLI flag > env 
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `JUN_NETWORK` | `mainnet` | Network identity — affects gRPC client, coin/protocol resolution, cache scoping |
+| `JUN_NETWORK` | (required) | Network identity — affects gRPC client, coin/protocol resolution, cache scoping |
 | `JUN_GRPC_URL` | from `~/.jun/config.yml` | Sui gRPC endpoint |
 | `JUN_ARCHIVE_URL` | from `~/.jun/config.yml` | Sui checkpoint archive base URL |
 | `JUN_CLICKHOUSE_URL` | (required if `--clickhouse`) | ClickHouse HTTP endpoint |
@@ -132,7 +132,6 @@ jun verify tx <digest>
 | `--from / --to` | Explicit checkpoint range |
 | `--archive-url <url>` | Archive base URL (or `JUN_ARCHIVE_URL`) |
 | `--grpc-url <url>` | gRPC endpoint (or `JUN_GRPC_URL`) |
-| `--network <name>` | Network name for cache scoping (or `JUN_NETWORK`, default: mainnet) |
 | `--output <dir>` | Per-table SQLite output directory |
 | `--clickhouse <url>` | ClickHouse HTTP URL (or `JUN_CLICKHOUSE_URL`) |
 | `--clickhouse-database <db>` | ClickHouse database (or `JUN_CLICKHOUSE_DATABASE`, default: jun) |
