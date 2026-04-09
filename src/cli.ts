@@ -1997,7 +1997,7 @@ addTableFlags(indexCmd
   .command("replay-chain")
   .description("Backfill structural chain data from archive to SQLite, Postgres, or ClickHouse")
   .option("--sqlite <dir>", "output directory for per-table SQLite files")
-  .option("--postgres <url>", "Postgres connection URL")
+  .option("--postgres <url>", "Postgres connection URL (or JUN_POSTGRES_URL)")
   .option("--clickhouse <url>", "ClickHouse HTTP URL (or JUN_CLICKHOUSE_URL)")
   .option("--clickhouse-database <db>", "ClickHouse database name (or JUN_CLICKHOUSE_DATABASE)", process.env.JUN_CLICKHOUSE_DATABASE ?? "jun")
   .option("--clickhouse-batch-size <n>", "checkpoints per worker batch insert (default: 2000)")
@@ -2073,12 +2073,13 @@ addTableFlags(indexCmd
       to = opts.to ? BigInt(opts.to) : undefined;
     }
 
-    // Resolve ClickHouse URL from flag → env var
+    // Resolve storage URLs from flag → env var
     const clickhouseUrl: string | undefined = opts.clickhouse ?? process.env.JUN_CLICKHOUSE_URL;
+    const postgresUrl: string | undefined = opts.postgres ?? process.env.JUN_POSTGRES_URL;
 
     // Exactly one destination: --clickhouse, --postgres, or --sqlite (--output is alias)
     const sqliteDir = opts.sqlite;
-    const destCount = [clickhouseUrl, opts.postgres, sqliteDir].filter(Boolean).length;
+    const destCount = [clickhouseUrl, postgresUrl, sqliteDir].filter(Boolean).length;
     if (destCount === 0) {
       console.error("[jun] error: specify a destination: --clickhouse <url>, --postgres <url>, or --sqlite <dir>");
       process.exit(1);
@@ -2094,7 +2095,7 @@ addTableFlags(indexCmd
     }
 
     const pipeline = createPipeline();
-    const useWorkerWrites = !!(clickhouseUrl || opts.postgres);
+    const useWorkerWrites = !!(clickhouseUrl || postgresUrl);
 
     if (clickhouseUrl) {
       const { createReplayClickHouseStorage } = await import("./pipeline/destinations/clickhouse.ts");
@@ -2102,9 +2103,9 @@ addTableFlags(indexCmd
         url: clickhouseUrl,
         database: opts.clickhouseDatabase,
       }));
-    } else if (opts.postgres) {
+    } else if (postgresUrl) {
       const { createReplayPostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
-      pipeline.storage(createReplayPostgresStorage(opts.postgres, mask));
+      pipeline.storage(createReplayPostgresStorage(postgresUrl, mask));
     } else {
       pipeline.storage(createPerTableSqliteStorage(sqliteDir, mask));
     }
@@ -2132,7 +2133,7 @@ addTableFlags(indexCmd
         database: opts.clickhouseDatabase,
         batchSize: opts.clickhouseBatchSize ? parseInt(opts.clickhouseBatchSize) : undefined,
       } : undefined,
-      postgresWriteConfig: opts.postgres ? { url: opts.postgres } : undefined,
+      postgresWriteConfig: postgresUrl ? { url: postgresUrl } : undefined,
     }));
 
     const totalCheckpoints = to !== undefined ? to - from + 1n : undefined;
@@ -2151,7 +2152,7 @@ addTableFlags(indexCmd
       if (to) console.error(`  checkpoints     ${from} → ${to} (${(to - from + 1n).toLocaleString()})`);
       console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
       if (clickhouseUrl) console.error(`  destination     clickhouse ${clickhouseUrl} / ${opts.clickhouseDatabase}${useWorkerWrites ? " (worker writes)" : ""}`);
-      else if (opts.postgres) console.error(`  destination     postgres ${opts.postgres}${useWorkerWrites ? " (worker writes)" : ""}`);
+      else if (postgresUrl) console.error(`  destination     postgres ${postgresUrl}${useWorkerWrites ? " (worker writes)" : ""}`);
       else console.error(`  destination     sqlite ${sqliteDir}`);
       console.error(`  concurrency     ${opts.concurrency ?? 200}`);
       if (opts.workers) console.error(`  workers         ${opts.workers}`);
@@ -2329,7 +2330,7 @@ addTableFlags(indexCmd
   .command("stream-chain")
   .description("Stream live chain data via gRPC to storage")
   .option("--sqlite <dir>", "write to per-table SQLite files")
-  .option("--postgres <url>", "write to Postgres")
+  .option("--postgres <url>", "write to Postgres (or JUN_POSTGRES_URL)")
   .option("--clickhouse <url>", "write to ClickHouse HTTP URL")
   .option("--clickhouse-database <db>", "ClickHouse database name (or JUN_CLICKHOUSE_DATABASE)", process.env.JUN_CLICKHOUSE_DATABASE ?? "jun")
   .option("--grpc-url <url>", "gRPC endpoint (or JUN_GRPC_URL)")
@@ -2364,11 +2365,12 @@ addTableFlags(indexCmd
       process.env.LOG_LEVEL = "silent";
     }
 
-    // Resolve ClickHouse URL from flag → env var
+    // Resolve storage URLs from flag → env var
     const clickhouseUrl: string | undefined = opts.clickhouse ?? process.env.JUN_CLICKHOUSE_URL;
+    const postgresUrl: string | undefined = opts.postgres ?? process.env.JUN_POSTGRES_URL;
 
     // Exactly one destination
-    const destCount = [clickhouseUrl, opts.postgres, opts.sqlite].filter(Boolean).length;
+    const destCount = [clickhouseUrl, postgresUrl, opts.sqlite].filter(Boolean).length;
     if (destCount === 0) {
       console.error("[jun] error: specify a destination: --clickhouse <url>, --postgres <url>, or --sqlite <dir>");
       process.exit(1);
@@ -2386,9 +2388,9 @@ addTableFlags(indexCmd
         url: clickhouseUrl,
         database: opts.clickhouseDatabase,
       }));
-    } else if (opts.postgres) {
+    } else if (postgresUrl) {
       const { createLivePostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
-      pipeline.storage(createLivePostgresStorage(opts.postgres, mask));
+      pipeline.storage(createLivePostgresStorage(postgresUrl, mask));
     } else {
       const { createLiveSqliteStorage } = await import("./pipeline/destinations/per-table-sqlite.ts");
       pipeline.storage(createLiveSqliteStorage(opts.sqlite, mask));
@@ -2410,7 +2412,7 @@ addTableFlags(indexCmd
       console.error(`  grpc            ${grpcUrl}`);
       console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
       if (clickhouseUrl) console.error(`  destination     clickhouse ${clickhouseUrl} / ${opts.clickhouseDatabase}`);
-      else if (opts.postgres) console.error(`  destination     postgres ${opts.postgres}`);
+      else if (postgresUrl) console.error(`  destination     postgres ${postgresUrl}`);
       else console.error(`  destination     sqlite ${opts.sqlite}`);
       console.error("");
     }
