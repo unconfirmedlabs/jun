@@ -13,6 +13,8 @@
  *   {prefix}.system_transactions
  *   {prefix}.unchanged_consensus_objects
  *   {prefix}.raw_events
+ *
+ * Default prefix: "jun.sui" — decoded protocol events use "jun.{protocol}"
  */
 import { connect, type NatsConnection, StringCodec } from "nats";
 import type { Broadcast, ProcessedCheckpoint } from "../types.ts";
@@ -28,7 +30,7 @@ export interface NatsDestinationConfig {
 
 export function createNatsBroadcast(config: NatsDestinationConfig): Broadcast {
   const log: Logger = createLogger().child({ component: "destination:nats" });
-  const prefix = config.prefix ?? "jun";
+  const prefix = config.prefix ?? "jun.sui";
   const sc = StringCodec();
   let nc: NatsConnection | null = null;
 
