@@ -21,7 +21,7 @@ All environment-identity config follows the 12-factor pattern: **CLI flag > env 
 | `JUN_GRPC_URL` | from `~/.jun/config.yml` | Sui gRPC endpoint |
 | `JUN_ARCHIVE_URL` | from `~/.jun/config.yml` | Sui checkpoint archive base URL |
 | `JUN_CLICKHOUSE_URL` | (required if `--clickhouse`) | ClickHouse HTTP endpoint |
-| `JUN_CLICKHOUSE_DATABASE` | `jun` | ClickHouse database name |
+| `JUN_CLICKHOUSE_DATABASE` | (required if `--clickhouse`) | ClickHouse database name |
 | `JUN_CLICKHOUSE_USERNAME` | `default` | ClickHouse auth username |
 | `JUN_CLICKHOUSE_PASSWORD` | (empty) | ClickHouse auth password |
 | `JUN_POSTGRES_URL` | (required if `--postgres`) | Postgres connection URL |
