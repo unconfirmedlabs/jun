@@ -1998,8 +1998,8 @@ addTableFlags(indexCmd
   .description("Backfill structural chain data from archive to SQLite, Postgres, or ClickHouse")
   .option("--sqlite <dir>", "output directory for per-table SQLite files")
   .option("--postgres <url>", "Postgres connection URL")
-  .option("--clickhouse <url>", "ClickHouse HTTP URL (e.g. http://localhost:8123)")
-  .option("--clickhouse-database <db>", "ClickHouse database name", "jun")
+  .option("--clickhouse <url>", "ClickHouse HTTP URL (or JUN_CLICKHOUSE_URL)")
+  .option("--clickhouse-database <db>", "ClickHouse database name (or JUN_CLICKHOUSE_DATABASE)", process.env.JUN_CLICKHOUSE_DATABASE ?? "jun")
   .option("--clickhouse-batch-size <n>", "checkpoints per worker batch insert (default: 2000)")
   .option("--epoch <number>", "backfill a completed epoch")
   .option("--from <checkpoint>", "start checkpoint (inclusive)")
@@ -2073,9 +2073,12 @@ addTableFlags(indexCmd
       to = opts.to ? BigInt(opts.to) : undefined;
     }
 
+    // Resolve ClickHouse URL from flag → env var
+    const clickhouseUrl: string | undefined = opts.clickhouse ?? process.env.JUN_CLICKHOUSE_URL;
+
     // Exactly one destination: --clickhouse, --postgres, or --sqlite (--output is alias)
     const sqliteDir = opts.sqlite;
-    const destCount = [opts.clickhouse, opts.postgres, sqliteDir].filter(Boolean).length;
+    const destCount = [clickhouseUrl, opts.postgres, sqliteDir].filter(Boolean).length;
     if (destCount === 0) {
       console.error("[jun] error: specify a destination: --clickhouse <url>, --postgres <url>, or --sqlite <dir>");
       process.exit(1);
@@ -2085,19 +2088,19 @@ addTableFlags(indexCmd
       process.exit(1);
     }
 
-    if (opts.clickhouseBatchSize && !opts.clickhouse) {
+    if (opts.clickhouseBatchSize && !clickhouseUrl) {
       console.error("[jun] error: --clickhouse-batch-size requires --clickhouse");
       process.exit(1);
     }
 
     const pipeline = createPipeline();
-    const useWorkerWrites = !!(opts.clickhouse || opts.postgres);
+    const useWorkerWrites = !!(clickhouseUrl || opts.postgres);
 
-    if (opts.clickhouse) {
+    if (clickhouseUrl) {
       const { createReplayClickHouseStorage } = await import("./pipeline/destinations/clickhouse.ts");
       pipeline.storage(createReplayClickHouseStorage({
-        url: opts.clickhouse,
-        database: opts.clickhouseDatabase ?? "jun",
+        url: clickhouseUrl,
+        database: opts.clickhouseDatabase,
       }));
     } else if (opts.postgres) {
       const { createReplayPostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
@@ -2124,9 +2127,9 @@ addTableFlags(indexCmd
       extractMask: mask,
       // Worker writes: workers decode + write directly to CH/Postgres.
       // Pipeline storage still handles initialize() and shutdown() lifecycle.
-      clickhouseWriteConfig: opts.clickhouse ? {
-        url: opts.clickhouse,
-        database: opts.clickhouseDatabase ?? "jun",
+      clickhouseWriteConfig: clickhouseUrl ? {
+        url: clickhouseUrl,
+        database: opts.clickhouseDatabase,
         batchSize: opts.clickhouseBatchSize ? parseInt(opts.clickhouseBatchSize) : undefined,
       } : undefined,
       postgresWriteConfig: opts.postgres ? { url: opts.postgres } : undefined,
@@ -2147,7 +2150,7 @@ addTableFlags(indexCmd
       if (opts.epoch) console.error(`  epoch           ${opts.epoch}`);
       if (to) console.error(`  checkpoints     ${from} → ${to} (${(to - from + 1n).toLocaleString()})`);
       console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
-      if (opts.clickhouse) console.error(`  destination     clickhouse ${opts.clickhouse} / ${opts.clickhouseDatabase ?? "jun"}${useWorkerWrites ? " (worker writes)" : ""}`);
+      if (clickhouseUrl) console.error(`  destination     clickhouse ${clickhouseUrl} / ${opts.clickhouseDatabase}${useWorkerWrites ? " (worker writes)" : ""}`);
       else if (opts.postgres) console.error(`  destination     postgres ${opts.postgres}${useWorkerWrites ? " (worker writes)" : ""}`);
       else console.error(`  destination     sqlite ${sqliteDir}`);
       console.error(`  concurrency     ${opts.concurrency ?? 200}`);
@@ -2328,8 +2331,8 @@ addTableFlags(indexCmd
   .option("--sqlite <dir>", "write to per-table SQLite files")
   .option("--postgres <url>", "write to Postgres")
   .option("--clickhouse <url>", "write to ClickHouse HTTP URL")
-  .option("--clickhouse-database <db>", "ClickHouse database name", "jun")
-  .option("--grpc-url <url>", "gRPC endpoint", "hayabusa.mainnet.unconfirmed.cloud:443")
+  .option("--clickhouse-database <db>", "ClickHouse database name (or JUN_CLICKHOUSE_DATABASE)", process.env.JUN_CLICKHOUSE_DATABASE ?? "jun")
+  .option("--grpc-url <url>", "gRPC endpoint (or JUN_GRPC_URL)")
   .option("--quiet", "suppress human output")
   .option("--log [level]", "enable logging to stderr"))
   .action(async (opts: any) => {
@@ -2361,8 +2364,11 @@ addTableFlags(indexCmd
       process.env.LOG_LEVEL = "silent";
     }
 
+    // Resolve ClickHouse URL from flag → env var
+    const clickhouseUrl: string | undefined = opts.clickhouse ?? process.env.JUN_CLICKHOUSE_URL;
+
     // Exactly one destination
-    const destCount = [opts.clickhouse, opts.postgres, opts.sqlite].filter(Boolean).length;
+    const destCount = [clickhouseUrl, opts.postgres, opts.sqlite].filter(Boolean).length;
     if (destCount === 0) {
       console.error("[jun] error: specify a destination: --clickhouse <url>, --postgres <url>, or --sqlite <dir>");
       process.exit(1);
@@ -2374,11 +2380,11 @@ addTableFlags(indexCmd
 
     const pipeline = createPipeline();
 
-    if (opts.clickhouse) {
+    if (clickhouseUrl) {
       const { createLiveClickHouseStorage } = await import("./pipeline/destinations/clickhouse.ts");
       pipeline.storage(createLiveClickHouseStorage({
-        url: opts.clickhouse,
-        database: opts.clickhouseDatabase ?? "jun",
+        url: clickhouseUrl,
+        database: opts.clickhouseDatabase,
       }));
     } else if (opts.postgres) {
       const { createLivePostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
@@ -2403,7 +2409,7 @@ addTableFlags(indexCmd
       console.error("  ────────────");
       console.error(`  grpc            ${grpcUrl}`);
       console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
-      if (opts.clickhouse) console.error(`  destination     clickhouse ${opts.clickhouse} / ${opts.clickhouseDatabase ?? "jun"}`);
+      if (clickhouseUrl) console.error(`  destination     clickhouse ${clickhouseUrl} / ${opts.clickhouseDatabase}`);
       else if (opts.postgres) console.error(`  destination     postgres ${opts.postgres}`);
       else console.error(`  destination     sqlite ${opts.sqlite}`);
       console.error("");

@@ -543,10 +543,10 @@ export interface ClickHouseStorageOptions {
 
 function resolveOptions(options: ClickHouseStorageOptions) {
   return {
-    url: options.url ?? "http://localhost:8123",
-    database: options.database ?? "jun",
-    username: options.username ?? "default",
-    password: options.password ?? "",
+    url: options.url ?? process.env.JUN_CLICKHOUSE_URL ?? "http://localhost:8123",
+    database: options.database ?? process.env.JUN_CLICKHOUSE_DATABASE ?? "jun",
+    username: options.username ?? process.env.JUN_CLICKHOUSE_USERNAME ?? "default",
+    password: options.password ?? process.env.JUN_CLICKHOUSE_PASSWORD ?? "",
   };
 }
 
