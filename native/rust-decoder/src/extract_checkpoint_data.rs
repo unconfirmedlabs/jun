@@ -312,10 +312,12 @@ bitflags::bitflags! {
 
 impl ExtractMask {
     /// Does this mask need effects BCS deserialization?
+    /// EVENTS are included because event records use effects.transaction_digest()
+    /// to populate their tx_digest field.
     pub fn needs_effects(&self) -> bool {
         self.intersects(
             Self::TRANSACTIONS | Self::BALANCE_CHANGES | Self::OBJECT_CHANGES
-            | Self::DEPENDENCIES | Self::UNCHANGED_CONSENSUS
+            | Self::DEPENDENCIES | Self::UNCHANGED_CONSENSUS | Self::EVENTS
         )
     }
 

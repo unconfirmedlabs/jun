@@ -24,7 +24,7 @@ function getActiveAddress(): string {
   const yaml = readFileSync(join(configDir, "client.yaml"), "utf-8");
   const match = yaml.match(/active_address:\s*"?(0x[0-9a-fA-F]+)"?/);
   if (!match) throw new Error("No active_address in ~/.sui/sui_config/client.yaml");
-  return match[1];
+  return match[1]!;
 }
 
 function keypairFromBase64(key: string): Keypair {

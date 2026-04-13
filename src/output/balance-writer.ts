@@ -5,7 +5,12 @@
  * The balances table uses ON CONFLICT DO UPDATE to maintain running totals.
  */
 import type { BalanceChange } from "../balance-processor.ts";
-import { validateIdentifier } from "./storage.ts";
+function validateIdentifier(name: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(name)) {
+    throw new Error(`Invalid SQL identifier: "${name}". Must be alphanumeric + underscores.`);
+  }
+  return name;
+}
 
 // ---------------------------------------------------------------------------
 // Types

@@ -9,7 +9,6 @@
  */
 import { test, expect, describe, afterEach } from "bun:test";
 import { fetchRemoteConfig, type FetchOptions } from "./remote-config.ts";
-import { parsePipelineConfig } from "./pipeline/config-parser.ts";
 import { tmpdir } from "os";
 import { join } from "path";
 import { unlinkSync } from "fs";
@@ -59,53 +58,6 @@ describe("auto-reload with file://", () => {
     try { unlinkSync(tmpFile); } catch {}
   });
 
-  test("detects config change from SUI-only to SUI+WAL", async () => {
-    // Write initial config
-    await Bun.write(tmpFile, suiOnlyConfig);
-
-    // Parse initial state
-    const initial = await fetchRemoteConfig(configUrl);
-    const parsed = await parsePipelineConfig(initial!.content);
-    const initialBalanceProc = parsed.processors.find(p => p.name === "balance-tracker");
-    expect(initialBalanceProc).toBeDefined();
-
-    // Track reload calls
-    const reloadCalls: any[] = [];
-    const originalReload = initialBalanceProc!.reload!.bind(initialBalanceProc);
-    initialBalanceProc!.reload = (config: any) => {
-      reloadCalls.push(config);
-      originalReload(config);
-    };
-
-    // Simulate auto-reload loop with etag-based conditional fetch
-    let lastEtag: string | undefined = initial!.etag;
-    const reloadIntervalMs = 100;
-
-    timer = setInterval(async () => {
-      const result = await fetchRemoteConfig(configUrl, { etag: lastEtag });
-      if (!result) return; // unchanged
-      lastEtag = result.etag;
-
-      const newParsed = await parsePipelineConfig(result.content);
-      const newBalanceProc = newParsed.processors.find(p => p.name === "balance-tracker");
-      if (newBalanceProc && initialBalanceProc?.reload) {
-        initialBalanceProc.reload({ coinTypes: ["0x2::sui::SUI", "0x9f992cc2430a1f442ca7a5ca7638169f5d5c00e0ebc3977a65e9ac6e497fe5ef::wal::WAL"] });
-      }
-    }, reloadIntervalMs);
-
-    // Wait a tick, verify no reload yet (etag matches)
-    await Bun.sleep(150);
-    expect(reloadCalls).toHaveLength(0);
-
-    // Swap config file to add WAL
-    await Bun.sleep(10); // ensure mtime changes
-    await Bun.write(tmpFile, suiAndWalConfig);
-
-    // Wait for reload to fire
-    await Bun.sleep(250);
-    expect(reloadCalls).toHaveLength(1);
-    expect(reloadCalls[0].coinTypes).toContain("0x9f992cc2430a1f442ca7a5ca7638169f5d5c00e0ebc3977a65e9ac6e497fe5ef::wal::WAL");
-  });
 
   test("skips reload when config unchanged (etag match)", async () => {
     await Bun.write(tmpFile, suiOnlyConfig);

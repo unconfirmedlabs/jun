@@ -8,7 +8,8 @@
  * (summary + effects + events). Pure Mysten baseline — no fast paths.
  */
 import { zstdDecompressSync } from "zlib";
-import { suiBcs, bcs } from "./bcs-provider.ts";
+import { bcs } from "@mysten/bcs";
+import { bcs as suiBcs } from "@mysten/sui/bcs";
 import { verifyCheckpoint as keiVerify, PreparedCommittee } from "@unconfirmed/kei";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
@@ -30,7 +31,84 @@ import type {
   GrpcSystemTransactionKind,
   GrpcExecutionError,
 } from "./grpc.ts";
-import { parseSender, TransactionData } from "./sui-bcs.ts";
+
+// ─── Extended Sui BCS types (system transaction variants missing from SDK) ────
+
+const _DigestBytes = suiBcs.vector(suiBcs.U8);
+const ConsensusCommitDigest = _DigestBytes;
+const AdditionalConsensusStateDigest = _DigestBytes;
+const ChainIdentifier = _DigestBytes;
+
+const JwkId = suiBcs.struct("JwkId", { iss: suiBcs.string(), kid: suiBcs.string() });
+const JWK = suiBcs.struct("JWK", { kty: suiBcs.string(), e: suiBcs.string(), n: suiBcs.string(), alg: suiBcs.string() });
+const ActiveJwk = suiBcs.struct("ActiveJwk", { jwkId: JwkId, jwk: JWK, epoch: suiBcs.u64() });
+const AuthenticatorStateExpire = suiBcs.struct("AuthenticatorStateExpire", {
+  minEpoch: suiBcs.u64(),
+  authenticatorObjInitialSharedVersion: suiBcs.u64(),
+});
+const AuthenticatorStateUpdate = suiBcs.struct("AuthenticatorStateUpdate", {
+  epoch: suiBcs.u64(),
+  round: suiBcs.u64(),
+  newActiveJwks: suiBcs.vector(ActiveJwk),
+  authenticatorObjInitialSharedVersion: suiBcs.u64(),
+});
+const RandomnessStateUpdate = suiBcs.struct("RandomnessStateUpdate", {
+  epoch: suiBcs.u64(),
+  randomnessRound: suiBcs.u64(),
+  randomBytes: suiBcs.vector(suiBcs.U8),
+  randomnessObjInitialSharedVersion: suiBcs.u64(),
+});
+const ConsensusCommitPrologueV2 = suiBcs.struct("ConsensusCommitPrologueV2", {
+  epoch: suiBcs.u64(), round: suiBcs.u64(), commitTimestampMs: suiBcs.u64(), consensusCommitDigest: ConsensusCommitDigest,
+});
+const CancelledTransactions = suiBcs.vector(suiBcs.tuple([suiBcs.Address, suiBcs.vector(suiBcs.tuple([suiBcs.Address, suiBcs.u64()]))]));
+const CancelledTransactionsV2 = suiBcs.vector(suiBcs.tuple([suiBcs.Address, suiBcs.vector(suiBcs.tuple([suiBcs.tuple([suiBcs.Address, suiBcs.u64()]), suiBcs.u64()]))]));
+const ConsensusDeterminedVersionAssignments = suiBcs.enum("ConsensusDeterminedVersionAssignments", {
+  CancelledTransactions, CancelledTransactionsV2,
+});
+const ConsensusCommitPrologueV3 = suiBcs.struct("ConsensusCommitPrologueV3", {
+  epoch: suiBcs.u64(), round: suiBcs.u64(), subDagIndex: suiBcs.option(suiBcs.u64()), commitTimestampMs: suiBcs.u64(),
+  consensusCommitDigest: ConsensusCommitDigest, consensusDeterminedVersionAssignments: ConsensusDeterminedVersionAssignments,
+});
+const ConsensusCommitPrologueV4 = suiBcs.struct("ConsensusCommitPrologueV4", {
+  epoch: suiBcs.u64(), round: suiBcs.u64(), subDagIndex: suiBcs.option(suiBcs.u64()), commitTimestampMs: suiBcs.u64(),
+  consensusCommitDigest: ConsensusCommitDigest, consensusDeterminedVersionAssignments: ConsensusDeterminedVersionAssignments,
+  additionalStateDigest: AdditionalConsensusStateDigest,
+});
+const ChangeEpoch = suiBcs.struct("ChangeEpoch", {
+  epoch: suiBcs.u64(), protocolVersion: suiBcs.u64(), storageCharge: suiBcs.u64(), computationCharge: suiBcs.u64(),
+  storageRebate: suiBcs.u64(), nonRefundableStorageFee: suiBcs.u64(), epochStartTimestampMs: suiBcs.u64(),
+  systemPackages: suiBcs.vector(suiBcs.tuple([suiBcs.u64(), suiBcs.vector(suiBcs.vector(suiBcs.U8)), suiBcs.vector(suiBcs.Address)])),
+});
+const Duration = suiBcs.struct("Duration", { secs: suiBcs.u64(), nanos: suiBcs.u32() });
+const StoredExecutionTimeObservations = suiBcs.enum("StoredExecutionTimeObservations", {
+  V1: suiBcs.vector(suiBcs.tuple([suiBcs.u16(), suiBcs.vector(suiBcs.tuple([suiBcs.fixedArray(32, suiBcs.U8), Duration]))])),
+});
+const EndOfEpochTransactionKind = suiBcs.enum("EndOfEpochTransactionKind", {
+  ChangeEpoch, AuthenticatorStateCreate: null, AuthenticatorStateExpire, RandomnessStateCreate: null,
+  DenyListStateCreate: null, BridgeStateCreate: ChainIdentifier, BridgeCommitteeInit: suiBcs.u64(),
+  StoreExecutionTimeObservations: StoredExecutionTimeObservations, AccumulatorRootCreate: null,
+  CoinRegistryCreate: null, DisplayRegistryCreate: null,
+});
+const GenesisObject = suiBcs.enum("GenesisObject", {
+  RawObject: suiBcs.struct("RawObject", { data: suiBcs.Object, owner: suiBcs.Owner }),
+});
+const GenesisTransaction = suiBcs.struct("GenesisTransaction", { objects: suiBcs.vector(GenesisObject) });
+const ConsensusCommitPrologue = suiBcs.struct("ConsensusCommitPrologue", {
+  epoch: suiBcs.u64(), round: suiBcs.u64(), commitTimestampMs: suiBcs.u64(),
+});
+const TransactionKindBcs = suiBcs.enum("TransactionKind", {
+  ProgrammableTransaction: suiBcs.ProgrammableTransaction,
+  ChangeEpoch, Genesis: GenesisTransaction, ConsensusCommitPrologue,
+  AuthenticatorStateUpdate, EndOfEpochTransaction: suiBcs.vector(EndOfEpochTransactionKind),
+  RandomnessStateUpdate, ConsensusCommitPrologueV2, ConsensusCommitPrologueV3, ConsensusCommitPrologueV4,
+  ProgrammableSystemTransaction: suiBcs.ProgrammableTransaction,
+});
+const TransactionData = suiBcs.enum("TransactionData", {
+  V1: suiBcs.struct("TransactionDataV1", {
+    kind: TransactionKindBcs, sender: suiBcs.Address, gasData: suiBcs.GasData, expiration: suiBcs.TransactionExpiration,
+  }),
+});
 
 // ─── Event parsing via @mysten/sui/bcs ──────────────────────────────────────
 
@@ -124,8 +202,8 @@ function flattenOwner(owner: ParsedOwner | undefined): GrpcOwner | undefined {
     case "ObjectOwner": return { kind: "OBJECT", address: owner.ObjectOwner };
     case "Shared": return { kind: "SHARED", version: String(owner.Shared) };
     case "Immutable": return { kind: "IMMUTABLE" };
-    case "ConsensusV2": {
-      const inner = owner.ConsensusV2;
+    case "ConsensusAddressOwner": {
+      const inner = owner.ConsensusAddressOwner;
       return { kind: "CONSENSUS_ADDRESS", address: inner.owner, version: String(inner.startVersion) };
     }
     default: return undefined;
@@ -148,8 +226,8 @@ function extractEffects(effectsBcs: Uint8Array): {
     // Status + error
     const success = v2.status.$kind === "Success";
     let error: GrpcExecutionError | undefined;
-    if (v2.status.$kind === "Failed") {
-      const failed = v2.status.Failed;
+    if (v2.status.$kind === "Failure") {
+      const failed = v2.status.Failure;
       const errorEnum = failed.error;
       error = { kind: errorEnum.$kind };
       if (failed.command != null) error.commandIndex = Number(failed.command);
@@ -159,7 +237,7 @@ function extractEffects(effectsBcs: Uint8Array): {
         error.moveLocation = {
           package: location.module.address,
           module: location.module.name,
-          function: location.functionName,
+          function: location.functionName ?? "",
           instruction: location.instruction != null ? Number(location.instruction) : undefined,
         };
       }
@@ -174,8 +252,9 @@ function extractEffects(effectsBcs: Uint8Array): {
       let inputVersion: string | undefined;
       let inputDigest: string | undefined;
       let inputOwner: GrpcOwner | undefined;
-      if (inputExists) {
-        const [[version, digest], owner] = change.inputState.Exist;
+      const existState = inputExists ? change.inputState.Exist : undefined;
+      if (existState) {
+        const [[version, digest], owner] = existState;
         inputVersion = strOrUndef(version);
         inputDigest = strOrUndef(digest);
         inputOwner = flattenOwner(owner);

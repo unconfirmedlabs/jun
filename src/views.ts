@@ -17,7 +17,12 @@
  * ```
  */
 import type { Logger } from "./logger.ts";
-import { validateIdentifier } from "./output/storage.ts";
+function validateIdentifier(name: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(name)) {
+    throw new Error(`Invalid SQL identifier: "${name}". Must be alphanumeric + underscores.`);
+  }
+  return name;
+}
 
 // ---------------------------------------------------------------------------
 // Types

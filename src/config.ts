@@ -82,21 +82,21 @@ function parseConfig(yaml: string): JunConfig {
     // Top-level: active_env
     const topMatch = line.match(/^active_env:\s*(.+)/);
     if (topMatch) {
-      config.active_env = topMatch[1].trim();
+      config.active_env = topMatch[1]!.trim();
       continue;
     }
 
     // Top-level: cache_max_mb
     const cacheMatch = line.match(/^cache_max_mb:\s*(\d+)/);
     if (cacheMatch) {
-      config.cache_max_mb = parseInt(cacheMatch[1]);
+      config.cache_max_mb = parseInt(cacheMatch[1]!);
       continue;
     }
 
     // Env name (2-space indent, ends with colon)
     const envMatch = line.match(/^  (\w[\w-]*):\s*$/);
     if (envMatch) {
-      currentEnv = envMatch[1];
+      currentEnv = envMatch[1]!;
       config.envs[currentEnv] = { grpc_url: "", archive_url: "" };
       continue;
     }
@@ -106,7 +106,7 @@ function parseConfig(yaml: string): JunConfig {
       const propMatch = line.match(/^\s{4}(grpc_url|archive_url):\s*(.+)/);
       if (propMatch) {
         const [, key, value] = propMatch;
-        (config.envs[currentEnv] as Record<string, string>)[key] = value.trim();
+        (config.envs[currentEnv] as unknown as Record<string, string>)[key!] = value!.trim();
       }
     }
   }

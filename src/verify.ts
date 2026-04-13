@@ -143,7 +143,7 @@ export async function verifyTransaction(
 
   let txIndex = -1;
   for (let i = 0; i < execDigests.length; i++) {
-    if (digestsEqual(execDigests[i].transaction, txDigestBytes)) {
+    if (digestsEqual(execDigests[i]!.transaction, txDigestBytes)) {
       txIndex = i;
       break;
     }
@@ -152,14 +152,14 @@ export async function verifyTransaction(
   steps.push({ label: "Transaction found in checkpoint", detail: `index ${txIndex}` });
 
   // 5. Verify effects
-  const effectsBcs = raw.transactions[txIndex].effects.bcs.value;
-  const eventsDigest = verifyTransactionEffects(effectsBcs, execDigests[txIndex].effects);
+  const effectsBcs = raw.transactions[txIndex]!.effects.bcs.value;
+  const eventsDigest = verifyTransactionEffects(effectsBcs, execDigests[txIndex]!.effects);
   steps.push({ label: "Transaction effects verified", detail: `${effectsBcs.length} bytes` });
 
   // 6. Verify events (if present)
   let hasEvents = false;
-  if (eventsDigest && raw.transactions[txIndex].events) {
-    const eventsBcs = raw.transactions[txIndex].events!.bcs.value;
+  if (eventsDigest && raw.transactions[txIndex]!.events) {
+    const eventsBcs = raw.transactions[txIndex]!.events!.bcs.value;
     verifyTransactionEvents(eventsBcs, eventsDigest);
     hasEvents = true;
     steps.push({ label: "Transaction events verified", detail: `${eventsBcs.length} bytes` });
@@ -199,13 +199,13 @@ export async function verifyObject(
 
   let txIndex = -1;
   for (let i = 0; i < execDigests.length; i++) {
-    if (digestsEqual(execDigests[i].transaction, txDigestBytes)) {
+    if (digestsEqual(execDigests[i]!.transaction, txDigestBytes)) {
       txIndex = i;
       break;
     }
   }
 
-  const effectsBcs = raw.transactions[txIndex].effects.bcs.value;
+  const effectsBcs = raw.transactions[txIndex]!.effects.bcs.value;
   const objIdBytes = hexToBytes(objectId);
   const objDigestBytes = verifyObjectInEffects(objIdBytes, effectsBcs);
   const objectDigest = objDigestBytes ? bytesToHex(objDigestBytes) : null;

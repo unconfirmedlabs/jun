@@ -352,7 +352,7 @@ export function createServer(config: ServeConfig, ctx: ServeContext): IndexerSer
   log.info({ port: server.port, hostname: config.hostname ?? process.env.JUN_SERVE_HOST ?? "127.0.0.1" }, "started");
 
   return {
-    get port() { return server.port; },
+    get port() { return server.port ?? 0; },
     async stop() {
       await server.stop();
       log.info("stopped");

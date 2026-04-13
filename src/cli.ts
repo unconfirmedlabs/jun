@@ -77,7 +77,7 @@ function parseStopConditions(opts: { untilCheckpoint?: string; until?: string; d
       console.error(`[jun] invalid --duration: ${opts.duration} (use e.g. 30s, 5m, 1h)`);
       process.exit(1);
     }
-    const value = parseInt(match[1]);
+    const value = parseInt(match[1]!);
     const unit = match[2];
     const ms = unit === "h" ? value * 3600_000 : unit === "m" ? value * 60_000 : value * 1000;
     conditions.deadline = Date.now() + ms;
@@ -117,14 +117,14 @@ async function resolveEpochRange(
   const sui = getSuiClient(grpcUrl);
 
   const { response: fromResp } = await sui.ledgerService.getEpoch({
-    epoch: fromEpoch,
+    epoch: BigInt(fromEpoch),
     readMask: { paths: ["first_checkpoint", "last_checkpoint"] },
   });
-  const from = fromResp.epoch.firstCheckpoint;
+  const from = fromResp.epoch?.firstCheckpoint;
   if (!from) throw new Error(`Could not resolve epoch ${fromEpoch}`);
 
   if (!toEpoch || toEpoch === fromEpoch) {
-    const last = fromResp.epoch.lastCheckpoint;
+    const last = fromResp.epoch?.lastCheckpoint;
     if (!last) {
       // Current epoch — get latest checkpoint as upper bound
       const sysResult = await sui.core.getCurrentSystemState();
@@ -132,7 +132,7 @@ async function resolveEpochRange(
       if (fromEpoch !== currentEpoch) throw new Error(`Epoch ${fromEpoch} has no last checkpoint`);
       // Use a recent checkpoint (can't know the exact latest, so fetch it)
       const { response: latestCp } = await sui.ledgerService.getCheckpoint({
-        checkpointId: { oneofKind: "sequenceNumber", sequenceNumber: "0" },
+        checkpointId: { oneofKind: "sequenceNumber", sequenceNumber: 0n },
         readMask: { paths: [] },
       });
       // Fallback: just use from + reasonable range
@@ -143,10 +143,10 @@ async function resolveEpochRange(
   }
 
   const { response: toResp } = await sui.ledgerService.getEpoch({
-    epoch: toEpoch,
+    epoch: BigInt(toEpoch),
     readMask: { paths: ["last_checkpoint"] },
   });
-  const last = toResp.epoch.lastCheckpoint;
+  const last = toResp.epoch?.lastCheckpoint;
   if (!last) throw new Error(`Epoch ${toEpoch} is not yet complete (no last checkpoint)`);
 
   return { from: BigInt(from), to: BigInt(last) };
@@ -466,7 +466,7 @@ client
       if (txData?.commands?.length) {
         console.log(`\n  commands (${txData.commands.length}):`);
         for (const cmd of txData.commands) {
-          const kind = Object.keys(cmd).find(k => k !== "$kind") ?? cmd.$kind ?? "unknown";
+          const kind = Object.keys(cmd).find(k => k !== "$kind") ?? (cmd as { $kind?: string }).$kind ?? "unknown";
           console.log(`    ${kind}`);
         }
       }
@@ -539,10 +539,11 @@ client
 
       // Fetch full epoch data via gRPC
       const { response } = await sui.ledgerService.getEpoch({
-        epoch: epochNum,
+        epoch: BigInt(epochNum),
         readMask: { paths: ["*"] },
       });
       const e = response.epoch;
+      if (!e) throw new Error(`No epoch data returned for epoch ${epochNum}`);
       const ss = e.systemState;
 
       if (opts.json) {
@@ -593,8 +594,8 @@ client
 
       // Subsidy
       if (subsidy) {
-        const balanceSui = (BigInt(subsidy.balance) / 1_000_000_000n).toLocaleString();
-        const distSui = (BigInt(subsidy.currentDistributionAmount) / 1_000_000_000n).toLocaleString();
+        const balanceSui = ((subsidy.balance ?? 0n) / 1_000_000_000n).toLocaleString();
+        const distSui = ((subsidy.currentDistributionAmount ?? 0n) / 1_000_000_000n).toLocaleString();
         console.log(`\n  subsidy balance     ${balanceSui} SUI`);
         console.log(`  subsidy/epoch       ${distSui} SUI`);
         console.log(`  subsidy period      ${subsidy.stakeSubsidyPeriodLength} epochs`);
@@ -603,8 +604,8 @@ client
 
       // Storage fund
       if (storageFund) {
-        const rebates = (BigInt(storageFund.totalObjectStorageRebates) / 1_000_000_000n).toLocaleString();
-        const nonRefundable = (BigInt(storageFund.nonRefundableBalance) / 1_000_000_000n).toLocaleString();
+        const rebates = ((storageFund.totalObjectStorageRebates ?? 0n) / 1_000_000_000n).toLocaleString();
+        const nonRefundable = ((storageFund.nonRefundableBalance ?? 0n) / 1_000_000_000n).toLocaleString();
         console.log(`\n  storage rebates     ${rebates} SUI`);
         console.log(`  non-refundable      ${nonRefundable} SUI`);
       }
@@ -1422,7 +1423,7 @@ client
     try {
       const count = parseInt(opts.count, 10);
 
-      const measure = async (fn: () => Promise<void>) => {
+      const measure = async (fn: () => PromiseLike<unknown>) => {
         const times: number[] = [];
         for (let i = 0; i < count; i++) {
           const start = performance.now();
@@ -1623,7 +1624,7 @@ configCmd
     if (otherEnvs.length) {
       console.log(`\n  other envs:`);
       for (const name of otherEnvs) {
-        console.log(`    ${name}: ${config.allEnvs[name].grpc_url}`);
+        console.log(`    ${name}: ${config.allEnvs[name]?.grpc_url}`);
       }
     }
     console.log("");
@@ -1670,39 +1671,6 @@ configCmd
   });
 
 // ---------------------------------------------------------------------------
-// Codegen command
-// ---------------------------------------------------------------------------
-
-program
-  .command("codegen")
-  .description("Generate jun field DSL from an on-chain Sui struct")
-  .argument("<type>", "fully qualified type (e.g. 0xPACKAGE::module::StructName)")
-  .option("--url <url>", "gRPC endpoint", cfg.grpcUrl)
-  .action(async (typeArg: string, opts: { url: string }) => {
-    // Parse the fully qualified type: 0xPACKAGE::module::StructName
-    const parts = typeArg.split("::");
-    if (parts.length !== 3) {
-      console.error(`[jun] invalid type format: ${typeArg}`);
-      console.error(`[jun] expected: 0xPACKAGE::module::StructName`);
-      process.exit(1);
-    }
-
-    const [packageId, moduleName, structName] = parts;
-
-    const client = createGrpcClient({ url: opts.url });
-
-    try {
-      const descriptor = await client.getDatatype(packageId, moduleName, structName);
-      const result = generateFieldDSL(descriptor);
-      console.log(formatCodegenResult(result));
-    } catch (err) {
-      cliError(err);
-    } finally {
-      client.close();
-    }
-  });
-
-// ---------------------------------------------------------------------------
 // MCP command
 // ---------------------------------------------------------------------------
 
@@ -1739,7 +1707,7 @@ program
   .action(async (opts: {
     live: boolean;
     url: string;
-    from?: string;
+    fromCheckpoint?: string;
     to?: string;
     count: string;
     archiveUrl: string;
@@ -1757,8 +1725,8 @@ program
     const chainOnly = !opts.live && !opts.fromCheckpoint;
 
     let dbPath: string | undefined;
-    let sqliteWriter: { close(): void } | undefined;
-    let description: string;
+    let sqliteWriter: import("./output/sqlite.ts").SqliteWriter | undefined;
+    let description: string = "";
 
     if (chainOnly) {
       description = "Sui chain query tools";
@@ -1788,14 +1756,14 @@ program
             const txData = (checkpoint.transactions ?? []).filter((tx: any) => !isSystemTx(tx)).map((tx: any) => ({
               digest: tx.digest,
               sender: tx.transaction?.sender,
-              status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
-              gasComputation: tx.effects?.gasUsed?.computationCost ? parseInt(tx.effects.gasUsed.computationCost) : null,
-              gasStorage: tx.effects?.gasUsed?.storageCost ? parseInt(tx.effects.gasUsed.storageCost) : null,
-              gasRebate: tx.effects?.gasUsed?.storageRebate ? parseInt(tx.effects.gasUsed.storageRebate) : null,
+              status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : undefined,
+              gasComputation: tx.effects?.gasUsed?.computationCost ? parseInt(tx.effects.gasUsed.computationCost) : undefined,
+              gasStorage: tx.effects?.gasUsed?.storageCost ? parseInt(tx.effects.gasUsed.storageCost) : undefined,
+              gasRebate: tx.effects?.gasUsed?.storageRebate ? parseInt(tx.effects.gasUsed.storageRebate) : undefined,
               events: tx.events?.events ?? [],
               balanceChanges: tx.balanceChanges ?? [],
             }));
-            sqliteWriter.writeCheckpoint({ seq, timestamp: ts, transactions: txData });
+            sqliteWriter!.writeCheckpoint({ seq, timestamp: ts, transactions: txData });
             checkpointCount++;
           }
         } catch {
@@ -1814,7 +1782,7 @@ program
       sqliteWriter = createSqliteWriter({ path: dbPath, showEvents: true, showBalanceChanges: false });
       const { createArchiveClient } = await import("./archive.ts");
       const from = BigInt(opts.fromCheckpoint!);
-      const to = opts.toCheckpoint ? BigInt(opts.toCheckpoint) : from + BigInt(opts.count) - 1n;
+      const to = opts.to ? BigInt(opts.to) : from + BigInt(opts.count) - 1n;
       const concurrency = parseInt(opts.concurrency);
       const total = Number(to - from) + 1;
 
@@ -1848,14 +1816,14 @@ program
             const txData = (checkpoint.transactions ?? []).filter((tx: any) => !isSystemTx(tx)).map((tx: any) => ({
               digest: tx.digest,
               sender: tx.transaction?.sender,
-              status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : null,
-              gasComputation: tx.effects?.gasUsed?.computationCost ? parseInt(tx.effects.gasUsed.computationCost) : null,
-              gasStorage: tx.effects?.gasUsed?.storageCost ? parseInt(tx.effects.gasUsed.storageCost) : null,
-              gasRebate: tx.effects?.gasUsed?.storageRebate ? parseInt(tx.effects.gasUsed.storageRebate) : null,
+              status: tx.effects?.status?.success ? "success" : tx.effects?.status ? "failure" : undefined,
+              gasComputation: tx.effects?.gasUsed?.computationCost ? parseInt(tx.effects.gasUsed.computationCost) : undefined,
+              gasStorage: tx.effects?.gasUsed?.storageCost ? parseInt(tx.effects.gasUsed.storageCost) : undefined,
+              gasRebate: tx.effects?.gasUsed?.storageRebate ? parseInt(tx.effects.gasUsed.storageRebate) : undefined,
               events: tx.events?.events ?? [],
               balanceChanges: [],
             }));
-            sqliteWriter.writeCheckpoint({ seq: response.cursor, timestamp: ts, transactions: txData });
+            sqliteWriter!.writeCheckpoint({ seq: response.cursor, timestamp: ts, transactions: txData });
             processed++;
           }, { concurrency });
 
@@ -2001,6 +1969,7 @@ addTableFlags(indexCmd
   .option("--clickhouse [url]", "use ClickHouse (URL from JUN_CLICKHOUSE_URL if omitted)")
   .option("--clickhouse-database <db>", "ClickHouse database name (or JUN_CLICKHOUSE_DATABASE)", process.env.JUN_CLICKHOUSE_DATABASE)
   .option("--clickhouse-batch-size <n>", "checkpoints per worker batch insert (default: 2000)")
+  .option("--stdout", "emit decoded records as JSONL to stdout (no storage)")
   .option("--epoch <number>", "backfill a completed epoch")
   .option("--from <checkpoint>", "start checkpoint (inclusive)")
   .option("--to <checkpoint>", "end checkpoint (inclusive)")
@@ -2084,14 +2053,16 @@ addTableFlags(indexCmd
       ? (typeof opts.postgres === "string" ? opts.postgres : process.env.JUN_POSTGRES_URL)
       : undefined;
 
+    const useStdout = !!opts.stdout;
+
     // Exactly one destination
-    const destCount = [useClickhouse, usePostgres, sqliteDir].filter(Boolean).length;
+    const destCount = [useClickhouse, usePostgres, sqliteDir, useStdout].filter(Boolean).length;
     if (destCount === 0) {
-      console.error("[jun] error: specify a destination: --clickhouse, --postgres, or --sqlite <dir>");
+      console.error("[jun] error: specify a destination: --clickhouse, --postgres, --sqlite <dir>, or --stdout");
       process.exit(1);
     }
     if (destCount > 1) {
-      console.error("[jun] error: specify exactly one destination: --clickhouse, --postgres, or --sqlite");
+      console.error("[jun] error: specify exactly one destination: --clickhouse, --postgres, --sqlite, or --stdout");
       process.exit(1);
     }
     if (useClickhouse && !clickhouseUrl) {
@@ -2120,6 +2091,9 @@ addTableFlags(indexCmd
     } else if (postgresUrl) {
       const { createReplayPostgresStorage } = await import("./pipeline/destinations/per-table-postgres.ts");
       pipeline.storage(createReplayPostgresStorage(postgresUrl, mask));
+    } else if (useStdout) {
+      const { createStdoutBroadcast } = await import("./pipeline/destinations/stdout.ts");
+      pipeline.broadcast(createStdoutBroadcast());
     } else {
       pipeline.storage(createPerTableSqliteStorage(sqliteDir, mask));
     }
@@ -2167,6 +2141,7 @@ addTableFlags(indexCmd
       console.error(`  tables          ${maskToTableNames(mask, ExtractMask).join(", ")}`);
       if (clickhouseUrl) console.error(`  destination     clickhouse ${clickhouseUrl} / ${opts.clickhouseDatabase}${useWorkerWrites ? " (worker writes)" : ""}`);
       else if (postgresUrl) console.error(`  destination     postgres ${postgresUrl}${useWorkerWrites ? " (worker writes)" : ""}`);
+      else if (useStdout) console.error(`  destination     stdout (JSONL)`);
       else console.error(`  destination     sqlite ${sqliteDir}`);
       console.error(`  concurrency     ${opts.concurrency ?? 200}`);
       if (opts.workers) console.error(`  workers         ${opts.workers}`);

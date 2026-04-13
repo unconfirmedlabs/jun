@@ -32,7 +32,7 @@ export interface TableDef {
   name: string;
   ddl: string;
   columns: string[];
-  mapRow: (record: any) => unknown[];
+  mapRow: (record: any) => (string | number | bigint | boolean | null | Uint8Array)[];
   getRecords: (cp: ProcessedCheckpoint) => any[];
 }
 

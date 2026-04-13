@@ -5,7 +5,7 @@
  * Field order matters — BCS is positional, so declarations must match
  * the on-chain struct field order exactly.
  */
-import { bcs } from "./bcs-provider.ts";
+import { bcs } from "@mysten/bcs";
 import type { BcsType } from "@mysten/bcs";
 
 // ---------------------------------------------------------------------------

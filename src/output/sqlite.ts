@@ -110,7 +110,7 @@ export function createSqliteWriter(opts: SqliteWriterOptions): SqliteWriter {
       if (insertEvent) {
         for (let i = 0; i < tx.events.length; i++) {
           const ev = tx.events[i];
-          insertEvent.run(tx.digest, i, ev.eventType, ev.packageId ?? null, ev.module ?? null, ev.sender ?? null, ev.contents?.value ?? null);
+          insertEvent.run(tx.digest, i, ev?.eventType ?? null, ev?.packageId ?? null, ev?.module ?? null, ev?.sender ?? null, ev?.contents?.value ?? null);
         }
       }
 

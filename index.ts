@@ -8,8 +8,7 @@
  * ```ts
  * import { createPipeline } from "jun";
  * import { createGrpcLiveSource } from "jun/pipeline/sources/grpc";
- * import { createBalanceTracker } from "jun/pipeline/processors/balanceChanges";
- * import { createSqlStorage } from "jun/pipeline/destinations/sql";
+ * // processors and destinations are configured via CLI flags or env vars
  *
  * const pipeline = createPipeline()
  *   .source(createGrpcLiveSource({ url: "fullnode.testnet.sui.io:443" }))
@@ -38,10 +37,6 @@ export type {
   DecodedEvent,
   BalanceChange,
 } from "./src/pipeline/types.ts";
-
-// Config parser
-export { parsePipelineConfig, parsePipelineConfigFromObject, normalizeConfig } from "./src/pipeline/config-parser.ts";
-export type { ParsedPipelineConfig, CanonicalConfig } from "./src/pipeline/config-parser.ts";
 
 // Schema types
 export type { FieldDefs, FieldType, PrimitiveFieldType } from "./src/schema.ts";
