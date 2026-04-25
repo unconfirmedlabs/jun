@@ -40,9 +40,9 @@ struct InitArgs {
 
 #[derive(Parser)]
 struct ReplayArgs {
-    #[arg(long)]
+    #[arg(long, env = "JUN_FROM")]
     from: u64,
-    #[arg(long)]
+    #[arg(long, env = "JUN_TO")]
     to: u64,
 
     #[arg(long, env = "JUN_ARCHIVE_PROXY", default_value = DEFAULT_PROXY)]
@@ -60,21 +60,22 @@ struct ReplayArgs {
     #[arg(long, env = "JUN_CLICKHOUSE_PASSWORD")]
     password: Option<String>,
 
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, env = "JUN_CHUNK_CONCURRENCY", default_value_t = 8)]
     chunk_concurrency: usize,
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, env = "JUN_DECODE_CONCURRENCY", default_value_t = 4)]
     decode_concurrency: usize,
-    #[arg(long, default_value_t = 500)]
+    #[arg(long, env = "JUN_BATCH_SIZE", default_value_t = 500)]
     batch_size: usize,
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, env = "JUN_WRITE_CONCURRENCY", default_value_t = 4)]
     write_concurrency: usize,
 
     /// Call init before replaying (idempotent — useful for one-shot runs).
+    /// Don't enable this on parallel workers; run `jun init` once separately.
     #[arg(long)]
     init: bool,
 
     /// Run mode: full | no-write (fetch+decode, drop) | fetch-only (count frames).
-    #[arg(long, default_value = "full")]
+    #[arg(long, env = "JUN_MODE", default_value = "full")]
     mode: String,
 }
 

@@ -1,0 +1,32 @@
+# fly.toml — jun checkpoint indexer worker.
+#
+# Workflow:
+#   1. Once per app:        fly apps create jun-worker
+#   2. Build image:          fly deploy --build-only
+#   3. Spawn workers:        fly machine run registry.fly.io/jun-worker:latest \
+#                              --env JUN_FROM=100000000 \
+#                              --env JUN_TO=100024999 \
+#                              --env JUN_CLICKHOUSE_URL=https://... \
+#                              --env JUN_CLICKHOUSE_DATABASE=jun \
+#                              --restart no \
+#                              --rm \
+#                              --region nrt
+#
+# Each machine runs `jun replay` once with its own range and exits.
+# Run multiple in different regions (--region nrt, sjc, fra, ord) to
+# shard archive fetches across distinct egress IPs and dodge per-IP
+# rate limits at R2 origin.
+
+app = "jun-worker"
+primary_region = "nrt"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Worker machine sizing. performance-2x = 2 vCPU / 4 GB RAM, fits the
+# default chunk_concurrency=16 + decode_concurrency=16 workload.
+# Bump to performance-4x for heavy epochs or to push beyond
+# ~1M rows/s to ClickHouse.
+[[vm]]
+  size = "performance-2x"
+  memory = "4gb"
