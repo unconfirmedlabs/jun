@@ -49,3 +49,9 @@ defi-tracker.db-shm
 defi-tracker.db-wal
 native/rust-decoder/target/
 native/rust-decoder/test-data/
+
+# rust workspace build output
+target
+
+# claude session state
+.claude/scheduled_tasks.lock

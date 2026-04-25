@@ -1,0 +1,19 @@
+[package]
+name = "jun-decoder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+jun-types = { workspace = true }
+sui-types = { workspace = true }
+anyhow    = { workspace = true }
+thiserror = { workspace = true }
+bcs       = { workspace = true }
+bs58      = { workspace = true }
+blake2    = { workspace = true }
+hex       = { workspace = true }
+serde     = { workspace = true }
+serde_json = { workspace = true }
+tracing   = { workspace = true }

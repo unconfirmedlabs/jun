@@ -1,0 +1,21 @@
+[package]
+name = "jun"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "jun"
+path = "src/main.rs"
+
+[dependencies]
+anyhow             = { workspace = true }
+clap               = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+jun-archive        = { workspace = true }
+jun-clickhouse     = { workspace = true }
+jun-pipeline       = { workspace = true }
+jun-types          = { workspace = true }

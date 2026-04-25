@@ -1,0 +1,15 @@
+[package]
+name = "jun-clickhouse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+jun-types  = { workspace = true }
+anyhow     = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
+futures    = { workspace = true }
+klickhouse = { version = "0.14", features = ["compression"] }

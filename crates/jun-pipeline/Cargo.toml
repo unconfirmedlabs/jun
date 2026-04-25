@@ -1,0 +1,17 @@
+[package]
+name = "jun-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+jun-archive    = { workspace = true }
+jun-decoder    = { workspace = true }
+jun-clickhouse = { workspace = true }
+jun-types      = { workspace = true }
+anyhow         = { workspace = true }
+tokio          = { workspace = true }
+futures        = { workspace = true }
+tracing        = { workspace = true }
+bytes          = { workspace = true }
