@@ -1,16 +1,18 @@
 # fly.toml — jun checkpoint indexer worker.
 #
 # Workflow:
-#   1. Once per app:        fly apps create jun-worker
-#   2. Build image:          fly deploy --build-only
-#   3. Spawn workers:        fly machine run registry.fly.io/jun-worker:latest \
-#                              --env JUN_FROM=100000000 \
-#                              --env JUN_TO=100024999 \
-#                              --env JUN_CLICKHOUSE_URL=https://... \
-#                              --env JUN_CLICKHOUSE_DATABASE=jun \
-#                              --restart no \
-#                              --rm \
-#                              --region nrt
+#   1. Once per app:    fly apps create jun-worker
+#   2. Build image:     fly deploy --build-only
+#   3. Init schema:     fly machine run registry.fly.io/jun-worker:latest \
+#                         --restart no --rm \
+#                         init --clickhouse https://... --database jun
+#   4. Spawn workers:   fly machine run registry.fly.io/jun-worker:latest \
+#                         --env JUN_FROM=100000000 \
+#                         --env JUN_TO=100024999 \
+#                         --env JUN_CLICKHOUSE_URL=https://... \
+#                         --env JUN_CLICKHOUSE_DATABASE=jun \
+#                         --restart no --rm \
+#                         --region nrt
 #
 # Each machine runs `jun replay` once with its own range and exits.
 # Run multiple in different regions (--region nrt, sjc, fra, ord) to

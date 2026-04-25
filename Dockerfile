@@ -50,4 +50,9 @@ COPY --from=builder /usr/local/bin/jun /usr/local/bin/jun
 # replay window; the machine exits when the replay completes.
 ENV RUST_LOG=info
 
-ENTRYPOINT ["jun", "replay"]
+# Default to `jun replay` (env-driven worker mode). Override at machine
+# launch to run other subcommands:
+#   fly machine run <image>                         # → jun replay  (env-driven)
+#   fly machine run <image> init --clickhouse ...   # → jun init
+ENTRYPOINT ["jun"]
+CMD ["replay"]
