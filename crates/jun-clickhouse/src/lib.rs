@@ -1,30 +1,32 @@
-//! jun-clickhouse — ClickHouse Native protocol writer (TCP port 9000).
+//! jun-clickhouse — ClickHouse HTTP writer using the official `clickhouse` crate.
 //!
-//! Uses `klickhouse` for columnar Block encoding + LZ4 wire compression.
-//! Faster than HTTP/RowBinary: amortizes framing, reuses the TCP connection,
-//! compresses on the wire.
+//! HTTP/1.1 over the CH HTTP port (8123) with LZ4 wire compression. The
+//! `clickhouse::Client` wraps a `hyper` connection pool — clones share the
+//! pool, so we don't manage sockets ourselves the way we did with klickhouse.
+//! Concurrent inserts to different tables (or different in-flight batches)
+//! pick up separate connections from the hyper pool automatically.
 //!
 //! v1 scope: 6 tables (checkpoints, transactions, move_calls, balance_changes,
-//! object_changes, transaction_dependencies). Each table has a DDL + a `Row`
-//! struct + a converter from `jun-types` records.
-
-use std::sync::Arc;
+//! object_changes, transaction_dependencies).
 
 use anyhow::{anyhow, Context, Result};
+use clickhouse::{Client, Compression, Row};
 use jun_types::{
     BalanceChangeRecord, CheckpointRecord, DependencyRecord, ExtractedCheckpoint,
     MoveCallRecord, ObjectChangeRecord, TransactionRecord,
 };
-use klickhouse::{Client, ClientOptions, DateTime64, Row};
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use tracing::debug;
 
 // --- Row structs: one per table, column order MUST match DDL --------------
 
-#[derive(Row, Clone, Debug)]
+#[derive(Row, Serialize, Deserialize, Clone, Debug)]
 pub struct CheckpointRow {
     pub sequence_number: u64,
     pub epoch: u64,
-    pub sui_timestamp: DateTime64<3>,
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    pub sui_timestamp: OffsetDateTime,
     pub digest: String,
     pub previous_digest: String,
     pub content_digest: String,
@@ -35,7 +37,7 @@ pub struct CheckpointRow {
     pub rolling_non_refundable_storage_fee: u64,
 }
 
-#[derive(Row, Clone, Debug)]
+#[derive(Row, Serialize, Deserialize, Clone, Debug)]
 pub struct TransactionRow {
     pub digest: String,
     pub sender: String,
@@ -46,7 +48,8 @@ pub struct TransactionRow {
     pub non_refundable_storage_fee: u64,
     pub move_call_count: u32,
     pub checkpoint_seq: u64,
-    pub sui_timestamp: DateTime64<3>,
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    pub sui_timestamp: OffsetDateTime,
     pub epoch: u64,
     pub error_kind: String,
     pub error_description: String,
@@ -65,7 +68,7 @@ pub struct TransactionRow {
     pub expiration_epoch: u64,
 }
 
-#[derive(Row, Clone, Debug)]
+#[derive(Row, Serialize, Deserialize, Clone, Debug)]
 pub struct MoveCallRow {
     pub tx_digest: String,
     pub call_index: u32,
@@ -73,20 +76,22 @@ pub struct MoveCallRow {
     pub module: String,
     pub function: String,
     pub checkpoint_seq: u64,
-    pub sui_timestamp: DateTime64<3>,
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    pub sui_timestamp: OffsetDateTime,
 }
 
-#[derive(Row, Clone, Debug)]
+#[derive(Row, Serialize, Deserialize, Clone, Debug)]
 pub struct BalanceChangeRow {
     pub tx_digest: String,
     pub checkpoint_seq: u64,
     pub address: String,
     pub coin_type: String,
     pub amount: i128,
-    pub sui_timestamp: DateTime64<3>,
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    pub sui_timestamp: OffsetDateTime,
 }
 
-#[derive(Row, Clone, Debug)]
+#[derive(Row, Serialize, Deserialize, Clone, Debug)]
 pub struct ObjectChangeRow {
     pub tx_digest: String,
     pub object_id: String,
@@ -102,15 +107,17 @@ pub struct ObjectChangeRow {
     pub output_owner_kind: String,
     pub is_gas_object: u8,
     pub checkpoint_seq: u64,
-    pub sui_timestamp: DateTime64<3>,
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    pub sui_timestamp: OffsetDateTime,
 }
 
-#[derive(Row, Clone, Debug)]
+#[derive(Row, Serialize, Deserialize, Clone, Debug)]
 pub struct DependencyRow {
     pub tx_digest: String,
     pub depends_on_digest: String,
     pub checkpoint_seq: u64,
-    pub sui_timestamp: DateTime64<3>,
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    pub sui_timestamp: OffsetDateTime,
 }
 
 // --- DDL ------------------------------------------------------------------
@@ -201,7 +208,12 @@ pub const ALL_DDL: &[&str] = &[
 
 fn p_u64(s: &str) -> u64 { s.parse().unwrap_or(0) }
 fn p_i128(s: &str) -> i128 { s.parse().unwrap_or(0) }
-fn ts(s: &str) -> DateTime64<3> { DateTime64(klickhouse::Tz::UTC, p_u64(s)) }
+/// Parse a millisecond-since-epoch string into OffsetDateTime. Sui timestamps
+/// fit comfortably in i64 (year 2262+), so saturating conversion is safe.
+fn ts(s: &str) -> OffsetDateTime {
+    let ms = p_u64(s) as i128 * 1_000_000;
+    OffsetDateTime::from_unix_timestamp_nanos(ms).unwrap_or(OffsetDateTime::UNIX_EPOCH)
+}
 
 impl From<&CheckpointRecord> for CheckpointRow {
     fn from(r: &CheckpointRecord) -> Self {
@@ -352,84 +364,63 @@ pub fn encode_batch(cps: &[ExtractedCheckpoint]) -> TableBatch {
     }
 }
 
-/// Indices into the per-table client array. Order is fixed so the array can be
-/// laid out at compile time and write_batch picks clients without a HashMap.
-const IDX_CHECKPOINTS: usize = 0;
-const IDX_TRANSACTIONS: usize = 1;
-const IDX_MOVE_CALLS: usize = 2;
-const IDX_BALANCE_CHANGES: usize = 3;
-const IDX_OBJECT_CHANGES: usize = 4;
-const IDX_DEPENDENCIES: usize = 5;
-const N_TABLES: usize = 6;
-
 #[derive(Clone)]
 pub struct ClickHouseClient {
-    /// One TCP connection per table. klickhouse's `Client` serializes every
-    /// query through a single channel, so concurrent inserts to one client
-    /// queue at the socket. Giving each table its own client lets the 6
-    /// per-batch inserts truly multiplex over distinct sockets.
-    clients: [Arc<Client>; N_TABLES],
+    /// `clickhouse::Client` is cheap to clone; clones share the underlying
+    /// hyper connection pool. Concurrent inserts to different tables open
+    /// separate HTTP requests served by separate pooled TCP connections.
+    inner: Client,
     database: String,
 }
 
 impl ClickHouseClient {
-    /// `addr` is host:port (native TCP, typically 9000). Example: "localhost:9000".
+    /// `url` is the HTTP endpoint, e.g. "http://localhost:8123".
     pub async fn connect(
-        addr: impl AsRef<str>,
+        url: impl Into<String>,
         database: impl Into<String>,
         username: Option<String>,
         password: Option<String>,
     ) -> Result<Self> {
-        let addr = addr.as_ref();
         let database = database.into();
-        let user = username.unwrap_or_else(|| "default".into());
-        let pass = password.unwrap_or_default();
+        let mut client = Client::default()
+            .with_url(url)
+            .with_compression(Compression::Lz4);
+        if let Some(u) = username { client = client.with_user(u); }
+        if let Some(p) = password { client = client.with_password(p); }
 
-        // Open all 6 connections in parallel — saves ~5×handshake latency at startup.
-        let mut futs = Vec::with_capacity(N_TABLES);
-        for _ in 0..N_TABLES {
-            let opts = ClientOptions {
-                username: user.clone(),
-                password: pass.clone(),
-                default_database: "default".into(),
-                tcp_nodelay: true,
-            };
-            futs.push(Client::connect(addr, opts));
-        }
-        let results = futures::future::try_join_all(futs)
+        // Verify reachability — surfaces wrong URL / auth before the first batch.
+        client
+            .query("SELECT 1")
+            .execute()
             .await
-            .with_context(|| format!("connect to CH {addr}"))?;
-        let clients: [Arc<Client>; N_TABLES] = results
-            .into_iter()
-            .map(Arc::new)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("vec len == N_TABLES by construction"));
+            .with_context(|| "ping CH")?;
 
-        Ok(Self { clients, database })
+        Ok(Self { inner: client, database })
     }
 
     pub async fn init_schema(&self) -> Result<()> {
-        let c = &self.clients[0];
-        c.execute(format!("CREATE DATABASE IF NOT EXISTS {}", self.database))
+        self.inner
+            .query(&format!("CREATE DATABASE IF NOT EXISTS {}", self.database))
+            .execute()
             .await
             .map_err(|e| anyhow!("CREATE DATABASE: {e}"))?;
         for ddl in ALL_DDL {
             let stmt = ddl.replace("{db}", &self.database);
-            c.execute(stmt).await.map_err(|e| anyhow!("DDL: {e}"))?;
+            self.inner.query(&stmt).execute().await.map_err(|e| anyhow!("DDL: {e}"))?;
         }
         Ok(())
     }
 
     pub async fn write_batch(&self, batch: TableBatch) -> Result<()> {
-        let db = &self.database;
-
-        let f1 = insert_rows(&self.clients[IDX_CHECKPOINTS],     db, "checkpoints",              batch.checkpoints);
-        let f2 = insert_rows(&self.clients[IDX_TRANSACTIONS],    db, "transactions",             batch.transactions);
-        let f3 = insert_rows(&self.clients[IDX_MOVE_CALLS],      db, "move_calls",               batch.move_calls);
-        let f4 = insert_rows(&self.clients[IDX_BALANCE_CHANGES], db, "balance_changes",          batch.balance_changes);
-        let f5 = insert_rows(&self.clients[IDX_OBJECT_CHANGES],  db, "object_changes",           batch.object_changes);
-        let f6 = insert_rows(&self.clients[IDX_DEPENDENCIES],    db, "transaction_dependencies", batch.dependencies);
+        // Each call expands at a concrete row type so the compiler can
+        // resolve `<R as Row>::Value<'_>` (which generic helpers can't, since
+        // there's no way to prove `R == R::Value<'_>` in a where-clause).
+        let f1 = insert_table(self.inner.clone(), &self.database, "checkpoints",              batch.checkpoints);
+        let f2 = insert_table(self.inner.clone(), &self.database, "transactions",             batch.transactions);
+        let f3 = insert_table(self.inner.clone(), &self.database, "move_calls",               batch.move_calls);
+        let f4 = insert_table(self.inner.clone(), &self.database, "balance_changes",          batch.balance_changes);
+        let f5 = insert_table(self.inner.clone(), &self.database, "object_changes",           batch.object_changes);
+        let f6 = insert_table(self.inner.clone(), &self.database, "transaction_dependencies", batch.dependencies);
 
         let (r1, r2, r3, r4, r5, r6) = tokio::join!(f1, f2, f3, f4, f5, f6);
         r1?; r2?; r3?; r4?; r5?; r6?;
@@ -438,16 +429,59 @@ impl ClickHouseClient {
     }
 }
 
-async fn insert_rows<R: Row + Send + Sync + 'static>(
-    client: &Client,
-    db: &str,
-    table: &str,
-    rows: Vec<R>,
-) -> Result<()> {
-    if rows.is_empty() { return Ok(()); }
-    let query = format!("INSERT INTO {}.{} FORMAT Native", db, table);
-    client
-        .insert_native_block(&query, rows)
-        .await
-        .map_err(|e| anyhow!("insert {table}: {e}"))
+/// Macro because each table needs the row type at compile time so the
+/// `clickhouse::Row::Value<'_>` GAT resolves to the concrete struct.
+macro_rules! impl_insert {
+    ($name:ident, $row:ty) => {
+        async fn $name(client: Client, db: &str, table: &str, rows: Vec<$row>) -> Result<()> {
+            if rows.is_empty() { return Ok(()); }
+            let client = client.with_database(db);
+            let mut insert = client.insert::<$row>(table).await
+                .map_err(|e| anyhow!("insert {table}: prepare: {e}"))?;
+            for row in &rows {
+                insert.write(row).await
+                    .map_err(|e| anyhow!("insert {table}: write: {e}"))?;
+            }
+            insert.end().await.map_err(|e| anyhow!("insert {table}: end: {e}"))?;
+            Ok(())
+        }
+    };
 }
+
+impl_insert!(insert_checkpoints,  CheckpointRow);
+impl_insert!(insert_transactions, TransactionRow);
+impl_insert!(insert_move_calls,   MoveCallRow);
+impl_insert!(insert_balances,     BalanceChangeRow);
+impl_insert!(insert_objects,      ObjectChangeRow);
+impl_insert!(insert_deps,         DependencyRow);
+
+async fn insert_table<R>(client: Client, db: &str, table: &str, rows: Vec<R>) -> Result<()>
+where R: TableInsert {
+    R::insert(client, db, table, rows).await
+}
+
+trait TableInsert: Sized + Send + 'static {
+    fn insert(client: Client, db: &str, table: &str, rows: Vec<Self>)
+        -> futures::future::BoxFuture<'static, Result<()>>;
+}
+
+macro_rules! impl_table_insert {
+    ($row:ty, $fn:ident) => {
+        impl TableInsert for $row {
+            fn insert(client: Client, db: &str, table: &str, rows: Vec<Self>)
+                -> futures::future::BoxFuture<'static, Result<()>>
+            {
+                let db = db.to_string();
+                let table = table.to_string();
+                Box::pin(async move { $fn(client, &db, &table, rows).await })
+            }
+        }
+    };
+}
+
+impl_table_insert!(CheckpointRow,    insert_checkpoints);
+impl_table_insert!(TransactionRow,   insert_transactions);
+impl_table_insert!(MoveCallRow,      insert_move_calls);
+impl_table_insert!(BalanceChangeRow, insert_balances);
+impl_table_insert!(ObjectChangeRow,  insert_objects);
+impl_table_insert!(DependencyRow,    insert_deps);

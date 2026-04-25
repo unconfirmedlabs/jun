@@ -12,4 +12,9 @@ thiserror  = { workspace = true }
 tokio      = { workspace = true }
 tracing    = { workspace = true }
 futures    = { workspace = true }
-klickhouse = { version = "0.14", features = ["compression"] }
+serde      = { version = "1", features = ["derive"] }
+time       = { version = "0.3", features = ["macros", "serde"] }
+# Official ClickHouse crate. HTTP-based with hyper connection pooling, LZ4 wire
+# compression. Replaced klickhouse (unmaintained since 2024 + bug in
+# no-compression code path).
+clickhouse = { version = "0.15", default-features = false, features = ["lz4", "time", "rustls-tls"] }

@@ -7,8 +7,8 @@ use jun_clickhouse::ClickHouseClient;
 use jun_pipeline::{run_replay, ReplayConfig, RunMode};
 use jun_types::ExtractMask;
 
-// Default Native-TCP port for ClickHouse.
-const DEFAULT_CH_ADDR: &str = "localhost:9000";
+// Default ClickHouse HTTP URL.
+const DEFAULT_CH_URL: &str = "http://localhost:8123";
 
 #[derive(Parser)]
 #[command(name = "jun", version, about = "Sui checkpoint indexer")]
@@ -27,8 +27,8 @@ enum Cmd {
 
 #[derive(Parser)]
 struct InitArgs {
-    /// ClickHouse Native TCP address (host:port). Default: localhost:9000.
-    #[arg(long, env = "JUN_CLICKHOUSE_ADDR", default_value = DEFAULT_CH_ADDR)]
+    /// ClickHouse HTTP URL. Default: http://localhost:8123.
+    #[arg(long, env = "JUN_CLICKHOUSE_URL", default_value = DEFAULT_CH_URL)]
     clickhouse: String,
     #[arg(long, env = "JUN_CLICKHOUSE_DATABASE", default_value = "jun")]
     database: String,
@@ -50,8 +50,8 @@ struct ReplayArgs {
     #[arg(long, env = "JUN_ARCHIVE_URL", default_value = DEFAULT_ARCHIVE)]
     archive_url: String,
 
-    /// ClickHouse Native TCP address (host:port). Default: localhost:9000.
-    #[arg(long, env = "JUN_CLICKHOUSE_ADDR", default_value = DEFAULT_CH_ADDR)]
+    /// ClickHouse HTTP URL. Default: http://localhost:8123.
+    #[arg(long, env = "JUN_CLICKHOUSE_URL", default_value = DEFAULT_CH_URL)]
     clickhouse: String,
     #[arg(long, env = "JUN_CLICKHOUSE_DATABASE", default_value = "jun")]
     database: String,
@@ -79,13 +79,13 @@ struct ReplayArgs {
 }
 
 async fn build_clickhouse_client(
-    addr: &str,
+    url: &str,
     database: &str,
     username: Option<&String>,
     password: Option<&String>,
 ) -> Result<ClickHouseClient> {
     ClickHouseClient::connect(
-        addr,
+        url,
         database,
         username.cloned(),
         password.cloned(),
