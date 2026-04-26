@@ -1,0 +1,125 @@
+// jun.proto — wire schema for jun's NATS broadcast and pipe `--format=proto`.
+//
+// Stable: field numbers are append-only. Renaming a field is a breaking change
+// for subscribers; add new fields at the next available number instead.
+//
+// Each top-level message corresponds to a record type emitted on its own NATS
+// subject. The subject layout is `jun.<table>` where `<table>` is the record
+// name in snake_case (e.g. `jun.transactions`, `jun.balance_changes`).
+//
+// Numeric fields that come from Sui as u64 / u128 are encoded as strings to
+// preserve the full range without language-specific number-precision concerns
+// (JS subscribers, etc.).
+
+syntax = "proto3";
+package jun.v1;
+
+// One row per Sui checkpoint.
+message Checkpoint {
+  string sequence_number                    = 1;
+  string epoch                              = 2;
+  string timestamp_ms                       = 3;
+  string digest                             = 4;
+  optional string previous_digest           = 5;
+  optional string content_digest            = 6;
+  string total_network_transactions         = 7;
+  string rolling_computation_cost           = 8;
+  string rolling_storage_cost               = 9;
+  string rolling_storage_rebate             = 10;
+  string rolling_non_refundable_storage_fee = 11;
+}
+
+// One row per Sui transaction. See jun-types/TransactionRecord for field
+// semantics.
+message Transaction {
+  string digest                          = 1;
+  string sender                          = 2;
+  bool   success                         = 3;
+  string computation_cost                = 4;
+  string storage_cost                    = 5;
+  string storage_rebate                  = 6;
+  string non_refundable_storage_fee      = 7;
+  string checkpoint_seq                  = 8;
+  string timestamp_ms                    = 9;
+  uint32 move_call_count                 = 10;
+  string epoch                           = 11;
+  optional string error_kind             = 12;
+  optional string error_description      = 13;
+  optional uint32 error_command_index    = 14;
+  optional string error_abort_code       = 15;
+  optional string error_module           = 16;
+  optional string error_function         = 17;
+  optional uint32 error_arg_idx          = 18;
+  optional uint32 error_type_arg_idx     = 19;
+  optional string error_sub_kind         = 20;
+  optional string error_current_size     = 21;
+  optional string error_max_size         = 22;
+  optional string error_coin_type        = 23;
+  optional string error_denied_address   = 24;
+  optional string error_object_id        = 25;
+  optional string events_digest          = 26;
+  optional string lamport_version        = 27;
+  uint32 dependency_count                = 28;
+  string gas_owner                       = 29;
+  string gas_price                       = 30;
+  string gas_budget                      = 31;
+  optional string gas_object_id          = 32;
+  string expiration_kind                 = 33;
+  optional string expiration_epoch       = 34;
+  optional string expiration_min_epoch   = 35;
+  optional string expiration_max_epoch   = 36;
+  optional string expiration_min_ts_seconds = 37;
+  optional string expiration_max_ts_seconds = 38;
+  optional string expiration_chain       = 39;
+  optional uint32 expiration_nonce       = 40;
+}
+
+// One MoveCall command within a transaction.
+message MoveCall {
+  string tx_digest      = 1;
+  uint32 call_index     = 2;
+  string package        = 3;
+  string module         = 4;
+  string function       = 5;
+  string checkpoint_seq = 6;
+  string timestamp_ms   = 7;
+}
+
+// One coin balance delta per (tx, address, coin_type).
+message BalanceChange {
+  string tx_digest      = 1;
+  string checkpoint_seq = 2;
+  string address        = 3;
+  string coin_type      = 4;
+  // Signed amount as a decimal string (negative = sent / burned).
+  string amount         = 5;
+  string timestamp_ms   = 6;
+}
+
+// One state change per object per transaction.
+message ObjectChange {
+  string tx_digest                   = 1;
+  string object_id                   = 2;
+  // Allowed: CREATED | MUTATED | DELETED | WRAPPED | UNWRAPPED | PACKAGE_WRITE.
+  string change_type                 = 3;
+  optional string object_type        = 4;
+  optional string input_version      = 5;
+  optional string input_digest       = 6;
+  optional string input_owner        = 7;
+  optional string input_owner_kind   = 8;
+  optional string output_version     = 9;
+  optional string output_digest      = 10;
+  optional string output_owner       = 11;
+  optional string output_owner_kind  = 12;
+  bool   is_gas_object               = 13;
+  string checkpoint_seq              = 14;
+  string timestamp_ms                = 15;
+}
+
+// A directed edge in the transaction dependency graph.
+message Dependency {
+  string tx_digest         = 1;
+  string depends_on_digest = 2;
+  string checkpoint_seq    = 3;
+  string timestamp_ms      = 4;
+}

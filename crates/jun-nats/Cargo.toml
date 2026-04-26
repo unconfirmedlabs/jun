@@ -1,0 +1,24 @@
+[package]
+name = "jun-nats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+jun-types    = { workspace = true }
+jun-pipeline = { workspace = true }
+anyhow       = { workspace = true }
+async-trait  = "0.1"
+async-nats   = "0.39"
+bytes        = { workspace = true }
+prost        = "0.13"
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+sonic-rs     = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+
+[build-dependencies]
+prost-build         = "0.13"
+protoc-bin-vendored = "3"

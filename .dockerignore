@@ -1,0 +1,40 @@
+# Keep build context small — the Dockerfile only needs Cargo manifests + crates/.
+
+# Build outputs
+target/
+native/rust-decoder/target/
+
+# Pre-rewrite TS app — not used by the Rust binary build.
+src/
+scripts/
+native/lib/
+native/rust-decoder/
+node_modules/
+dist/
+out/
+coverage/
+bun.lock
+package.json
+*.tsbuildinfo
+
+# VCS / IDE / OS
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+.claude/
+
+# Local databases / dumps
+*.sqlite*
+*.jsonl
+*.tgz
+
+# Env files (must not leak into image)
+.env
+.env.*
+
+# Misc
+PLAN.md
+README.md
+LICENSE*

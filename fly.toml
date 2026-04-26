@@ -1,0 +1,34 @@
+# fly.toml — jun checkpoint indexer worker.
+#
+# Workflow:
+#   1. Once per app:    fly apps create jun-worker
+#   2. Build image:     fly deploy --build-only
+#   3. Spawn workers:   fly machine run registry.fly.io/jun-worker:latest \
+#                         --env JUN_FROM=100000000 \
+#                         --env JUN_TO=100024999 \
+#                         --env JUN_MODE=no-write \
+#                         --restart no --rm \
+#                         --region nrt
+#
+# Each machine runs `jun replay` once with its own range and exits. Until
+# NATS / pipe sinks land, only `--mode no-write` and `--mode fetch-only`
+# are useful (benchmarking the fetch + decode path). Database ingestion
+# happens downstream (e.g. juna).
+#
+# Run multiple in different regions (--region nrt, sjc, fra, ord) to
+# shard archive fetches across distinct egress IPs and dodge per-IP
+# rate limits at R2 origin.
+
+app = "jun-worker"
+primary_region = "nrt"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Worker machine sizing. performance-1x = 1 vCPU / 2 GB RAM, the
+# cost-efficient unit for parallel backfill (~$0.026/hr, ~1K cps/s,
+# ~$2 for full mainnet at any fan-out). Override per-machine via
+# `--vm-size performance-4x` when running fewer-bigger workers.
+[[vm]]
+  size = "performance-1x"
+  memory = "2gb"

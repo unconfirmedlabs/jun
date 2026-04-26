@@ -1,0 +1,17 @@
+[package]
+name = "jun-checkpoint-verifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "BLS-verify Sui checkpoint summaries against the epoch committee. Ingest-side only — proxy reads from a pre-verified archive."
+
+[dependencies]
+sui-sdk-types = { workspace = true }
+bcs           = { workspace = true }
+blst          = { workspace = true }
+zstd          = { workspace = true }
+anyhow        = { workspace = true }
+
+[dev-dependencies]
+ureq = { version = "2", features = ["native-tls"] }

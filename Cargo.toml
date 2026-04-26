@@ -1,0 +1,102 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/jun-types",
+    "crates/jun-archive-reader",
+    "crates/jun-checkpoint-decoder",
+    "crates/jun-pipeline",
+    "crates/jun-nats",
+    "crates/jun-checkpoint-ingest",
+    "crates/jun-checkpoint-stream",
+    "crates/jun-checkpoint-verifier",
+    "crates/jun",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.2.0"
+license = "Apache-2.0"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Shared across all jun-* crates. Pin versions here, not in individual crates.
+
+# Async runtime + HTTP
+tokio       = { version = "1", features = ["full"] }
+reqwest     = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "gzip", "zstd", "json"] }
+bytes       = "1"
+futures     = "0.3"
+
+# Sui SDK proto bindings. Lightweight standalone SDK from MystenLabs/sui-rust-sdk
+# (separate from the heavy mainline sui-types). Provides prost-generated types
+# for the v2 RPC protobuf schema. We use sui-rpc for the proto envelope wire
+# format only — the user's archive proto populates the `bcs.value` byte fields
+# exclusively, so we BCS-decode the inner bytes via sui-types' canonical types.
+sui-rpc     = "0.0.8"
+# Mainline canonical types + helpers (TransactionEffects, ObjectSet, Coin,
+# derive_balance_changes_2). Pinned to the rev that worked at commit 0a7b738.
+# mainnet HEAD currently has a yanked transitive (multihash 0.17 → core2),
+# but the lockfile from that commit picked working multiaddr 0.17.1, so the
+# pin + restored lockfile resolves cleanly.
+sui-types   = { git = "https://github.com/MystenLabs/sui.git", rev = "3c0f387ebb40b8be292d3b7bd3f5bee8ad226d33" }
+
+# Serde + BCS for Sui data
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+# SIMD-accelerated JSON serializer (AVX2/AVX-512 on x86, NEON on ARM).
+# Drop-in replacement for serde_json::{to_string,to_vec,to_writer} for any
+# Serialize type. ~2-3× faster on the hot replay/stream pipe path.
+sonic-rs    = "0.5"
+bcs         = "0.1"
+
+# Hashing / encoding
+blake2      = "0.10"
+bs58        = "0.5"
+hex         = "0.4"
+zstd        = "0.13"
+ruzstd      = { version = "0.8", default-features = false, features = ["std"] }
+bitflags    = "2"
+
+# BLS verification (Sui checkpoint signatures). Pure-Rust portable build keeps
+# wasm + cross-compile working without aws-lc-sys / platform-specific asm.
+blst        = { version = "0.3", features = ["portable"] }
+sui-sdk-types = { version = "0.3", features = ["serde"] }
+
+# R2 / S3 access via rust-s3 (built on reqwest, rustls). Library-grade
+# error handling, retries, and edge cases. ~30 fewer transitive crates
+# than aws-sdk-s3, no aws-smithy-http-client / hyper-014 glue.
+# Tradeoff: rust-s3's `ClientOptions` doesn't expose source-IP binding
+# (only request_timeout/proxy/cert toggles), so each S3Pool client just
+# inherits the kernel's default source IP — fine because R2 is
+# per-account-throttled, not per-IP, on the upload side.
+rust-s3     = { version = "0.36", default-features = false, features = ["with-tokio", "tokio-rustls-tls"] }
+sha2        = "0.10"
+
+# Error / logging
+anyhow      = "1"
+thiserror   = "2"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# CLI
+clap        = { version = "4", features = ["derive", "env"] }
+
+# gRPC (live source for stream command — coming online)
+tonic       = { version = "0.12", default-features = false, features = ["codegen", "transport", "tls-native-roots", "prost"] }
+prost       = "0.13"
+
+# Internal crate references (workspace paths)
+jun-types       = { path = "crates/jun-types" }
+jun-archive-reader     = { path = "crates/jun-archive-reader" }
+jun-checkpoint-decoder     = { path = "crates/jun-checkpoint-decoder" }
+jun-pipeline    = { path = "crates/jun-pipeline" }
+jun-nats        = { path = "crates/jun-nats" }
+jun-checkpoint-ingest      = { path = "crates/jun-checkpoint-ingest" }
+jun-checkpoint-stream        = { path = "crates/jun-checkpoint-stream" }
+jun-checkpoint-verifier    = { path = "crates/jun-checkpoint-verifier" }
+
+[profile.release]
+lto         = "fat"
+codegen-units = 1
+opt-level   = 3
+strip       = "debuginfo"

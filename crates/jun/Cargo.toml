@@ -1,0 +1,30 @@
+[package]
+name = "jun"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "jun"
+path = "src/main.rs"
+
+[dependencies]
+anyhow             = { workspace = true }
+clap               = { workspace = true }
+mimalloc           = { version = "0.1", default-features = false }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+jun-archive-reader        = { workspace = true }
+jun-checkpoint-decoder        = { workspace = true }
+jun-checkpoint-stream           = { workspace = true, features = ["nats"] }
+jun-checkpoint-ingest         = { workspace = true }
+jun-nats           = { workspace = true }
+jun-pipeline       = { workspace = true }
+jun-types          = { workspace = true }
+reqwest            = { workspace = true }
+serde_json         = { workspace = true }
+
+[dev-dependencies]
+serde_json         = { workspace = true }

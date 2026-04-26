@@ -1,0 +1,19 @@
+[package]
+name = "jun-checkpoint-decoder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+jun-types   = { workspace = true }
+sui-rpc     = { workspace = true }
+sui-types   = { workspace = true }
+bcs         = { workspace = true }
+# Match sui-rpc 0.0.8's transitive prost — using a different major would put two
+# `prost::Message` traits in the graph and break decode().
+prost       = "0.13"
+prost-types = "0.13"
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }

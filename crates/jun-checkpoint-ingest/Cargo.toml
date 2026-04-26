@@ -1,0 +1,40 @@
+[package]
+name = "jun-checkpoint-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Streaming Sui checkpoint ingester: fetch + BLS-verify + multipart upload to R2."
+
+[dependencies]
+jun-checkpoint-verifier = { workspace = true }
+
+# Async runtime + HTTP + JSON.
+tokio       = { workspace = true }
+reqwest     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+
+# R2 / S3 client. Library-grade error handling; reqwest under the hood.
+rust-s3     = { workspace = true }
+
+# Stream / concurrency primitives.
+futures     = { workspace = true }
+bytes       = { workspace = true }
+num_cpus    = "1"
+
+# Local interface enumeration for source-IP binding (Mysten archive throttles
+# per-IP; binding outbound connections across a /29 multiplies throughput).
+if-addrs    = "0.13"
+
+# Hashing.
+sha2        = { workspace = true }
+hex         = { workspace = true }
+
+# Errors / logging.
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
