@@ -17,3 +17,4 @@ prost-types = "0.13"
 anyhow      = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
+hex         = { workspace = true }

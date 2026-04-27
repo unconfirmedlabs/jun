@@ -9,6 +9,8 @@ description = "Live Sui fullnode gRPC subscription + decode for jun. Wraps sui-r
 [dependencies]
 jun-types   = { workspace = true }
 jun-checkpoint-decoder = { workspace = true }
+sui-types   = { workspace = true }
+bcs         = { workspace = true }
 
 # Pull the prost-generated SubscriptionService client straight from sui-rust-sdk.
 # Tracks the same rev sui-types pulls in transitively (already in Cargo.lock).

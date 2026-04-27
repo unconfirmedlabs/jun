@@ -2952,6 +2952,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "bcs",
+ "hex",
  "jun-types",
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -2989,6 +2990,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "async-trait",
+ "bcs",
  "futures",
  "http",
  "jun-checkpoint-decoder",
@@ -2999,6 +3001,7 @@ dependencies = [
  "serde_json",
  "sonic-rs",
  "sui-rpc 0.2.2",
+ "sui-types",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",

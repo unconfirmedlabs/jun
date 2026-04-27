@@ -21,19 +21,20 @@ use anyhow::{anyhow, Result};
 use prost::Message;
 
 use jun_types::{
-    BalanceChangeRecord, CheckpointRecord, DependencyRecord, ExtractMask,
-    ExtractedCheckpoint, MoveCallRecord, ObjectChangeRecord, TransactionRecord,
+    BalanceChangeRecord, CheckpointRecord, DependencyRecord, EventRecord, ExtractMask,
+    ExtractedCheckpoint, MoveCallRecord, ObjectChangeRecord, PackageModuleRecord,
+    PackageRecord, TransactionRecord,
 };
 
 use sui_rpc::proto::sui::rpc::v2::Checkpoint as ProtoCheckpoint;
 
 use sui_types::balance_change::derive_balance_changes_2;
 use sui_types::base_types::{ObjectID, SequenceNumber};
-use sui_types::effects::{IDOperation, TransactionEffects, TransactionEffectsAPI};
+use sui_types::effects::{IDOperation, TransactionEffects, TransactionEffectsAPI, TransactionEvents};
 use sui_types::execution_status::{ExecutionErrorKind, ExecutionStatus};
 use sui_types::full_checkpoint_content::ObjectSet;
 use sui_types::messages_checkpoint::CheckpointSummary;
-use sui_types::object::{Object, Owner};
+use sui_types::object::{Data, Object, Owner};
 use sui_types::storage::ObjectKey;
 use sui_types::transaction::{
     Command, SenderSignedData, TransactionData, TransactionDataAPI, TransactionKind,
@@ -197,6 +198,20 @@ pub fn flatten_checkpoint(cp: &ProtoCheckpoint, mask: ExtractMask) -> ExtractedC
                 }
             }
         }
+
+        if mask.contains(ExtractMask::EVENTS) {
+            extract_events(
+                &digest, &checkpoint_seq, &checkpoint_ts,
+                tx, &mut out.events,
+            );
+        }
+    }
+
+    if mask.contains(ExtractMask::PACKAGES) {
+        extract_packages(
+            cp, &checkpoint_seq, &checkpoint_ts,
+            &mut out.packages, &mut out.package_modules,
+        );
     }
 
     out
@@ -539,6 +554,132 @@ fn extract_object_changes(
             checkpoint_seq: checkpoint_seq.to_string(),
             timestamp_ms: timestamp_ms.to_string(),
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Events / Packages
+// ---------------------------------------------------------------------------
+
+/// Walk a transaction's events. The archive populates `tx.events.bcs.value`
+/// with the canonical BCS encoding of `TransactionEvents`. Live gRPC streams
+/// may also populate the proto-level `events: Vec<Event>` field as a
+/// pre-decoded fallback. We try BCS first (universal path), then fall back to
+/// the proto fields if BCS decode fails or is absent.
+fn extract_events(
+    tx_digest: &str,
+    checkpoint_seq: &str,
+    timestamp_ms: &str,
+    tx: &sui_rpc::proto::sui::rpc::v2::ExecutedTransaction,
+    out: &mut Vec<EventRecord>,
+) {
+    // BCS path
+    let bcs_events: Option<TransactionEvents> = tx
+        .events
+        .as_ref()
+        .and_then(|e| e.bcs.as_ref())
+        .and_then(|b| b.value.as_ref())
+        .and_then(|v| bcs::from_bytes(v).ok());
+
+    if let Some(evs) = bcs_events {
+        for (i, ev) in evs.data.iter().enumerate() {
+            out.push(EventRecord {
+                tx_digest: tx_digest.to_string(),
+                event_seq: i as u32,
+                package_id: ev.package_id.to_string(),
+                module: ev.transaction_module.to_string(),
+                event_type: ev.type_.to_canonical_string(true),
+                sender: ev.sender.to_string(),
+                contents_hex: hex::encode(&ev.contents),
+                checkpoint_seq: checkpoint_seq.to_string(),
+                timestamp_ms: timestamp_ms.to_string(),
+            });
+        }
+        return;
+    }
+
+    // Proto fallback (live gRPC streams sometimes populate this without BCS).
+    if let Some(events_msg) = tx.events.as_ref() {
+        for (i, ev) in events_msg.events.iter().enumerate() {
+            let contents_hex = ev
+                .contents
+                .as_ref()
+                .and_then(|b| b.value.as_ref())
+                .map(|v| hex::encode(v))
+                .unwrap_or_default();
+            out.push(EventRecord {
+                tx_digest: tx_digest.to_string(),
+                event_seq: i as u32,
+                package_id: ev.package_id.clone().unwrap_or_default(),
+                module: ev.module.clone().unwrap_or_default(),
+                event_type: ev.event_type.clone().unwrap_or_default(),
+                sender: ev.sender.clone().unwrap_or_default(),
+                contents_hex,
+                checkpoint_seq: checkpoint_seq.to_string(),
+                timestamp_ms: timestamp_ms.to_string(),
+            });
+        }
+    }
+}
+
+/// Walk every Object in the checkpoint's `objects` list, BCS-decode each, and
+/// emit `PackageRecord` + `PackageModuleRecord`s for those whose data is a
+/// `MovePackage`. PACKAGE_WRITE in object_changes is the change-side view of
+/// this — same packages, different framing.
+fn extract_packages(
+    cp: &ProtoCheckpoint,
+    checkpoint_seq: &str,
+    timestamp_ms: &str,
+    out_packages: &mut Vec<PackageRecord>,
+    out_modules: &mut Vec<PackageModuleRecord>,
+) {
+    // Iterate top-level cp.objects + per-tx tx.objects (live streams may use
+    // either; archives populate top-level only).
+    let mut visited: HashSet<(ObjectID, SequenceNumber)> = HashSet::new();
+    let mut walk_one = |bcs_value: &[u8]| {
+        let Ok(obj) = bcs::from_bytes::<Object>(bcs_value) else { return };
+        let Data::Package(pkg) = &obj.data else { return };
+        let id = pkg.id();
+        let version = pkg.version();
+        if !visited.insert((id, version)) {
+            return;
+        }
+        let modules = pkg.serialized_module_map();
+        out_packages.push(PackageRecord {
+            package_id: id.to_string(),
+            version: version.value().to_string(),
+            original_id: pkg.original_package_id().to_string(),
+            module_count: modules.len() as u32,
+            checkpoint_seq: checkpoint_seq.to_string(),
+            timestamp_ms: timestamp_ms.to_string(),
+        });
+        for (name, bytes) in modules {
+            out_modules.push(PackageModuleRecord {
+                package_id: id.to_string(),
+                version: version.value().to_string(),
+                module_name: name.clone(),
+                bytecode_hex: hex::encode(bytes),
+                checkpoint_seq: checkpoint_seq.to_string(),
+                timestamp_ms: timestamp_ms.to_string(),
+            });
+        }
+    };
+
+    if let Some(os) = cp.objects.as_ref() {
+        for o in &os.objects {
+            let Some(bcs_) = o.bcs.as_ref() else { continue };
+            let Some(v) = bcs_.value.as_ref() else { continue };
+            walk_one(v);
+        }
+    }
+    for tx in &cp.transactions {
+        if let Some(os) = tx.objects.as_ref() {
+            for o in &os.objects {
+                let Some(bcs_) = o.bcs.as_ref() else { continue };
+                let Some(v) = bcs_.value.as_ref() else { continue };
+                walk_one(v);
+            }
+        }
     }
 }
 

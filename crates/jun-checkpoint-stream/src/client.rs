@@ -14,7 +14,8 @@ use futures::StreamExt;
 use sui_rpc::proto::sui::rpc::v2::ledger_service_client::LedgerServiceClient;
 use sui_rpc::proto::sui::rpc::v2::subscription_service_client::SubscriptionServiceClient;
 use sui_rpc::proto::sui::rpc::v2::{
-    get_checkpoint_request, Checkpoint, GetCheckpointRequest, SubscribeCheckpointsRequest,
+    get_checkpoint_request, Checkpoint, GetCheckpointRequest, GetObjectRequest,
+    SubscribeCheckpointsRequest,
 };
 use tokio::sync::mpsc;
 use tonic::codec::CompressionEncoding;
@@ -93,6 +94,87 @@ impl GrpcClient {
             .accept_compressed(CompressionEncoding::Zstd)
             .accept_compressed(CompressionEncoding::Gzip)
             .max_decoding_message_size(64 * 1024 * 1024)
+    }
+
+    /// Fetch a Move package's modules by storage_id. Returns
+    /// `(original_id, [(module_name, bytecode_bytes)], linkage_deps)`,
+    /// where `linkage_deps` are the storage IDs of upgraded packages this
+    /// one is linked against — caller should fetch them transitively for
+    /// full layout-build coverage.
+    ///
+    /// Uses `LedgerService.GetObject` with read_mask=bcs, then BCS-decodes
+    /// the returned Object into a `MovePackage` to extract module bytecode.
+    /// We intentionally don't use `MovePackageService.GetPackage` because
+    /// that endpoint omits the `contents` (bytecode) bytes from its
+    /// response on the public Sui RPC — it returns metadata only.
+    ///
+    /// Retries up to 5 times on transient errors (GoAway, Canceled,
+    /// Unavailable, Internal) with exponential backoff. Public Sui RPC
+    /// endpoints aggressively cycle HTTP/2 connections under load.
+    pub async fn get_package_modules(
+        &self,
+        package_id: &str,
+    ) -> Result<(String, Vec<(String, Vec<u8>)>, Vec<String>)> {
+        use sui_types::object::{Data, Object};
+
+        let mut attempt: u32 = 0;
+        let max_attempts: u32 = 5;
+        loop {
+            attempt += 1;
+            let mut client = self.ledger_client();
+            let mut req = GetObjectRequest::default();
+            req.object_id = Some(package_id.to_string());
+            req.read_mask = Some(prost_types::FieldMask {
+                paths: vec!["bcs".to_string()],
+            });
+            match client.get_object(req).await {
+                Ok(resp) => {
+                    let object = resp.into_inner().object.ok_or_else(|| {
+                        anyhow!("GetObject({package_id}) returned no object")
+                    })?;
+                    let bcs_bytes = object
+                        .bcs
+                        .as_ref()
+                        .and_then(|b| b.value.as_ref())
+                        .ok_or_else(|| {
+                            anyhow!("GetObject({package_id}) returned no bcs payload")
+                        })?;
+                    let parsed: Object = bcs::from_bytes(bcs_bytes).map_err(|e| {
+                        anyhow!("BCS decode Object {package_id}: {e}")
+                    })?;
+                    let pkg = match &parsed.data {
+                        Data::Package(p) => p,
+                        Data::Move(_) => {
+                            return Err(anyhow!(
+                                "object {package_id} is not a Move package"
+                            ));
+                        }
+                    };
+                    let original_id = pkg.original_package_id().to_string();
+                    let modules: Vec<(String, Vec<u8>)> = pkg
+                        .serialized_module_map()
+                        .iter()
+                        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+                        .collect();
+                    let linkage_deps: Vec<String> = pkg
+                        .linkage_table()
+                        .values()
+                        .map(|info| info.upgraded_id.to_string())
+                        .collect();
+                    return Ok((original_id, modules, linkage_deps));
+                }
+                Err(status) if is_transient(&status) && attempt < max_attempts => {
+                    let backoff_ms = 100u64 * (1u64 << (attempt - 1));
+                    tokio::time::sleep(Duration::from_millis(backoff_ms.min(2000))).await;
+                    continue;
+                }
+                Err(status) => {
+                    return Err(anyhow!(
+                        "GetObject({package_id}) failed after {attempt} attempts: {status}"
+                    ));
+                }
+            }
+        }
     }
 
     /// Unary fetch of a single checkpoint by sequence number.
