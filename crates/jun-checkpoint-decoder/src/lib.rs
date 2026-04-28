@@ -21,9 +21,9 @@ use anyhow::{anyhow, Result};
 use prost::Message;
 
 use jun_types::{
-    BalanceChangeRecord, CheckpointRecord, DependencyRecord, EventRecord, ExtractMask,
-    ExtractedCheckpoint, MoveCallRecord, ObjectChangeRecord, PackageModuleRecord,
-    PackageRecord, TransactionRecord,
+    BalanceChangeRecord, CheckpointRecord, CommandRecord, DependencyRecord, EpochCommitteeRecord,
+    EventRecord, ExtractMask, ExtractedCheckpoint, MoveCallRecord, ObjectChangeRecord,
+    PackageModuleRecord, PackageRecord, TransactionRecord, TransactionSignatureRecord,
 };
 
 use sui_rpc::proto::sui::rpc::v2::Checkpoint as ProtoCheckpoint;
@@ -168,6 +168,22 @@ pub fn flatten_checkpoint(cp: &ProtoCheckpoint, mask: ExtractMask) -> ExtractedC
             }
         }
 
+        if mask.contains(ExtractMask::COMMANDS) {
+            if let Some(td) = tx_data.as_ref() {
+                extract_commands(
+                    &digest, &checkpoint_seq, &checkpoint_ts,
+                    td.kind(), &mut out.commands,
+                );
+            }
+        }
+
+        if mask.contains(ExtractMask::TRANSACTION_SIGNATURES) {
+            extract_transaction_signatures(
+                &digest, &checkpoint_seq, &checkpoint_ts,
+                tx, &mut out.transaction_signatures,
+            );
+        }
+
         if let Some(fx) = effects.as_ref() {
             if mask.contains(ExtractMask::OBJECT_CHANGES) {
                 extract_object_changes(
@@ -212,6 +228,15 @@ pub fn flatten_checkpoint(cp: &ProtoCheckpoint, mask: ExtractMask) -> ExtractedC
             cp, &checkpoint_seq, &checkpoint_ts,
             &mut out.packages, &mut out.package_modules,
         );
+    }
+
+    if mask.contains(ExtractMask::END_OF_EPOCH) {
+        if let Some(s) = summary.as_ref() {
+            extract_epoch_committees(
+                s, &checkpoint_seq, &checkpoint_ts,
+                &mut out.epoch_committees,
+            );
+        }
     }
 
     out
@@ -282,6 +307,22 @@ fn decode_transaction_data(bytes: &[u8]) -> Option<TransactionData> {
 
 fn sequence_number_to_string(v: SequenceNumber) -> String {
     v.value().to_string()
+}
+
+fn transaction_kind_name(kind: &TransactionKind) -> &'static str {
+    match kind {
+        TransactionKind::ProgrammableTransaction(_) => "ProgrammableTransaction",
+        TransactionKind::ProgrammableSystemTransaction(_) => "ProgrammableSystemTransaction",
+        TransactionKind::ChangeEpoch(_) => "ChangeEpoch",
+        TransactionKind::Genesis(_) => "Genesis",
+        TransactionKind::ConsensusCommitPrologue(_) => "ConsensusCommitPrologue",
+        TransactionKind::ConsensusCommitPrologueV2(_) => "ConsensusCommitPrologueV2",
+        TransactionKind::ConsensusCommitPrologueV3(_) => "ConsensusCommitPrologueV3",
+        TransactionKind::ConsensusCommitPrologueV4(_) => "ConsensusCommitPrologueV4",
+        TransactionKind::AuthenticatorStateUpdate(_) => "AuthenticatorStateUpdate",
+        TransactionKind::EndOfEpochTransaction(_) => "EndOfEpochTransaction",
+        TransactionKind::RandomnessStateUpdate(_) => "RandomnessStateUpdate",
+    }
 }
 
 fn count_move_calls(kind: &TransactionKind) -> u32 {
@@ -363,11 +404,15 @@ fn build_transaction(
     };
 
     let move_call_count = tx_data.map(|t| count_move_calls(t.kind())).unwrap_or(0);
+    let tx_kind = tx_data
+        .map(|t| transaction_kind_name(t.kind()).to_string())
+        .unwrap_or_default();
 
     Some(TransactionRecord {
         digest: digest.to_string(),
         sender: sender.to_string(),
         success,
+        tx_kind,
         computation_cost: gas.computation_cost.to_string(),
         storage_cost: gas.storage_cost.to_string(),
         storage_rebate: gas.storage_rebate.to_string(),
@@ -523,11 +568,23 @@ fn extract_object_changes(
         let (iv, ik) = flatten_owner(input_owner);
         let (ov, ok) = flatten_owner(output_owner);
 
-        let object_type = change
+        // Lookup the post-change Object once so we can pull both `object_type`
+        // and `previous_transaction` from it (the `previous_transaction` field
+        // on the post-change Object is set to the digest of the tx that mutated
+        // it — i.e. the current tx for created/mutated, or the previous owner
+        // for unwrapped). Fall back to the input_version Object on
+        // delete/wrap, where no output object is present.
+        let post_obj = change
             .output_version
             .and_then(|v| object_set.get(&ObjectKey(change.id, v)))
-            .or_else(|| change.input_version.and_then(|v| object_set.get(&ObjectKey(change.id, v))))
+            .or_else(|| change.input_version.and_then(|v| object_set.get(&ObjectKey(change.id, v))));
+
+        let object_type = post_obj
             .and_then(|obj| obj.type_().map(|t| t.to_canonical_string(true)));
+
+        let previous_transaction = post_obj
+            .map(|obj| obj.previous_transaction.to_string())
+            .unwrap_or_default();
 
         let change_type = derive_change_type(
             change.id,
@@ -551,6 +608,7 @@ fn extract_object_changes(
             output_owner: ov,
             output_owner_kind: ok,
             is_gas_object: gas_obj_id.as_ref().is_some_and(|id| *id == change.id),
+            previous_transaction,
             checkpoint_seq: checkpoint_seq.to_string(),
             timestamp_ms: timestamp_ms.to_string(),
         });
@@ -680,6 +738,169 @@ fn extract_packages(
                 walk_one(v);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Commands / Signatures / Epoch committees
+// ---------------------------------------------------------------------------
+
+/// Walk every command in a programmable transaction and emit one row per
+/// command of any kind (MoveCall, TransferObjects, SplitCoins, MergeCoins,
+/// Publish, MakeMoveVec, Upgrade). The MoveCall sub-fields (package/module/
+/// function) are duplicated here so the table is queryable in isolation
+/// without joining `move_calls`.
+fn extract_commands(
+    digest: &str,
+    checkpoint_seq: &str,
+    timestamp_ms: &str,
+    kind: &TransactionKind,
+    out: &mut Vec<CommandRecord>,
+) {
+    let pt = match kind {
+        TransactionKind::ProgrammableTransaction(pt)
+        | TransactionKind::ProgrammableSystemTransaction(pt) => pt,
+        _ => return,
+    };
+    for (i, cmd) in pt.commands.iter().enumerate() {
+        let command_index = i as u32;
+        let (kind_str, package, module, function, type_arguments, args) = match cmd {
+            Command::MoveCall(c) => {
+                let type_args_json = if c.type_arguments.is_empty() {
+                    None
+                } else {
+                    let strs: Vec<String> = c
+                        .type_arguments
+                        .iter()
+                        .map(|t| t.to_canonical_string(true))
+                        .collect();
+                    Some(format!("[{}]", strs.iter().map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(",")))
+                };
+                (
+                    "MoveCall",
+                    Some(c.package.to_string()),
+                    Some(c.module.to_string()),
+                    Some(c.function.to_string()),
+                    type_args_json,
+                    Some(format!("arg_count={}", c.arguments.len())),
+                )
+            }
+            Command::TransferObjects(objs, _recipient) => (
+                "TransferObjects",
+                None, None, None, None,
+                Some(format!("object_count={}", objs.len())),
+            ),
+            Command::SplitCoins(_, amounts) => (
+                "SplitCoins",
+                None, None, None, None,
+                Some(format!("split_count={}", amounts.len())),
+            ),
+            Command::MergeCoins(_, sources) => (
+                "MergeCoins",
+                None, None, None, None,
+                Some(format!("merge_count={}", sources.len())),
+            ),
+            Command::Publish(modules, deps) => (
+                "Publish",
+                None, None, None, None,
+                Some(format!("module_count={},dep_count={}", modules.len(), deps.len())),
+            ),
+            Command::MakeMoveVec(ty, items) => {
+                // TypeInput is private to sui_types::transaction; the public
+                // interface only exposes Debug. That's fine for our purposes —
+                // analytics consumers can string-match the type name.
+                let ty_str = ty.as_ref().map(|t| format!("[\"{t:?}\"]"));
+                (
+                    "MakeMoveVec",
+                    None, None, None,
+                    ty_str,
+                    Some(format!("item_count={}", items.len())),
+                )
+            }
+            Command::Upgrade(modules, deps, package_id, _ticket) => (
+                "Upgrade",
+                Some(package_id.to_string()),
+                None, None, None,
+                Some(format!("module_count={},dep_count={}", modules.len(), deps.len())),
+            ),
+        };
+        out.push(CommandRecord {
+            tx_digest: digest.to_string(),
+            command_index,
+            kind: kind_str.to_string(),
+            package,
+            module,
+            function,
+            type_arguments,
+            args,
+            checkpoint_seq: checkpoint_seq.to_string(),
+            timestamp_ms: timestamp_ms.to_string(),
+        });
+    }
+}
+
+/// Emit one row per `UserSignature` on the transaction. The first byte of the
+/// canonical (non-length-prefixed) signature bytes is the scheme flag:
+///   0 ed25519, 1 secp256k1, 2 secp256r1, 3 multisig, 5 zklogin, 6 passkey.
+/// We read the scheme from the proto's `scheme` field when populated, falling
+/// back to the first byte of `bcs.value`.
+fn extract_transaction_signatures(
+    tx_digest: &str,
+    checkpoint_seq: &str,
+    timestamp_ms: &str,
+    tx: &sui_rpc::proto::sui::rpc::v2::ExecutedTransaction,
+    out: &mut Vec<TransactionSignatureRecord>,
+) {
+    for (i, sig) in tx.signatures.iter().enumerate() {
+        let bcs_bytes = sig
+            .bcs
+            .as_ref()
+            .and_then(|b| b.value.as_ref());
+        let signature_hex = bcs_bytes.map(hex::encode).unwrap_or_default();
+
+        // Prefer first-byte tag from canonical bytes; fall back to proto scheme.
+        // (`UserSignature.bcs` may be length-prefixed depending on producer; the
+        // tag is at the same offset 0 either way for non-prefixed bytes, and at
+        // an early-but-unknown offset for prefixed bytes — since the tag values
+        // are small (0..=6) and the proto `scheme` is authoritative, prefer it
+        // when set.)
+        let scheme = sig
+            .scheme
+            .map(|s| s as u8)
+            .or_else(|| bcs_bytes.and_then(|v| v.first().copied()))
+            .unwrap_or(u8::MAX);
+
+        out.push(TransactionSignatureRecord {
+            tx_digest: tx_digest.to_string(),
+            index: i as u32,
+            scheme,
+            signature_hex,
+            checkpoint_seq: checkpoint_seq.to_string(),
+            timestamp_ms: timestamp_ms.to_string(),
+        });
+    }
+}
+
+/// Emit one row per validator in the next-epoch committee. This list is only
+/// populated on the last checkpoint of each epoch; for all other checkpoints
+/// `next_epoch_committee` is `None` and we emit nothing.
+fn extract_epoch_committees(
+    summary: &CheckpointSummary,
+    checkpoint_seq: &str,
+    timestamp_ms: &str,
+    out: &mut Vec<EpochCommitteeRecord>,
+) {
+    let Some(eod) = summary.end_of_epoch_data.as_ref() else { return };
+    // The committee in `next_epoch_committee` governs the next epoch.
+    let target_epoch = (summary.epoch + 1).to_string();
+    for (pubkey, stake) in &eod.next_epoch_committee {
+        out.push(EpochCommitteeRecord {
+            target_epoch: target_epoch.clone(),
+            validator_pubkey_hex: hex::encode(pubkey.as_ref()),
+            stake: stake.to_string(),
+            checkpoint_seq: checkpoint_seq.to_string(),
+            timestamp_ms: timestamp_ms.to_string(),
+        });
     }
 }
 

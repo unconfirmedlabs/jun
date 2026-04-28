@@ -111,6 +111,7 @@ pub struct TransactionRecord {
     pub digest: String,
     pub sender: String,
     pub success: bool,
+    pub tx_kind: String,
     pub computation_cost: String,
     pub storage_cost: String,
     pub storage_rebate: String,
@@ -186,6 +187,7 @@ pub struct ObjectChangeRecord {
     pub output_owner: Option<String>,
     pub output_owner_kind: Option<String>,
     pub is_gas_object: bool,
+    pub previous_transaction: String,
     pub checkpoint_seq: String,
     pub timestamp_ms: String,
 }

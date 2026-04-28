@@ -340,6 +340,7 @@ mod tests {
             digest: "tx1".into(),
             sender: "0x1".into(),
             success: true,
+            tx_kind: "ProgrammableTransaction".into(),
             computation_cost: "0".into(),
             storage_cost: "0".into(),
             storage_rebate: "0".into(),
