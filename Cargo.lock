@@ -3023,6 +3023,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "jun-mysten-cp-archive"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "jun-checkpoint-decoder",
+ "jun-types",
+ "reqwest",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "zstd",
+]
+
+[[package]]
 name = "jun-nats"
 version = "0.2.0"
 dependencies = [

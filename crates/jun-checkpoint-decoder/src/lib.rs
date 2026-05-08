@@ -21,9 +21,10 @@ use anyhow::{anyhow, Result};
 use prost::Message;
 
 use jun_types::{
-    BalanceChangeRecord, CheckpointRecord, CommandRecord, DependencyRecord, EpochCommitteeRecord,
-    EventRecord, ExtractMask, ExtractedCheckpoint, MoveCallRecord, ObjectChangeRecord,
-    PackageModuleRecord, PackageRecord, TransactionRecord, TransactionSignatureRecord,
+    BalanceChangeRecord, CheckpointRecord, CoinBalanceRecord, CommandRecord, DependencyRecord,
+    EpochCommitteeRecord, EventRecord, ExtractMask, ExtractedCheckpoint, MoveCallRecord,
+    ObjectChangeRecord, PackageModuleRecord, PackageRecord, TransactionRecord,
+    TransactionSignatureRecord,
 };
 
 use sui_rpc::proto::sui::rpc::v2::Checkpoint as ProtoCheckpoint;
@@ -33,6 +34,7 @@ use sui_types::base_types::{ObjectID, SequenceNumber};
 use sui_types::effects::{IDOperation, TransactionEffects, TransactionEffectsAPI, TransactionEvents};
 use sui_types::execution_status::{ExecutionErrorKind, ExecutionStatus};
 use sui_types::full_checkpoint_content::ObjectSet;
+use sui_types::message_envelope::Message as _;
 use sui_types::messages_checkpoint::CheckpointSummary;
 use sui_types::object::{Data, Object, Owner};
 use sui_types::storage::ObjectKey;
@@ -105,15 +107,34 @@ pub fn flatten_checkpoint(cp: &ProtoCheckpoint, mask: ExtractMask) -> ExtractedC
 
     let mut out = ExtractedCheckpoint::default();
 
-    if mask.contains(ExtractMask::CHECKPOINTS) {
-        if let Some(s) = summary.as_ref() {
-            out.checkpoint = build_checkpoint_record(s, cp.digest.clone().unwrap_or_default());
-        }
+    // Always populate the checkpoint record. Downstream encoders (juna-clickhouse)
+    // denormalize `epoch`, `sequence_number`, and `timestamp_ms` onto every
+    // leaf-table row from this struct — even tables that aren't in the mask.
+    // Skipping it when CHECKPOINTS is masked off causes silent data corruption:
+    // every row gets epoch=0, partition_key=0, etc. The CHECKPOINTS bit only
+    // gates whether a CheckpointRow gets *inserted* into the `checkpoints`
+    // table, not whether the metadata is populated for downstream reads.
+    if let Some(s) = summary.as_ref() {
+        // Mysten's per-checkpoint archive omits proto field 2 (digest) — only
+        // the BCS-wrapped summary is shipped. Recompute it from the summary
+        // so both producers (live gRPC + archive) yield identical records.
+        // Sui digest = BLAKE2b-256(b"CheckpointSummary::" || BCS(summary)),
+        // base58-encoded (handled by CheckpointDigest's Display impl).
+        let digest_str = cp
+            .digest
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| s.digest().to_string());
+        out.checkpoint = build_checkpoint_record(s, digest_str);
     }
 
     // --- Build the checkpoint-level ObjectSet for balance / object change derivation
-    let need_objects =
-        mask.intersects(ExtractMask::BALANCE_CHANGES | ExtractMask::OBJECT_CHANGES);
+    let need_objects = mask.intersects(
+        ExtractMask::BALANCE_CHANGES
+            | ExtractMask::OBJECT_CHANGES
+            | ExtractMask::COIN_BALANCES,
+    );
     let object_set = if need_objects {
         build_object_set(cp)
     } else {
@@ -129,12 +150,18 @@ pub fn flatten_checkpoint(cp: &ProtoCheckpoint, mask: ExtractMask) -> ExtractedC
             .and_then(|b| b.value.as_ref())
             .and_then(|v| bcs::from_bytes(v).ok());
 
-        let tx_data: Option<TransactionData> = tx
+        let tx_data_and_sigs = tx
             .transaction
             .as_ref()
             .and_then(|t| t.bcs.as_ref())
             .and_then(|b| b.value.as_ref())
-            .and_then(|v| decode_transaction_data(v));
+            .and_then(|v| decode_tx_with_signatures(v));
+        let tx_data: Option<TransactionData> =
+            tx_data_and_sigs.as_ref().map(|(td, _)| td.clone());
+        let ssd_signatures: &[sui_types::signature::GenericSignature] = tx_data_and_sigs
+            .as_ref()
+            .map(|(_, s)| s.as_slice())
+            .unwrap_or(&[]);
 
         // Prefer the canonical digest from the BCS-decoded effects; fall back
         // to the proto envelope's string field.
@@ -180,7 +207,7 @@ pub fn flatten_checkpoint(cp: &ProtoCheckpoint, mask: ExtractMask) -> ExtractedC
         if mask.contains(ExtractMask::TRANSACTION_SIGNATURES) {
             extract_transaction_signatures(
                 &digest, &checkpoint_seq, &checkpoint_ts,
-                tx, &mut out.transaction_signatures,
+                tx, ssd_signatures, &mut out.transaction_signatures,
             );
         }
 
@@ -212,6 +239,12 @@ pub fn flatten_checkpoint(cp: &ProtoCheckpoint, mask: ExtractMask) -> ExtractedC
                         timestamp_ms: checkpoint_ts.clone(),
                     });
                 }
+            }
+            if mask.contains(ExtractMask::COIN_BALANCES) {
+                extract_coin_balances(
+                    &digest, &checkpoint_seq, &checkpoint_ts,
+                    fx, &object_set, &mut out.coin_balances,
+                );
             }
         }
 
@@ -295,12 +328,29 @@ fn build_checkpoint_record(s: &CheckpointSummary, digest: String) -> CheckpointR
     }
 }
 
-fn decode_transaction_data(bytes: &[u8]) -> Option<TransactionData> {
-    if let Ok(td) = bcs::from_bytes::<TransactionData>(bytes) {
-        return Some(td);
-    }
+/// Decode a `tx.transaction.bcs.value` blob and surface BOTH the
+/// `TransactionData` and any signatures attached to it. Try
+/// `SenderSignedData` FIRST — when the producer wrapped the tx in the
+/// signed envelope, that path also gives us the `tx_signatures`. Fall
+/// back to bare `TransactionData` (no signatures) if SSD decode fails.
+/// Some archive producers serialize bare TransactionData, in which case
+/// signatures aren't recoverable from this field alone.
+fn decode_tx_with_signatures(
+    bytes: &[u8],
+) -> Option<(TransactionData, Vec<sui_types::signature::GenericSignature>)> {
+    // Try SSD first — when the producer wrapped the tx in the signed
+    // envelope, this path also gives us the `tx_signatures`. Our
+    // unconfirmed.cloud archive format drops the SSD wrapper at producer
+    // time, so this branch fails for archive playback and we fall back
+    // to bare TransactionData (no sigs). Live gRPC streams via Mysten's
+    // FullCheckpointContents preserve SSD and yield real signatures.
     if let Ok(ssd) = bcs::from_bytes::<SenderSignedData>(bytes) {
-        return Some(ssd.into_inner().intent_message.value);
+        let inner = ssd.into_inner();
+        let sigs = inner.tx_signatures.clone();
+        return Some((inner.intent_message.value, sigs));
+    }
+    if let Ok(td) = bcs::from_bytes::<TransactionData>(bytes) {
+        return Some((td, Vec::new()));
     }
     None
 }
@@ -508,6 +558,117 @@ fn derive_change_type(
             if input_version.is_some() && output_version.is_some() { "MUTATED".into() }
             else if output_version.is_some() { "CREATED".into() }
             else { "DELETED".into() }
+        }
+    }
+}
+
+/// Returns `Some((owner_kind, owner_id, coin_type, balance))` when `obj` is a
+/// Coin<T> owned by either `AddressOwner` or `ConsensusAddressOwner` — the only
+/// kinds that count toward `address.balance` per Sui's GraphQL/RPC semantics.
+/// Returns `None` for non-coins, immutable, shared, or object-owned coins.
+fn coin_info_for_address_balance(
+    obj: &Object,
+) -> Option<(&'static str, sui_types::base_types::SuiAddress, sui_types::TypeTag, u64)> {
+    let (kind, owner) = match obj.owner() {
+        Owner::AddressOwner(a) => ("AddressOwner", *a),
+        Owner::ConsensusAddressOwner { owner, .. } => ("ConsensusAddressOwner", *owner),
+        Owner::ObjectOwner(_) | Owner::Shared { .. } | Owner::Immutable => return None,
+    };
+    let (coin_type, balance) =
+        sui_types::coin::Coin::extract_balance_if_coin(obj).ok().flatten()?;
+    Some((kind, owner, coin_type, balance))
+}
+
+/// Per-coin-object balance state extraction. Mirrors `sui-indexer-alt`'s
+/// `coin_balance_buckets` semantics: emit an `is_deleted=false` row when a
+/// Coin<T> owned by Fastpath/Consensus is created, has its balance changed,
+/// or has its owner changed (in the owner-change case we ALSO emit a delete
+/// row for the prior owner). Emit an `is_deleted=true` row when a coin
+/// transitions out of Fastpath/Consensus ownership (became Object/Shared/
+/// Immutable), was deleted, or was wrapped — capturing the *prior* owner so
+/// the running aggregate can subtract correctly.
+fn extract_coin_balances(
+    digest: &str,
+    checkpoint_seq: &str,
+    timestamp_ms: &str,
+    effects: &TransactionEffects,
+    object_set: &ObjectSet,
+    out: &mut Vec<CoinBalanceRecord>,
+) {
+    // Inputs (state before tx) and outputs (state after tx) keyed by object_id.
+    let mut inputs: HashMap<ObjectID, &Object> = HashMap::new();
+    for (id, ver) in effects.modified_at_versions() {
+        if let Some(obj) = object_set.get(&ObjectKey(id, ver)) {
+            inputs.insert(id, obj);
+        }
+    }
+    let mut outputs: HashMap<ObjectID, &Object> = HashMap::new();
+    for (oref, _owner, _kind) in effects.all_changed_objects() {
+        if let Some(obj) = object_set.get(&ObjectKey(oref.0, oref.1)) {
+            outputs.insert(oref.0, obj);
+        }
+    }
+
+    // Walk the union of touched object ids; only coins in Fastpath/Consensus
+    // ownership produce records.
+    let mut ids: HashSet<ObjectID> = HashSet::new();
+    ids.extend(inputs.keys().copied());
+    ids.extend(outputs.keys().copied());
+
+    let push_row = |out: &mut Vec<CoinBalanceRecord>,
+                    object_id: ObjectID,
+                    kind: &str,
+                    owner: sui_types::base_types::SuiAddress,
+                    coin_type: &sui_types::TypeTag,
+                    balance: u64,
+                    is_deleted: bool| {
+        out.push(CoinBalanceRecord {
+            tx_digest: digest.to_string(),
+            object_id: object_id.to_string(),
+            owner_kind: kind.to_string(),
+            owner_id: owner.to_string(),
+            coin_type: coin_type.to_canonical_string(true),
+            balance: balance.to_string(),
+            is_deleted,
+            checkpoint_seq: checkpoint_seq.to_string(),
+            timestamp_ms: timestamp_ms.to_string(),
+        });
+    };
+
+    for id in ids {
+        let inp = inputs.get(&id).and_then(|o| coin_info_for_address_balance(o));
+        let outp = outputs.get(&id).and_then(|o| coin_info_for_address_balance(o));
+
+        match (inp, outp) {
+            // Coin not Fastpath/Consensus on either side — irrelevant for top-holders.
+            (None, None) => {}
+
+            // Coin appeared (created/unwrapped/transitioned IN to Fastpath/Consensus).
+            (None, Some((kind, owner, ct, bal))) => {
+                push_row(out, id, kind, owner, &ct, bal, false);
+            }
+
+            // Coin transitioned OUT (deleted, wrapped, transferred to Object/Shared/Immutable).
+            // Capture prior owner so running aggregate can subtract.
+            (Some((kind, owner, ct, bal)), None) => {
+                push_row(out, id, kind, owner, &ct, bal, true);
+            }
+
+            // Both sides Fastpath/Consensus — only emit on actual change.
+            (Some((ik, io, ict, ib)), Some((ok, oo, oct, ob))) => {
+                let owner_changed = ik != ok || io != oo;
+                let balance_changed = ib != ob;
+                let type_changed = ict != oct; // shouldn't happen, but be defensive
+
+                if !owner_changed && !balance_changed && !type_changed {
+                    continue;
+                }
+                if owner_changed {
+                    // Subtract prior owner's balance, then add to new owner.
+                    push_row(out, id, ik, io, &ict, ib, true);
+                }
+                push_row(out, id, ok, oo, &oct, ob, false);
+            }
         }
     }
 }
@@ -849,27 +1010,41 @@ fn extract_transaction_signatures(
     checkpoint_seq: &str,
     timestamp_ms: &str,
     tx: &sui_rpc::proto::sui::rpc::v2::ExecutedTransaction,
+    ssd_signatures: &[sui_types::signature::GenericSignature],
     out: &mut Vec<TransactionSignatureRecord>,
 ) {
+    // Archive playback: signatures live inside the BCS-decoded
+    // SenderSignedData (passed via `ssd_signatures`). Live gRPC streams
+    // may instead populate the proto-level `tx.signatures` field with
+    // typed UserSignature messages. Prefer SSD when present.
+    if !ssd_signatures.is_empty() {
+        for (i, sig) in ssd_signatures.iter().enumerate() {
+            let bytes: &[u8] = sig.as_ref();
+            let scheme = bytes.first().copied().unwrap_or(u8::MAX);
+            out.push(TransactionSignatureRecord {
+                tx_digest: tx_digest.to_string(),
+                index: i as u32,
+                scheme,
+                signature_hex: hex::encode(bytes),
+                checkpoint_seq: checkpoint_seq.to_string(),
+                timestamp_ms: timestamp_ms.to_string(),
+            });
+        }
+        return;
+    }
+
+    // Fallback: proto-level signatures (live streams).
     for (i, sig) in tx.signatures.iter().enumerate() {
         let bcs_bytes = sig
             .bcs
             .as_ref()
             .and_then(|b| b.value.as_ref());
         let signature_hex = bcs_bytes.map(hex::encode).unwrap_or_default();
-
-        // Prefer first-byte tag from canonical bytes; fall back to proto scheme.
-        // (`UserSignature.bcs` may be length-prefixed depending on producer; the
-        // tag is at the same offset 0 either way for non-prefixed bytes, and at
-        // an early-but-unknown offset for prefixed bytes — since the tag values
-        // are small (0..=6) and the proto `scheme` is authoritative, prefer it
-        // when set.)
         let scheme = sig
             .scheme
             .map(|s| s as u8)
             .or_else(|| bcs_bytes.and_then(|v| v.first().copied()))
             .unwrap_or(u8::MAX);
-
         out.push(TransactionSignatureRecord {
             tx_digest: tx_digest.to_string(),
             index: i as u32,
@@ -1044,12 +1219,12 @@ mod tests {
     #[test]
     fn decode_transaction_data_invalid_returns_none() {
         // Garbage bytes — neither a valid TransactionData nor SenderSignedData.
-        assert!(decode_transaction_data(&[0u8; 4]).is_none());
+        assert!(decode_tx_with_signatures(&[0u8; 4]).is_none());
     }
 
     #[test]
     fn decode_transaction_data_empty_returns_none() {
-        assert!(decode_transaction_data(&[]).is_none());
+        assert!(decode_tx_with_signatures(&[]).is_none());
     }
 
     #[test]
@@ -1057,7 +1232,7 @@ mod tests {
         // Longer non-BCS payload — must still gracefully return None,
         // not panic.
         let junk: Vec<u8> = (0..256).map(|i| (i as u8).wrapping_mul(31)).collect();
-        assert!(decode_transaction_data(&junk).is_none());
+        assert!(decode_tx_with_signatures(&junk).is_none());
     }
 
     // ---- count_move_calls ------------------------------------------------
@@ -1080,4 +1255,89 @@ mod tests {
     //
     // NOTE: Positive-case decode_transaction_data coverage is also skipped
     // (would require a real BCS-encoded TransactionData fixture).
+
+    // ---- digest fallback (archive parity regression) -------------------
+    //
+    // Mysten's per-checkpoint archive omits the proto's `digest` field —
+    // only the BCS-wrapped summary is present. The decoder must recompute
+    // the digest from the summary so archive and live-gRPC paths produce
+    // identical CheckpointRecord rows. Regression for the byte-equivalence
+    // gap found via tests/grpc_vs_archive.rs.
+
+    use sui_rpc::proto::sui::rpc::v2::{
+        Bcs as ProtoBcs, CheckpointSummary as ProtoCheckpointSummary,
+    };
+    use sui_types::digests::CheckpointContentsDigest;
+    use sui_types::gas::GasCostSummary;
+    use sui_types::messages_checkpoint::CheckpointSummary as TypedSummary;
+
+    fn synthetic_summary() -> TypedSummary {
+        TypedSummary {
+            epoch: 42,
+            sequence_number: 12345,
+            network_total_transactions: 99,
+            content_digest: CheckpointContentsDigest::new([0u8; 32]),
+            previous_digest: None,
+            epoch_rolling_gas_cost_summary: GasCostSummary::new(1, 2, 3, 4),
+            timestamp_ms: 1_700_000_000_000,
+            checkpoint_commitments: Vec::new(),
+            end_of_epoch_data: None,
+            version_specific_data: Vec::new(),
+        }
+    }
+
+    fn proto_with_summary_only(summary: &TypedSummary) -> ProtoCheckpoint {
+        let summary_bcs = bcs::to_bytes(summary).expect("encode summary");
+        let mut bcs_wrapper = ProtoBcs::default();
+        bcs_wrapper.name = Some("CheckpointSummary".to_string());
+        bcs_wrapper.value = Some(summary_bcs.into());
+
+        let mut summary_msg = ProtoCheckpointSummary::default();
+        summary_msg.bcs = Some(bcs_wrapper);
+
+        let mut proto = ProtoCheckpoint::default();
+        proto.sequence_number = Some(summary.sequence_number);
+        proto.digest = None; // archive parity: field 2 empty.
+        proto.summary = Some(summary_msg);
+        proto
+    }
+
+    #[test]
+    fn checkpoint_digest_recomputed_when_proto_field_empty() {
+        let summary = synthetic_summary();
+        let expected = summary.digest().to_string();
+
+        let proto = proto_with_summary_only(&summary);
+        let out = flatten_checkpoint(&proto, ExtractMask::CHECKPOINTS);
+
+        assert!(
+            !out.checkpoint.digest.is_empty(),
+            "digest must not be empty when proto.digest is None — archive parity regression"
+        );
+        assert_eq!(out.checkpoint.digest, expected);
+        // Sui digests are 32-byte BLAKE2b base58-encoded → non-trivial length.
+        assert!(out.checkpoint.digest.len() >= 32);
+    }
+
+    #[test]
+    fn checkpoint_digest_prefers_proto_field_when_present() {
+        let summary = synthetic_summary();
+        let mut proto = proto_with_summary_only(&summary);
+        let supplied = "SuPpLiEdByGrPcStReAm".to_string();
+        proto.digest = Some(supplied.clone());
+
+        let out = flatten_checkpoint(&proto, ExtractMask::CHECKPOINTS);
+        assert_eq!(out.checkpoint.digest, supplied);
+    }
+
+    #[test]
+    fn checkpoint_digest_falls_back_when_proto_field_empty_string() {
+        // gRPC producers may set `digest = Some("")`. Treat that as missing.
+        let summary = synthetic_summary();
+        let mut proto = proto_with_summary_only(&summary);
+        proto.digest = Some(String::new());
+
+        let out = flatten_checkpoint(&proto, ExtractMask::CHECKPOINTS);
+        assert_eq!(out.checkpoint.digest, summary.digest().to_string());
+    }
 }

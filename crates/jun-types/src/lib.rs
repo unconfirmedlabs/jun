@@ -39,8 +39,9 @@ bitflags::bitflags! {
         const CHECKPOINT_COMMITMENTS = 1 << 19;
         const ACCUMULATOR_WRITES     = 1 << 20;
         const SYSTEM_TX_DECOMPOSED   = 1 << 21;
+        const COIN_BALANCES          = 1 << 22;
 
-        const ALL = 0x3F_FFFF;
+        const ALL = 0x7F_FFFF;
     }
 }
 
@@ -54,6 +55,7 @@ pub struct ExtractedCheckpoint {
     pub transactions: Vec<TransactionRecord>,
     pub move_calls: Vec<MoveCallRecord>,
     pub balance_changes: Vec<BalanceChangeRecord>,
+    pub coin_balances: Vec<CoinBalanceRecord>,
     pub object_changes: Vec<ObjectChangeRecord>,
     pub dependencies: Vec<DependencyRecord>,
     pub inputs: Vec<InputRecord>,
@@ -188,6 +190,35 @@ pub struct ObjectChangeRecord {
     pub output_owner_kind: Option<String>,
     pub is_gas_object: bool,
     pub previous_transaction: String,
+    pub checkpoint_seq: String,
+    pub timestamp_ms: String,
+}
+
+/// Per-coin-object balance state record. Mirrors Sui indexer-alt's
+/// `coin_balance_buckets` semantics: emitted only when a Coin<T> object's
+/// (owner, owner_kind, balance) tuple changes, OR when it transitions out of
+/// Fastpath/Consensus ownership (in which case `is_deleted = true` and the
+/// owner fields capture the *prior* state so the row can subtract from running
+/// aggregates).
+///
+/// Owner kinds we record: `AddressOwner` (fast-path) and `ConsensusAddressOwner`.
+/// Coins with `ObjectOwner`/`Shared`/`Immutable` never produce records here —
+/// those don't count toward `address.balance` per the chain's semantics.
+#[derive(Debug, Serialize)]
+pub struct CoinBalanceRecord {
+    pub tx_digest: String,
+    pub object_id: String,
+    /// `AddressOwner` | `ConsensusAddressOwner` (when `is_deleted = false`),
+    /// or the prior owner_kind (when `is_deleted = true`).
+    pub owner_kind: String,
+    /// Hex address of the owner — wallet for AddressOwner, consensus owner
+    /// SuiAddress for ConsensusAddressOwner.
+    pub owner_id: String,
+    /// Canonical Coin marker type, e.g. `0x2::sui::SUI`.
+    pub coin_type: String,
+    /// Raw balance after this change (or prior balance when `is_deleted = true`).
+    pub balance: String,
+    pub is_deleted: bool,
     pub checkpoint_seq: String,
     pub timestamp_ms: String,
 }
